@@ -55,8 +55,8 @@ on:
   # 手动发版口。平时 RELEASE_ENABLED 是关的（见 gate 那段的说明），发版流程是：
   #   ① 打开发版开关 → ② 从这里 Run workflow → ③ 发完立刻把开关关掉。
   #
-  # 版本号由 run_number 决定，人在发之前不需要预知它是 47 还是 48；tag 是**发完之后**
-  # 才打的（见 archive.yml），所以这里既不读也不要求任何 tag。
+  # 版本号来自 package.json 的 version，发版前就知道（不必等 Actions 跑完才回填 tag）；
+  # tag 仍是**发完之后**才打的（见 archive.yml），所以这里既不读也不要求任何 tag。
   #
   # 为什么必须有这条：开关打开后如果只能等下一次 push master 才触发，那唯一能做的事
   # 就是"造一个空提交"——等于为了发版主动污染历史。而且开源后 master 会接收合并，
@@ -72,8 +72,17 @@ concurrency:
 
 env:
   SIGNING_KEY_PRESENT: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
-  # 版本号形态 0.<minor>.<run_number>：minor 手工推进（体现语义化主次），补丁位取 run_number 保唯一。
-  VERSION: 0.4.${{ github.run_number }}
+  # VERSION 刻意**不在这里定义**：它必须跟随 package.json 的 version，而不是由
+  # github.run_number 推导。三个 job 各自在开头读一次并写进 $GITHUB_ENV。
+  #
+  # 为什么改（2026-11-08，实测）：原先是 `0.4.${{ github.run_number }}`，在同一仓库里
+  # 单调递增没问题。但 run_number 是**每仓库 × 每 workflow** 的计数，一换仓库就从 1 重算——
+  # 重建仓库这次实测 release.yml 首次运行 number=1，下一版会算出 0.4.2，比线上 0.4.46 还低，
+  # 会被下面的单调性闸直接挡死，**发版彻底发不出去**。这不是理论风险，是已经发生的。
+  #
+  # 改成读 package.json 的另一个好处：版本号变成**显式、可 review 的一行提交**，
+  # 正是「拉 version/0.4.47-xxx 分支时人就定了版本号」那套流程的落点。
+  # 代价：每次发版前必须把 package.json 的 version 改到高于线上；忘了改会被闸拦住并明确提示。
   # 分发根：编译期注入的更新源、manifest 里所有 url 的前缀，全部由它派生——换域名只改这一处。
   DIST_BASE: https://dl.xiaobenben.net
   OSS_BUCKET: xiaobenben-dl-prod
@@ -99,8 +108,7 @@ jobs:
     # 发版开关：只有仓库变量 RELEASE_ENABLED=true 时才允许发版。
     #
     # 为什么需要这道闸：push 即发版的前提是「只有维护者能推 master」。仓库公开后，
-    # master 会接收合并，而 run_number 型版本号一旦在新仓库从 1 起算，首个 run 会产出
-    # 比现网更低的版本号并覆盖生产 channels/stable.json —— 版本倒挂不可回滚。
+    # master 会接收合并——一个改错别字的 PR 合并就会让全量用户重下 91MB。
     # 打开方式：Settings → Secrets and variables → Actions → Variables → New variable。
     if: vars.RELEASE_ENABLED == 'true'
     runs-on: ubuntu-latest
@@ -108,6 +116,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: cli
+      # 版本号真源 = package.json。刻意只用 grep/sed，不依赖 bun 或 node：
+      # 下面几个 guard 拼的是「绝不静默出错」，多引入一个运行时依赖就多一个失败点。
+      - name: 读取版本号（真源：package.json）
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' cli/package.json \
+              | sed -E 's/.*"([^"]+)"$/\1/')
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::package.json 的 version「$v」不是 X.Y.Z 形式，拒绝发版"
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "本次版本号：$v"
       - name: "Guard: 签名私钥缺失时明确失败（否则发不出客户端认可的清单）"
         if: env.SIGNING_KEY_PRESENT != 'true'
         run: |
@@ -128,9 +150,9 @@ jobs:
         working-directory: cli
         run: bun install --backend copyfile
       # 版本单调性闸：单文件 exe 的自更新是**只升不降**的客户端行为，而 CDN 的 latest/
-      # 会被本次发版覆盖。一旦 VERSION 因任何原因（仓库重建导致 run_number 归零、
-      # minor 位手工改错、重复触发）变得不高于线上，就是一次**静默的版本倒挂**：
+      # 会被本次发版覆盖。一旦 VERSION 变得不高于线上，就是一次**静默的版本倒挂**：
       # 已经升上去的用户再也收不到更新，且不可回滚——回退版本号会被客户端拒装。
+      # 版本号现在来自 package.json，最常见的触发方式就是「改了代码忘了改 version」。
       # 读不到线上清单时只警告不阻断：首次发版、CDN 抖动都不该挡住发版本身。
       - name: "Guard: 版本号必须高于线上（防倒挂）"
         shell: bash
@@ -144,13 +166,19 @@ jobs:
             exit 0
           fi
           echo "线上版本：$online　本次：$VERSION"
+          hint() {
+            echo "::error::版本号来自 package.json 的 version 字段。"
+            echo "::error::把它改到高于线上（$online）的版本再提交，例如 0.4.$((${online##*.} + 1))"
+          }
           if [ "$VERSION" = "$online" ]; then
             echo "::error::版本号 $VERSION 与线上完全相同——重发会覆盖生产清单"
+            hint
             exit 1
           fi
           top=$(printf '%s\n%s\n' "$online" "$VERSION" | sort -V | tail -1)
           if [ "$top" != "$VERSION" ]; then
             echo "::error::版本号 $VERSION 低于线上 $online——版本倒挂不可回滚，已阻断"
+            hint
             exit 1
           fi
           echo "✓ 版本号单调递增"
@@ -212,6 +240,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: cli
+      - name: 读取版本号（真源：package.json）
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' cli/package.json \
+              | sed -E 's/.*"([^"]+)"$/\1/')
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::package.json 的 version「$v」不是 X.Y.Z 形式，拒绝发版"
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "本次版本号：$v"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
@@ -229,7 +269,9 @@ jobs:
         run: |
           set -euo pipefail
           BT=$(date -u '+%Y-%m-%d %H:%M')
-          sed -i.bak "s#export const VERSION = \".*\";#export const VERSION = \"${{ env.VERSION }}\";#" src/build-meta.ts
+          # $VERSION 来自上一步写入 $GITHUB_ENV 的值（shell 展开），刻意不写成
+          # ${{ env.VERSION }} —— 表达式在 job 启动时就求值完了，读不到 GITHUB_ENV。
+          sed -i.bak "s#export const VERSION = \".*\";#export const VERSION = \"$VERSION\";#" src/build-meta.ts
           sed -i.bak "s#export const BUILD_TIME = \".*\";#export const BUILD_TIME = \"${BT}\";#" src/build-meta.ts
           sed -i.bak "s#export const UPDATE_URL_DEFAULT = \".*\";#export const UPDATE_URL_DEFAULT = \"${{ env.DIST_BASE }}/channels/stable.json\";#" src/build-meta.ts
           rm -f src/build-meta.ts.bak
@@ -371,6 +413,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: cli
+      - name: 读取版本号（真源：package.json）
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' cli/package.json \
+              | sed -E 's/.*"([^"]+)"$/\1/')
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::package.json 的 version「$v」不是 X.Y.Z 形式，拒绝发版"
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "本次版本号：$v"
       # 本 job 只跑 tools/*.ts，它们仅依赖 node: 内置模块 —— 刻意不装 node_modules
       - uses: oven-sh/setup-bun@v2
         with:

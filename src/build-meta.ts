@@ -11,7 +11,9 @@ import { createHash } from "node:crypto";
 
 export const PRODUCT_NAME = "小本本";
 export const PRODUCT_EN = "xiaobenben";
-export const VERSION = "0.4.43";
+// 本地开发的占位值：CI 发版时会被 sed 替换成 package.json 里的 version（真源在那里）。
+// 这里跟着改成当前版本，只是为了让本地直接构建出的产物不至于声称自己是个旧版本。
+export const VERSION = "0.4.47";
 export const BUILD_TIME = "2026-10-24 04:32";
 export const VENDOR = "世纪之城（广州）信息科技有限公司";
 export const VENDOR_SHORT = "SJi";

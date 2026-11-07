@@ -1,6 +1,6 @@
 {
   "name": "xbb-cli",
-  "version": "0.1.0",
+  "version": "0.4.47",
   "description": "面向 AI 的个人记忆库客户端 · local-first · Bun 单文件可执行 · MCP stdio",
   "license": "AGPL-3.0-only",
   "type": "module",

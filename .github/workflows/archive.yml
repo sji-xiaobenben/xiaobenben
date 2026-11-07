@@ -12,9 +12,9 @@
 #   拆开后 tag 退化成纯标签，想什么时候打、补几个、指向哪个历史 commit 都行，都不会
 #   碰线上。代价只有一个：tag 名必须和 CDN 上实际发布的版本号对得上，对不上直接失败。
 #
-# 版本号怎么来：release.yml 用 0.<minor>.<run_number>，人发版前**不知道**下一次是 47
-# 还是 48。所以 tag 只能是发完之后打的——去 Actions 里看这次实际发的是哪个号，再
-# git tag -s vX.Y.Z <那次发版的提交>。这也正是本文件不参与发版的前提。
+# 版本号怎么来：release.yml 读 package.json 的 version，所以**发版前就知道**这次是哪个号
+# （package.json 里那一行就是版本号）。tag 名必须与之完全一致，否则本流水线会失败。
+# tag 仍然建议发完再打：先确认 CDN 上的 stable.json 已经指向新版本，再 git tag -s 锚定。
 # ─────────────────────────────────────────────────────────────────────────────
 name: Archive
 
@@ -76,7 +76,8 @@ jobs:
             echo "::error::两种可能，先分清再动手："
             echo "::error::  ① tag 名与实际发布版本不一致（tag=v${VERSION}，但线上没有这个号）"
             echo "::error::  ② 这个版本早于 0.4.47 —— 版本目录自带校验清单是从 0.4.47 起才有的，更早的版本无法归档"
-            echo "::error::版本号由 run_number 生成，请到 Actions → Release 的运行记录里核对这次实际发的号。"
+            echo "::error::版本号来自 package.json 的 version。对照一下：tag 是 v${VERSION}，"
+            echo "::error::就去 CDN 的 releases/v${VERSION}/ 看有没有产物；没有就是 tag 打错了号。"
             exit 1
           fi
           # 清单前几行是 # 注释，剔掉后每行是 `<sha256>  <文件名>` —— 正好是 sha256sum -c 的输入格式
