@@ -346,7 +346,7 @@ jobs:
             ( cd .ort-stage && python -m zipfile -c "../xbb-ort-${{ matrix.art }}.zip" onnxruntime-node )
           fi
           ls -l "xbb-ort-${{ matrix.art }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.art }}
           # darwin-x64 没有 ort 旁路包（上游无该平台原生库）⇒ 这类平台会命中
