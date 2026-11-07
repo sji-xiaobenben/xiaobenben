@@ -113,7 +113,7 @@ jobs:
     if: vars.RELEASE_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: cli
       # 版本号真源 = package.json。刻意只用 grep/sed，不依赖 bun 或 node：
@@ -237,7 +237,7 @@ jobs:
             ext: ""
             external: "--external onnxruntime-node"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: cli
       - name: 读取版本号（真源：package.json）
@@ -410,7 +410,7 @@ jobs:
       contents: read    # checkout 读代码；建 Release 的权限已随存档迁到 archive.yml 一并收回
       id-token: write   # OIDC 换取阿里云短期凭据
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: cli
       - name: 读取版本号（真源：package.json）

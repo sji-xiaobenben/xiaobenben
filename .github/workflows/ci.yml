@@ -32,7 +32,7 @@ jobs:
         #   矩阵），它不消耗任何 macOS 分钟 ⇒ Mac 用户的更新通道完全不受影响。
         include: ${{ fromJSON(vars.CI_MACOS == 'true' && '[{"os":"macos-latest"}]' || '[]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
