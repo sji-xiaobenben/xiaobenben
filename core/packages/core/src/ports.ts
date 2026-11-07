@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 领域端口层：core 只定义"规则需要什么"，IO 实现由各端注入——
  * cli 注入 SQLite / server 注入 PG+RLS / 私有化同 server。"个人还是组织"不是代码分支。

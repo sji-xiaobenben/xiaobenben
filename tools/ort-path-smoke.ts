@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * ORT 原生库路径冒烟（2026-10-23，对应 v0.4.40 在 Windows 11 上 `xbb mcp` 段错误）
  *

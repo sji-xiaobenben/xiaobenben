@@ -1,0 +1,40 @@
+# 依赖自动更新策略
+#
+# 为什么只开 weekly + 分组：
+#   本项目的依赖里有 onnxruntime-node（解压 288MB、内含全平台二进制）这类重包，
+#   逐个依赖开 PR 会天天刷屏，而每个 PR 都要跑 Windows 矩阵（计费 ×2）。
+#   把 minor+patch 归成一个 PR、major 单独走，既不漏补丁，又不淹没维护者。
+#
+# 为什么 major 不自动合并：单文件 exe 打包对依赖的 native 二进制布局很敏感，
+#   大版本升级必须在本地跑 `bun run build:linux` 验产物，不能靠 CI 绿灯判断。
+#
+# fork 来的 PR 与本项无关；Dependabot 的 PR 由 cla.yml 显式跳过（见该文件 if 条件）。
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"

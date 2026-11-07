@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 首启静默下载——模型获取基建（与推理运行时解耦，先落"下载"这一半）。
  *

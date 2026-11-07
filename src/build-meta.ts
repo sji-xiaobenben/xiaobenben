@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 构建元数据 —— 产品版本与版权署名的单一来源。
  * BUILD_TIME 在每次正式编译前更新（发布脚本/手工），同时作为构建指纹的输入：

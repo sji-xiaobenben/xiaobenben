@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 本地向量推理（个人版直上，2026-10-04 定稿）。
  * 实现：bge-small-zh-v1.5 INT8 + 纯 JS WordPiece。

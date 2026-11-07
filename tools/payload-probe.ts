@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 载荷（文件记忆 V1）**真机产物**探针：驱动【已安装的 xbb 可执行文件】跑完整 MCP 协议，
  * XBB_HOME 隔离在临时目录，**不碰真实个人库**。

@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 同步内置依赖：`../core/packages/core` → `core/packages/core`
  *
@@ -45,6 +48,33 @@ function writeVendored(commit: string): void {
   );
 }
 
+const SPDX_HEADER = [
+  "// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial",
+  "// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)",
+].join("\n");
+
+/**
+ * 上游 core 仓不带许可头，而内置副本要随本仓以 AGPL 发布——每个文件都得自证许可，
+ * 否则 OEM 客户做开源合规审查时只能靠目录推断。所以头由**本仓注入**，上游保持原样。
+ * 幂等：已含 SPDX 的文件原样返回（顺便护住手工改过的文件）。
+ */
+function withSpdx(text: string): string {
+  if (text.includes("SPDX-License-Identifier")) return text;
+  const shebang = text.match(/^#![^\n]*\n/);
+  if (shebang) return shebang[0] + SPDX_HEADER + "\n\n" + text.slice(shebang[0].length);
+  return SPDX_HEADER + "\n\n" + text;
+}
+
+function injectSpdx(dir: string): void {
+  for (const rel of walk(dir)) {
+    if (!rel.endsWith(".ts")) continue;
+    const p = join(dir, rel);
+    const before = readFileSync(p, "utf8");
+    const after = withSpdx(before);
+    if (after !== before) writeFileSync(p, after, "utf8");
+  }
+}
+
 /** 内置副本的 license 必须是单一 AGPL-3.0-only，不带上游仓的双许可表达式 */
 function normalizeLicense(): void {
   const p = join(DST, "package.json");
@@ -64,6 +94,7 @@ const mode = process.argv[2] === "check" ? "check" : "sync";
 if (mode === "sync") {
   rmSync(DST, { recursive: true, force: true });
   cpSync(SRC, DST, { recursive: true });
+  injectSpdx(DST);
   normalizeLicense();
   writeVendored(upstreamCommit());
   console.log(`[core:sync] 已同步 ${walk(DST).length} 个文件，上游 ${upstreamCommit()}`);
@@ -75,9 +106,16 @@ const srcFiles = walk(SRC);
 const dstFiles = existsSync(DST) ? walk(DST) : [];
 const onlySrc = srcFiles.filter((f) => !dstFiles.includes(f));
 const onlyDst = dstFiles.filter((f) => !srcFiles.includes(f));
-const changed = srcFiles.filter(
-  (f) => dstFiles.includes(f) && !readFileSync(join(SRC, f)).equals(readFileSync(join(DST, f))),
-);
+// 比对前先给上游内容补上同样的许可头——否则「本仓已注入、上游没有」会被误报成漂移
+// package.json 同理：副本的 license 被 normalizeLicense 规范化过，得按同一规则比。
+const sameContent = (f: string): boolean => {
+  let s = readFileSync(join(SRC, f), "utf8");
+  if (f.endsWith(".ts")) s = withSpdx(s);
+  if (f === "package.json") s = s.replace(/"license":\s*"[^"]*"/, LICENSE_LINE);
+  const d = readFileSync(join(DST, f), "utf8");
+  return Buffer.from(s).equals(Buffer.from(d));
+};
+const changed = srcFiles.filter((f) => dstFiles.includes(f) && !sameContent(f));
 const drift = onlySrc.length + onlyDst.length + changed.length;
 
 if (drift === 0) {

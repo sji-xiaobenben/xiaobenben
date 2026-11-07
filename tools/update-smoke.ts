@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 自更新冒烟：签名/验签同源性 + 篡改检出 + 版本比较 + 源地址语义。
  *

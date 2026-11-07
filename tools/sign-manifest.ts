@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 给更新清单 manifest.json 加 ed25519 签名。
  * 发布流水线（.github/workflows/release.yml）与本地应急脚本（tools/publish-local.sh）共用本工具。

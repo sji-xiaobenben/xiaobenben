@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /** PoC v2：compile 产物通过 exe 旁路 node_modules + createRequire 加载 onnxruntime-node */
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";

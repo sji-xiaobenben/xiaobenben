@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 管理页「无头浏览器实开」闸（可选，不进 test:ci —— CI 三平台未必有 Chrome）。
  *

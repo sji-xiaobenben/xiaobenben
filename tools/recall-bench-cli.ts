@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * recall-bench-cli：个人版检索命中率基准（与 server tools/recall-bench.ts 同一数据集）。
  * 目的：量化「个人版现状 → 若上向量」的增益上限，支撑「要不要上向量」的决策。

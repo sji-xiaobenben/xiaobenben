@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 旧版数据迁移：旧 memory.db（INTEGER 主键）→ 新 v3 schema（UUIDv7）。
  * 幂等：content_hash 去重，可中断重跑。旧库只读打开绝不写。

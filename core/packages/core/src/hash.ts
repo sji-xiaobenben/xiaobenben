@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * events 哈希链：org 内 org_seq 全序，hash = SHA-256(orgId|seq|prevHash|payloadHash)。
  * 账不可改只能增——append-only 哲学的凭证层兑现。

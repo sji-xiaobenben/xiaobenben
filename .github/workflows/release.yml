@@ -117,6 +117,33 @@ jobs:
       - name: Install
         working-directory: cli
         run: bun install --backend copyfile
+      # 版本单调性闸：单文件 exe 的自更新是**只升不降**的客户端行为，而 CDN 的 latest/
+      # 会被本次发版覆盖。一旦 VERSION 因任何原因（仓库重建导致 run_number 归零、
+      # minor 位手工改错、重复触发）变得不高于线上，就是一次**静默的版本倒挂**：
+      # 已经升上去的用户再也收不到更新，且不可回滚——回退版本号会被客户端拒装。
+      # 读不到线上清单时只警告不阻断：首次发版、CDN 抖动都不该挡住发版本身。
+      - name: "Guard: 版本号必须高于线上（防倒挂）"
+        shell: bash
+        run: |
+          set -uo pipefail
+          online=$(curl -fsS --max-time 30 "${DIST_BASE}/channels/stable.json?v=guard" 2>/dev/null \
+            | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+            | sed 's/.*"\([^"]*\)"$/\1/')
+          if [ -z "$online" ]; then
+            echo "::warning::读不到线上版本（首次发版或 CDN 不可达），跳过单调性检查"
+            exit 0
+          fi
+          echo "线上版本：$online　本次：$VERSION"
+          if [ "$VERSION" = "$online" ]; then
+            echo "::error::版本号 $VERSION 与线上完全相同——重发会覆盖生产清单"
+            exit 1
+          fi
+          top=$(printf '%s\n%s\n' "$online" "$VERSION" | sort -V | tail -1)
+          if [ "$top" != "$VERSION" ]; then
+            echo "::error::版本号 $VERSION 低于线上 $online——版本倒挂不可回滚，已阻断"
+            exit 1
+          fi
+          echo "✓ 版本号单调递增"
       - name: "Guard: 私钥必须与 exe 内置公钥配对（否则全量客户端静默拒更新）"
         working-directory: cli
         env:
@@ -334,6 +361,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: cli
+          # 要能看到 HEAD 上的 tag（存档那一步只认维护者签过名的 tag）。
+          # 仓库只有一个提交级别，拉全历史没有成本；fetch-tags 在浅克隆下并不可靠。
+          fetch-depth: 0
       # 本 job 只跑 tools/*.ts，它们仅依赖 node: 内置模块 —— 刻意不装 node_modules
       - uses: oven-sh/setup-bun@v2
         with:
@@ -599,12 +629,46 @@ jobs:
           lexe=$(curl -s -o /dev/null -w '%{http_code}' -I "${LATEST}/xbb-windows-x64.exe" || true)
           echo "latest/xbb-windows-x64.exe → HTTP $lexe"
           [ "$lexe" = "200" ] || echo "::warning::latest/ 下的产物取不到（HTTP $lexe），官网 Windows 下载会失败。"
+      # ── GitHub Release 只挂「维护者本机签名过的 tag」，CI 永不创建 tag ──────────
+      # 签名 tag 的全部价值只在有人质疑「这个版本真是作者发的吗」时兑现，而那靠的是
+      # tag 对象里的密码学签名。CI 建的 lightweight tag 没有签名，争议时你能拿出的
+      # 唯一论据是「有写权限的账号都能建它」—— 等于没有。
+      #
+      # 更棘手的是：同名 tag 只能有一个。CI 抢先建了未签名的 v0.4.47，之后想补签名，
+      # 唯一做法是删 tag 再重建 —— 而「删掉同名 tag 指向别的对象」恰好就是签名 tag
+      # 正要检测的那类动作。所以要么第一次就是签的，要么永远不签。
+      #
+      # 因此：HEAD 上有 vX.Y.Z tag → 用它建 Release；没有 → 跳过存档。
+      # 发版本身不受影响（CDN 才是权威分发通道），Release 的语义从「每次发版的副产品」
+      # 变成「维护者签过名的里程碑」。忘了打 tag 的代价只是少一份灾备存档。
+      - name: 探测 HEAD 上的版本 tag
+        id: tag
+        working-directory: cli
+        shell: bash
+        run: |
+          set -uo pipefail
+          found=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$found" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD 上没有版本 tag，跳过 GitHub Release 存档（CDN 已正常发布）"
+            echo "          要补存档：本地 git tag -s v$VERSION && git push origin v$VERSION"
+          else
+            echo "tag=$found" >> "$GITHUB_OUTPUT"
+            kind=$(git cat-file -t "$found")
+            # 只播报事实，不阻断：lightweight tag 照样存档，只是它当不了锚点。
+            if [ "$kind" = "tag" ] && git tag -v "$found" >/dev/null 2>&1; then
+              echo "✓ $found 是已签名 tag，验签通过"
+            else
+              echo "::notice::$found 类型为 $kind 且未在本 runner 验签（runner 上没有维护者公钥时也会走到这里）——可存档，但不构成签名锚点"
+            fi
+          fi
       - name: 存档到 GitHub Release（灾备，非下载源）
+        if: steps.tag.outputs.tag != ''
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
           files: |
             artifacts/*
             manifest.json
@@ -622,6 +686,6 @@ jobs:
             许可全文见本 Release 附带的 `LICENSE`，商标与第三方依赖声明见 `NOTICE`。
 
             **对应源码（Corresponding Source）**：
-            https://github.com/sji-xiaobenben/xbb-cli/tree/v${{ env.VERSION }}
+            https://github.com/sji-xiaobenben/xbb-cli/tree/${{ steps.tag.outputs.tag }}
 
             如需闭源分发、闭源对外服务或 OEM 预装，请另行取得商业许可（见 `LICENSE-Commercial.md`）。

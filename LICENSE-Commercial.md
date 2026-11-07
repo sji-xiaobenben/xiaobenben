@@ -1,5 +1,17 @@
 # 商业许可
 
+<!-- SPDX-License-Identifier: LicenseRef-Commercial -->
+
+> **关于 `LicenseRef-Commercial`**
+>
+> 本仓每个源码文件头都写着 `SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial`。
+> 前半段是标准 SPDX 许可编号；后半段 `LicenseRef-Commercial` 是 SPDX 规范定义的
+> **自定义许可引用**（`LicenseRef-` 前缀表示"本地定义的、不在 SPDX 许可清单里的许可"），
+> 其定义就是**本文档**——由世纪之城（广州）信息科技有限公司按双方合同提供的商业许可。
+>
+> 它没有、也不可能有 OSI 或 SPDX 的标准编号，所以不能用 `MIT`、`Apache-2.0` 之类的名字代替。
+> 扫描工具读到 `LicenseRef-Commercial` 时若提示"未知许可"，到此为止即为正解，不是配置错误。
+
 本仓库以 **GNU Affero 通用公共许可协议第 3 版（AGPL-3.0-only）** 发布。绝大多数使用者——
 个人、团队内部使用、企业内部部署、二次开发后仍以 AGPL 分发——**无需购买任何商业许可**。
 

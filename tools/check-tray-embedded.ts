@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 产物侧断言：托盘资产**真的嵌进了 exe**（`bun build --compile` 只打包 JS，按路径读的文件一律不进）。
  *

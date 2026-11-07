@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 个人库 SQLite schema（客户端形态：内含个人库，零登录开箱即用）。
  * 与 server 的 PG schema 同构（memories/terms/events 三件套）——"个人还是组织"不是代码分支。

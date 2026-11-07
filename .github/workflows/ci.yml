@@ -38,6 +38,21 @@ jobs:
           bun-version: 1.4.2
       - name: Install
         run: bun install --backend copyfile
+      # 许可头闸：每个 .ts 都要自证许可（SPDX 表达式），新增文件忘加就拦住。
+      # 没有这道闸，头会慢慢腐掉——而 OEM 客户做开源合规审查时是逐个文件看的。
+      # 只跑 Linux 一次：内容检查与平台无关，两平台各跑一遍纯属白烧分钟数。
+      - name: "许可闸：每个 .ts 都有 SPDX 头"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=$(grep -rL "SPDX-License-Identifier" src core tools --include='*.ts' --exclude-dir=node_modules || true)
+          if [ -n "$missing" ]; then
+            echo "::error::以下文件缺少 SPDX 许可头，请照抄 src/serve.ts 的前两行："
+            printf '%s\n' "$missing"
+            exit 1
+          fi
+          echo "✓ 全部 .ts 均带 SPDX 头"
       - name: Typecheck
         run: bun run typecheck
       - name: Test

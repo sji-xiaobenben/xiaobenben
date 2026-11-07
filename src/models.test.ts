@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * models 单测——首启静默下载契约。
  * 本地 Bun.serve 起源（端口 0），请求计数器验证「TTL 内零请求」「过期后零文件请求」。

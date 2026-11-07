@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 源码侧断言：`ADMIN_HTML` 那个**整段模板字面量**没有把内联 JS 吃掉。
  *

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 用系统默认浏览器打开管理窗口（三平台）。
  * 为什么是浏览器而非原生窗口：exe 壳一期不引 WebView 依赖，管理页自带于 serve 零打包成本；

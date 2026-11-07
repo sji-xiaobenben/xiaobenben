@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 import { describe, expect, test } from "bun:test";
 import { eventHash, payloadHash } from "./hash";
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 小本本 web 管理后台（serve 模式）
  * 零依赖：HTML 内嵌字符串 + Bun.serve API 路由

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /** UUIDv7（时间有序）——全线主键，禁自增。应用层生成。 */
 export type UUIDv7 = string & { readonly __brand: "uuidv7" };
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 情景层「翻页追溯」真机冒烟（V7，2026-10-24）：走完整 MCP 协议，隔离 XBB_HOME，不碰真实个人库。
  *

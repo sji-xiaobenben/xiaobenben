@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 写入管线。
  * 去重(内容哈希) → 密钥标记解析 → 设备盖章 → FTS(触发器自动) → 扩展词 → 实体 → 链接 → 延续链 → 指令窗口/晋升

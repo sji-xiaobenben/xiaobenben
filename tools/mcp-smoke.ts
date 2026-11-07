@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * MCP stdio 真机冒烟：模拟 AI 宿主走完整协议（initialize → tools/list → write/search/directives/episodes → inbox/forget）。
  * 工具面合并后版本：断言 20 工具超集（含 episodes、成员目录、补链、可见范围）。

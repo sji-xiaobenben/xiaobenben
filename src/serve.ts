@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 本地服务装配：healthz / stats / verify / report / 管理窗口页。
  * 纪律：只监听 127.0.0.1（个人库默认态）；端口 17630 固定。

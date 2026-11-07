@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 个人库存储实现：core 端口的 SQLite 注入端。
  * 纪律：一切变更走 events 哈希链（append-only）；memories 遗忘=墓碑不删除。

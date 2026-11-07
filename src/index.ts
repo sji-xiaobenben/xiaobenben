@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * xbb-cli — 个人客户端壳。
  * 本地库 SQLite 永远零登录；17630 端口；MCP stdio 工具面。

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 客户端会话采集（V8）真机冒烟：全部用**合成夹具**，不读真实客户端库、不碰个人库。
  *

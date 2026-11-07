@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /** PoC：bun + onnxruntime-node 推理验证（用本机已下载的 bge 模型） */
 import { join } from "node:path";
 import { homedir } from "node:os";

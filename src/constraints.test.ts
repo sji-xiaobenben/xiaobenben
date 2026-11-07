@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 域地图（constraint domain map）单测 —— 2026-10-07 恢复。
  * 覆盖：目录模式（写前归并）＋ 词群模式（IDF 加权 × 域聚合）＋ 系统级契约不进地图 ＋ 习惯单列。

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * API 错误码化 + zh-CN/en-US 词表第一天抽离，代码零硬编码中文。
  * 新增错误必须先加码再接线。

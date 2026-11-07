@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 数据位置唯一真源：程序装在 C 盘，记忆库允许放别的盘，而**程序永远知道库在哪**。
  *

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 组织事件长连接（前半段：`xbb.exe 常驻服务经 SSE 长连接收事件`）。
  *

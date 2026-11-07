@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * searchProactive 评测：标注用例（应命中/应静默/已知边界）+ 360 条规模压力 + 计时。
  * 纯查询评测（不触发 push），隔离实例，跑完即清。

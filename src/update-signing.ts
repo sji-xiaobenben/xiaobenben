@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 发版私钥的处理单一真源——签名工具（tools/sign-manifest.ts）与
  * 流水线自检（tools/check-signing-key.ts）共用，避免两处各写一份解析逻辑。

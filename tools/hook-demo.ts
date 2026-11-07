@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 主动记忆推送效果演示：隔离实例（独立 XBB_HOME + 端口），真实走完全链路。
  * 用法: bun run tools/hook-demo.ts

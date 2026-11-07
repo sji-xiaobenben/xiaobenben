@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * MCP stdio 服务（本地 AI 宿主的接入面）。
  * 工具 description 英文（写入路由靠 AI 宿主意图判断）。

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 云端接入层（个人上云 / 协议唤起）：六工具按 profile 路由本地/云端。
  * 设计：MCP 工具语义对 AI 宿主零变化——后端可替换（LocalBackend=本地 SQLite，

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 组装自更新清单 manifest.json——CI 的 publish job 与本地应急发版
  * （tools/publish-local.sh）共用同一份逻辑，杜绝「两条路各算各的 sha256」。

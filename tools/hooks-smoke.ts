@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * 钩子适配器冒烟（六宿主通用版 xbb-hook.mjs）：
  * 隔离 serve → 种子记忆 → stdin JSON 形态与 argv JSON 形态（Codex）真跑适配器

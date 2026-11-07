@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * bench-ascii：标识符/编号/凭据占位类查询基准（cli 端）。
  * 这类查询是词法通道的核心价值区（随机 token 无语义、向量天然弱），

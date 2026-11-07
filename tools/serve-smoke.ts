@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
+
 /**
  * serve 协议级冒烟：headless 拉起 → healthz/stats/verify/ui 四断言 → 收杀。
  * 原理同 mcp-smoke：CI 三平台真跑，不 mock。
