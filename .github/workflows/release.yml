@@ -53,8 +53,10 @@ on:
       # ⚠️ 别把构建输入搬进来（见文首注释）——tools/ 里只放「不改变产物」的开发工具
       - "tools/**"
   # 手动发版口。平时 RELEASE_ENABLED 是关的（见 gate 那段的说明），发版流程是：
-  #   ① 本地 git tag -s vX.Y.Z → ② 先 push tag、再 push master → ③ 打开发版开关
-  #   → ④ 从这里 Run workflow（选 master 或该 tag）→ ⑤ 发完立刻把开关关掉。
+  #   ① 打开发版开关 → ② 从这里 Run workflow → ③ 发完立刻把开关关掉。
+  #
+  # 版本号由 run_number 决定，人在发之前不需要预知它是 47 还是 48；tag 是**发完之后**
+  # 才打的（见 archive.yml），所以这里既不读也不要求任何 tag。
   #
   # 为什么必须有这条：开关打开后如果只能等下一次 push master 才触发，那唯一能做的事
   # 就是"造一个空提交"——等于为了发版主动污染历史。而且开源后 master 会接收合并，
@@ -363,15 +365,12 @@ jobs:
     runs-on: ubuntu-latest
     # job 级 permissions 会整体覆盖工作流级，所以两个 scope 都要显式列出
     permissions:
-      contents: write   # 建 GitHub Release 存档
+      contents: read    # checkout 读代码；建 Release 的权限已随存档迁到 archive.yml 一并收回
       id-token: write   # OIDC 换取阿里云短期凭据
     steps:
       - uses: actions/checkout@v4
         with:
           path: cli
-          # 要能看到 HEAD 上的 tag（存档那一步只认维护者签过名的 tag）。
-          # 仓库只有一个提交级别，拉全历史没有成本；fetch-tags 在浅克隆下并不可靠。
-          fetch-depth: 0
       # 本 job 只跑 tools/*.ts，它们仅依赖 node: 内置模块 —— 刻意不装 node_modules
       - uses: oven-sh/setup-bun@v2
         with:
@@ -443,10 +442,16 @@ jobs:
           # AGPL §6：对外分发二进制时，接收者必须能取得许可副本与对应源码的获取方式。
           # CDN 是主要下载通道（官网 → latest/），只发 exe 不发许可等于没履行这项义务。
           # 刻意**不进 manifest**：签名载荷只覆盖二进制，塞进来会让清单与程序对不上。
-          echo "── 1b) 许可副本 ──"
+          echo "── 1b) 许可副本 + 商标/依赖声明 ──"
           "$OSSBIN" cp -f --region "$OSS_REGION" \
             --cache-control "public,max-age=31536000,immutable" \
             "${GITHUB_WORKSPACE}/cli/LICENSE" "${PREFIX}/LICENSE"
+          # NOTICE 一并上 CDN：它声明商标归属与第三方依赖，归档流水线（archive.yml）
+          # 会把它挂进 GitHub Release。只发 LICENSE 不发 NOTICE 的话，商标声明就只存在于
+          # git 仓库里，而绝大多数用户是从 CDN 拿东西的。
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "public,max-age=31536000,immutable" \
+            "${GITHUB_WORKSPACE}/cli/NOTICE" "${PREFIX}/NOTICE"
 
           echo "── 2) 固定入口清单（必须不缓存，否则整条更新通道会被 CDN 冻住）──"
           "$OSSBIN" cp -f --region "$OSS_REGION" \
@@ -504,6 +509,12 @@ jobs:
           echo "── 3) 上传 SHA256SUMS.txt ──"
           "$OSSBIN" cp -f --region "$OSS_REGION" \
             --cache-control "no-cache" SHA256SUMS.txt "${LDIR}/SHA256SUMS.txt"
+
+          # 同时写进**版本目录**：archive.yml 靠它才知道「这个版本的目录里有哪些文件」。
+          # 在此之前版本目录里只有几个裸 exe——既没法逐文件校验，也没法回拉归档。
+          # 版本目录不可变（路径含版本号、永不覆盖），所以缓存按 immutable 给。
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "public,max-age=31536000,immutable" SHA256SUMS.txt "${VDIR}/SHA256SUMS.txt"
 
           # 许可副本同步到稳定别名目录，官网下载页可直接指向 latest/LICENSE。
           # 不进 SHA256SUMS.txt：那份清单由已签名清单生成，只描述二进制。
@@ -637,63 +648,12 @@ jobs:
           lexe=$(curl -s -o /dev/null -w '%{http_code}' -I "${LATEST}/xbb-windows-x64.exe" || true)
           echo "latest/xbb-windows-x64.exe → HTTP $lexe"
           [ "$lexe" = "200" ] || echo "::warning::latest/ 下的产物取不到（HTTP $lexe），官网 Windows 下载会失败。"
-      # ── GitHub Release 只挂「维护者本机签名过的 tag」，CI 永不创建 tag ──────────
-      # 签名 tag 的全部价值只在有人质疑「这个版本真是作者发的吗」时兑现，而那靠的是
-      # tag 对象里的密码学签名。CI 建的 lightweight tag 没有签名，争议时你能拿出的
-      # 唯一论据是「有写权限的账号都能建它」—— 等于没有。
+      # GitHub Release 的存档已拆到 archive.yml，由 tag push 触发，本 job 不再建 Release。
       #
-      # 更棘手的是：同名 tag 只能有一个。CI 抢先建了未签名的 v0.4.47，之后想补签名，
-      # 唯一做法是删 tag 再重建 —— 而「删掉同名 tag 指向别的对象」恰好就是签名 tag
-      # 正要检测的那类动作。所以要么第一次就是签的，要么永远不签。
-      #
-      # 因此：HEAD 上有 vX.Y.Z tag → 用它建 Release；没有 → 跳过存档。
-      # 发版本身不受影响（CDN 才是权威分发通道），Release 的语义从「每次发版的副产品」
-      # 变成「维护者签过名的里程碑」。忘了打 tag 的代价只是少一份灾备存档。
-      - name: 探测 HEAD 上的版本 tag
-        id: tag
-        working-directory: cli
-        shell: bash
-        run: |
-          set -uo pipefail
-          found=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-          if [ -z "$found" ]; then
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            echo "::notice::HEAD 上没有版本 tag，跳过 GitHub Release 存档（CDN 已正常发布）"
-            echo "          要补存档：本地 git tag -s v$VERSION && git push origin v$VERSION"
-          else
-            echo "tag=$found" >> "$GITHUB_OUTPUT"
-            kind=$(git cat-file -t "$found")
-            # 只播报事实，不阻断：lightweight tag 照样存档，只是它当不了锚点。
-            if [ "$kind" = "tag" ] && git tag -v "$found" >/dev/null 2>&1; then
-              echo "✓ $found 是已签名 tag，验签通过"
-            else
-              echo "::notice::$found 类型为 $kind 且未在本 runner 验签（runner 上没有维护者公钥时也会走到这里）——可存档，但不构成签名锚点"
-            fi
-          fi
-      - name: 存档到 GitHub Release（灾备，非下载源）
-        if: steps.tag.outputs.tag != ''
-        continue-on-error: true
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          files: |
-            artifacts/*
-            manifest.json
-            LICENSE
-            NOTICE
-          generate_release_notes: true
-          body: |
-            下载请走 CDN：${{ env.DIST_BASE }}/releases/v${{ env.VERSION }}/
+      # 为什么解耦（2026-11-08 定）：tag 一旦兼任「发版触发器」，就同时背上了两个致命包袱——
+      #   ① 漏打 tag 等于追溯断链（那个版本从此没有名字，用户报 bug 无法回到那版代码）；
+      #   ② 补打历史 tag 会**重新发一次版**，所以根本不敢补。
+      # 拆开之后 tag 退化成纯标签：想什么时候打就什么时候打、想补几个补几个、指向任意
+      # 历史 commit 都行，都不会影响线上。发版主线保持「push master 即发版」，于是
+      # master 永远等于线上，不会出现「几个版本堆在 master 上没发」的中间态。
 
-            本 Release 仅作存档/灾备。国内直连 GitHub 下载慢，不作为分发通道。
-
-            ---
-
-            **许可**：本版本以 GNU Affero 通用公共许可协议第 3 版（AGPL-3.0-only）发布，
-            许可全文见本 Release 附带的 `LICENSE`，商标与第三方依赖声明见 `NOTICE`。
-
-            **对应源码（Corresponding Source）**：
-            https://github.com/sji-xiaobenben/xbb-cli/tree/${{ steps.tag.outputs.tag }}
-
-            如需闭源分发、闭源对外服务或 OEM 预装，请另行取得商业许可（见 `LICENSE-Commercial.md`）。

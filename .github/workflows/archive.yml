@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 存档流水线：把**已经发布到 CDN 的某个版本**挂成 GitHub Release。
+#
+# 与 release.yml 的分工（2026-11-08 拆开）：
+#   release.yml  —— push master 触发，构建三平台产物并发到 CDN。这是发版主线，
+#                   master 永远等于线上，不存在「几个版本堆着没发」的中间态。
+#   archive.yml  —— 本文件。tag push 触发，只做归档，**不构建、不发 CDN**。
+#
+# 为什么必须拆开（tag 不能兼任发版触发器）：
+#   · 漏打 tag 就等于追溯断链——那个版本从此没有名字，用户报 bug 无法回到那版代码。
+#   · 更糟的是补打：tag 触发发版时，补一个历史 tag 会**重新发一次版**，所以根本不敢补。
+#   拆开后 tag 退化成纯标签，想什么时候打、补几个、指向哪个历史 commit 都行，都不会
+#   碰线上。代价只有一个：tag 名必须和 CDN 上实际发布的版本号对得上，对不上直接失败。
+#
+# 版本号怎么来：release.yml 用 0.<minor>.<run_number>，人发版前**不知道**下一次是 47
+# 还是 48。所以 tag 只能是发完之后打的——去 Actions 里看这次实际发的是哪个号，再
+# git tag -s vX.Y.Z <那次发版的提交>。这也正是本文件不参与发版的前提。
+# ─────────────────────────────────────────────────────────────────────────────
+name: Archive
+
+on:
+  push:
+    # 收紧到 v + 数字：`v*` 会把 `version/0.4.47-261108` 这种分支风格的名字也匹配进来。
+    tags: ["v[0-9]*"]
+  # 补存档入口：给某个历史上发过、但当时忘了打 tag 的版本补一个 Release。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要归档的 tag（形如 v0.4.47，必须等于当时实际发布的版本号）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析并校验 tag
+        id: t
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then tag="$INPUT_TAG"; else tag="$REF_NAME"; fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 vX.Y.Z 形式，收到「$tag」"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "✓ 归档 $tag"
+
+      # 刻意**不重新构建**：CDN 上那份产物就是用户手上那一份，从那里回拉才能保证存档与
+      # 线上字节一致。重新构建会因为依赖树、时间戳、签名随机数而产出不同字节——那就不是
+      # "存档"，而是"另一份构建产物"，连签名清单都对不上。
+      #
+      # 以版本目录里的 SHA256SUMS.txt 为准，而不是去猜产物命名规则、也不依赖 stable.json
+      # （后者只反映「当前最新」，补归档历史版本时会指错版本）。
+      # 这份清单由已签名的 manifest 生成，是「这个版本目录里有什么」的权威声明。
+      - name: 从 CDN 回拉该版本的产物
+        shell: bash
+        env:
+          DIST_BASE: https://dl.xiaobenben.net
+          VERSION: ${{ steps.t.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${DIST_BASE}/releases/v${VERSION}"
+          mkdir -p dl && cd dl
+          if ! curl -fsS --max-time 60 "${base}/SHA256SUMS.txt" -o SHA256SUMS.txt; then
+            echo "::error::CDN 上取不到 ${base}/SHA256SUMS.txt"
+            echo "::error::两种可能，先分清再动手："
+            echo "::error::  ① tag 名与实际发布版本不一致（tag=v${VERSION}，但线上没有这个号）"
+            echo "::error::  ② 这个版本早于 0.4.47 —— 版本目录自带校验清单是从 0.4.47 起才有的，更早的版本无法归档"
+            echo "::error::版本号由 run_number 生成，请到 Actions → Release 的运行记录里核对这次实际发的号。"
+            exit 1
+          fi
+          # 清单前几行是 # 注释，剔掉后每行是 `<sha256>  <文件名>` —— 正好是 sha256sum -c 的输入格式
+          grep -v '^#' SHA256SUMS.txt > checks.txt
+          while read -r _sha f; do
+            [ -z "$f" ] && continue
+            echo "  ↓ $f"
+            curl -fsS --max-time 600 "${base}/${f}" -O
+          done < checks.txt
+          for f in LICENSE NOTICE; do
+            if ! curl -fsSL --max-time 60 "${base}/${f}" -o "$f"; then
+              rm -f "$f"
+              echo "::warning::CDN 上缺 ${f}——不影响归档，但 AGPL 要求的许可副本会不全"
+            fi
+          done
+          ls -lh
+
+      # 完整性闸：清单里登记的 sha256 必须与下载到的字节逐条对上。
+      # 这一步同时挡住「CDN 内容被改写」和「大文件下载被截断」——单文件 90MB 级别，
+      # 截断不会报错，只会静默产出一个坏包，而那个坏包会被当成"官方存档"发出去。
+      - name: 校验下载字节与清单登记的 sha256
+        working-directory: dl
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum -c checks.txt
+          rm -f checks.txt
+          echo "✓ 全部产物与清单逐条一致"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.t.outputs.tag }}
+          name: ${{ steps.t.outputs.tag }}
+          files: dl/*
+          generate_release_notes: true
+          body: |
+            下载请走 CDN：https://dl.xiaobenben.net/releases/v${{ steps.t.outputs.version }}/
+
+            本 Release 仅作存档/灾备。国内直连 GitHub 下载慢，不作为分发通道。
+
+            ---
+
+            **许可**：本版本以 GNU Affero 通用公共许可协议第 3 版（AGPL-3.0-only）发布，
+            许可全文见本 Release 附带的 `LICENSE`，商标与第三方依赖声明见 `NOTICE`。
+
+            **对应源码（Corresponding Source）**：
+            https://github.com/sji-xiaobenben/xbb-cli/tree/${{ steps.t.outputs.tag }}
+
+            如需闭源分发、闭源对外服务或 OEM 预装，请另行取得商业许可（见 `LICENSE-Commercial.md`）。
