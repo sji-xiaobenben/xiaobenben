@@ -52,6 +52,14 @@ on:
       - "signatures/**"
       # ⚠️ 别把构建输入搬进来（见文首注释）——tools/ 里只放「不改变产物」的开发工具
       - "tools/**"
+  # 手动发版口。平时 RELEASE_ENABLED 是关的（见 gate 那段的说明），发版流程是：
+  #   ① 本地 git tag -s vX.Y.Z → ② 先 push tag、再 push master → ③ 打开发版开关
+  #   → ④ 从这里 Run workflow（选 master 或该 tag）→ ⑤ 发完立刻把开关关掉。
+  #
+  # 为什么必须有这条：开关打开后如果只能等下一次 push master 才触发，那唯一能做的事
+  # 就是"造一个空提交"——等于为了发版主动污染历史。而且开源后 master 会接收合并，
+  # 谁也不想为了发版去 merge 一个无意义的 PR。
+  workflow_dispatch:
 
 permissions:
   contents: write
