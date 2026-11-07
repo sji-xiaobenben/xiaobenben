@@ -119,7 +119,7 @@ jobs:
           bun-version: 1.4.2
       # onnxruntime-node 的 npm 包内含**全部**平台的二进制（解压后 288MB）——
       # 不缓存的话每次发版要在 4 个 job 里各下载一遍。
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: cli/node_modules
           key: ${{ runner.os }}-bun-${{ hashFiles('cli/bun.lock') }}
@@ -215,7 +215,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: cli/node_modules
           key: ${{ runner.os }}-bun-${{ hashFiles('cli/bun.lock') }}
