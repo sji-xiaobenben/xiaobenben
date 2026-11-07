@@ -1,0 +1,34 @@
+{
+  "name": "xbb-cli",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts serve",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run bundle:ort && bun test src/home.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
+    "build:win": "bun build --compile --outfile dist/xbb-windows-x64.exe src/index.ts",
+    "build:linux": "bun build --compile --target=bun-linux-x64 --outfile dist/xbb-linux-x64 src/index.ts",
+    "build:mac-arm": "bun build --compile --target=bun-darwin-arm64 --outfile dist/xbb-darwin-arm64 src/index.ts",
+    "build:mac-intel": "bun build --compile --target=bun-darwin-x64 --external onnxruntime-node --outfile dist/xbb-darwin-x64 src/index.ts",
+    "bundle:ort": "bun build --target=bun --format=cjs --external \"*.node\" --outfile node_modules/onnxruntime-node/dist/ort-bundle.cjs src/ort-bundle-entry.ts",
+    "test:ci": "bun run bundle:ort && bun test src/home.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
+    "update:assemble": "bun run tools/assemble-manifest.ts",
+    "update:sign": "bun run tools/sign-manifest.ts",
+    "update:verify": "bun run tools/verify-manifest.ts",
+    "update:keycheck": "bun run tools/check-signing-key.ts",
+    "publish:local": "bash tools/publish-local.sh",
+    "core:sync": "bun run tools/sync-core.ts sync",
+    "core:check": "bun run tools/sync-core.ts check"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "onnxruntime-node": "^1.30.0",
+    "systray2": "^2.1.4",
+    "zod": "^3.25"
+  }
+}

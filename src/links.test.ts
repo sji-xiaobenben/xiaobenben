@@ -1,0 +1,250 @@
+/**
+ * 赫布链接线（2026-10-18）的回归钉子。
+ *
+ * 这套测试存在的理由：`reinforce()` 曾经「写好了但全仓 0 调用点、也没有衰减」，
+ * 而**没有任何测试会失败** —— 死代码最擅长的事就是安静地待着。所以这里每条断言
+ * 都钉一个「看起来正常但其实是假的」的反面：
+ *   - 权重真的会**变**（不是恒 0.5）
+ *   - 只对**共现对**变（不是碰过的节点所有边都变）
+ *   - 会**衰减**（不是只涨不落，最后全表 1.0）
+ *   - 会**封顶**（不会溢出 1.0）
+ *   - **不新建**边（不会把库越查越大）
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, test } from "bun:test";
+import { PersonalStore } from "./store";
+import { getMemory, getRelated } from "./memory-tools";
+import { onRecalled, reinforceCooccurrence, CO_OCCUR_MAX_NODES } from "./recall-feedback";
+import { initSchemaV2, LINK_HALF_LIFE_DAYS, migrateV6 } from "./schema";
+
+const dir = mkdtempSync(join(tmpdir(), "xbb-links-test-"));
+const store = PersonalStore.open(join(dir, "test.db"));
+const db = store.db;
+
+afterAll(() => {
+  db.close();
+  // Windows 上 WAL 句柄释放有延迟，临时目录删不掉不影响断言（系统会回收）
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* 临时目录残留，忽略 */
+  }
+});
+
+/** 建一条记忆 + 可选出边（relation 固定 related_to，关系类型不影响强度逻辑） */
+async function mem(content: string, links: Array<{ toId: string; relation?: string }> = []) {
+  const rec = await store.deliver({ spaceId: "sp-1", actor: "ai-host", content });
+  for (const l of links) {
+    db.prepare("INSERT INTO memory_links (from_id, to_id, relation, weight, hits, last_at, created_at) VALUES (?,?,?,?,?,?,?)")
+      .run(rec.id, l.toId, l.relation ?? "related_to", 0.5, 0, null, new Date().toISOString());
+  }
+  return rec.id;
+}
+
+const linkRow = (from: string, to: string) =>
+  db.prepare("SELECT weight, hits, last_at FROM memory_links WHERE from_id = ? AND to_id = ?").get(from, to) as
+    | { weight: number; hits: number; last_at: string | null }
+    | undefined;
+const effOf = (from: string, to: string) =>
+  (db.prepare("SELECT eff FROM memory_links_eff WHERE from_id = ? AND to_id = ?").get(from, to) as { eff: number }).eff;
+const count = (sql: string) => (db.query(sql).get() as { n: number }).n;
+
+describe("schema v6：列与视图", () => {
+  test("新库带 last_at / hits，且 user_version ≥ 6", () => {
+    const cols = (db.query("PRAGMA table_info(memory_links)").all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("last_at");
+    expect(cols).toContain("hits");
+    const v = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    expect(v).toBeGreaterThanOrEqual(6);
+  });
+
+  test("有效权重视图存在且可读", () => {
+    const r = db.query("SELECT count(*) AS n FROM memory_links_eff").get() as { n: number };
+    expect(typeof r.n).toBe("number");
+  });
+
+  test("老库（无 last_at 列）升级后被补齐，存量边从升级时刻起算", () => {
+    const legacy = PersonalStore.open(join(dir, "legacy.db")).db;
+    db.exec("PRAGMA foreign_keys = OFF");
+    // 退回 v5 的形状：先拆视图（它引用 last_at，否则 DROP COLUMN 会被拒），再删两列
+    legacy.exec("DROP VIEW IF EXISTS memory_links_eff");
+    legacy.exec("ALTER TABLE memory_links DROP COLUMN last_at");
+    legacy.exec("ALTER TABLE memory_links DROP COLUMN hits");
+    legacy.exec("PRAGMA user_version = 5");
+    legacy
+      .prepare("INSERT INTO memory_links (from_id, to_id, relation, weight, created_at) VALUES (?,?,?,?,?)")
+      .run("a", "b", "related_to", 0.5, new Date().toISOString());
+
+    migrateV6(legacy);
+
+    const row = legacy.prepare("SELECT last_at, hits FROM memory_links WHERE from_id = 'a'").get() as {
+      last_at: string | null;
+      hits: number;
+    };
+    // 关键：不能是 NULL。若按 created_at 起算，半年前建的边一升级就跌到 0.008，等于迁移把历史关联全废了
+    expect(row.last_at).toBeTruthy();
+    expect(row.hits).toBe(0);
+    const eff = (legacy.prepare("SELECT eff FROM memory_links_eff WHERE from_id = 'a'").get() as { eff: number }).eff;
+    expect(eff).toBeCloseTo(0.5, 2);
+    legacy.close();
+  });
+});
+
+describe("共现强化：只认「一起出现过」的边", () => {
+  test("同一次召回里两端都在 ⇒ 强度上升、hits+1、last_at 落时间", async () => {
+    const b = await mem("共现测试-A 的邻居");
+    const a = await mem("共现测试-A", [{ toId: b }]);
+
+    expect(linkRow(a, b)!.weight).toBe(0.5);
+    onRecalled(db, [a, b]);
+
+    const after = linkRow(a, b)!;
+    expect(after.weight).toBeGreaterThan(0.5);
+    expect(after.hits).toBe(1);
+    expect(after.last_at).toBeTruthy();
+  });
+
+  test("只有一端出现 ⇒ 边纹丝不动（这是「按共现对」与「按节点」的分水岭）", async () => {
+    const x = await mem("共现测试-B 的邻居");
+    const y = await mem("共现测试-B", [{ toId: x }]);
+    const other = await mem("共现测试-B 的另一个不相关条目");
+
+    // y 在召回集中、x 不在 ⇒ 不是共现。旧实现（from_id=? OR to_id=?）会照样强化 x—y
+    onRecalled(db, [y, other]);
+
+    expect(linkRow(y, x)!.weight).toBe(0.5);
+    expect(linkRow(y, x)!.hits).toBe(0);
+  });
+
+  test("单条召回不强化（一条记忆没有「对」）", async () => {
+    const p = await mem("单条测试-邻居");
+    const q = await mem("单条测试", [{ toId: p }]);
+    onRecalled(db, [q]);
+    expect(linkRow(q, p)!.weight).toBe(0.5);
+    expect(linkRow(q, p)!.hits).toBe(0);
+  });
+
+  test("只强化已存在的边，绝不凭共现新建", async () => {
+    const m1 = await mem("建边测试-1");
+    const m2 = await mem("建边测试-2");
+    const before = count("SELECT count(*) AS n FROM memory_links");
+    expect(reinforceCooccurrence(db, [m1, m2])).toBe(0);
+    expect(count("SELECT count(*) AS n FROM memory_links")).toBe(before);
+  });
+
+  test("共现强化不越界到「本次召回集之外」的边", async () => {
+    const out = await mem("越界测试-集外");
+    const i1 = await mem("越界测试-集内1", [{ toId: out }]);
+    const i2 = await mem("越界测试-集内2", [{ toId: i1 }]);
+    const before = linkRow(i1, out)!.weight;
+    onRecalled(db, [i1, i2]); // out 不在集内 ⇒ i1→out 不该动
+    expect(linkRow(i1, out)!.weight).toBe(before);
+    expect(linkRow(i2, i1)!.weight).toBeGreaterThan(0.5);
+  });
+
+  test("节点数超过上限时按榜前截断（防两两组合爆炸）", () => {
+    expect(CO_OCCUR_MAX_NODES).toBeGreaterThanOrEqual(5);
+    expect(CO_OCCUR_MAX_NODES).toBeLessThanOrEqual(50);
+  });
+});
+
+describe("衰减：涨上去的会掉下来", () => {
+  test("30 天半衰：60 天不共现 ⇒ 有效权重只剩 1/4", async () => {
+    const n = await mem("衰减测试-邻居");
+    const m = await mem("衰减测试", [{ toId: n }]);
+    db.prepare("UPDATE memory_links SET weight = 1.0, last_at = datetime('now', '-60 days') WHERE from_id = ? AND to_id = ?").run(m, n);
+    expect(effOf(m, n)).toBeCloseTo(0.25, 2);
+    expect(LINK_HALF_LIFE_DAYS).toBe(30);
+  });
+
+  test("衰减只影响有效权重，不擅自改写存量 weight（读时算，不跑定时任务）", async () => {
+    const n = await mem("衰减测试2-邻居");
+    const m = await mem("衰减测试2", [{ toId: n }]);
+    db.prepare("UPDATE memory_links SET weight = 1.0, last_at = datetime('now', '-60 days') WHERE from_id = ? AND to_id = ?").run(m, n);
+    expect(linkRow(m, n)!.weight).toBe(1.0);
+    expect(effOf(m, n)).toBeLessThan(0.3);
+  });
+
+  test("时钟回拨保护：last_at 落在未来时权重不被放大", async () => {
+    const n = await mem("时钟测试-邻居");
+    const m = await mem("时钟测试", [{ toId: n }]);
+    db.prepare("UPDATE memory_links SET weight = 0.6, last_at = datetime('now', '+90 days') WHERE from_id = ? AND to_id = ?").run(m, n);
+    expect(effOf(m, n)).toBeCloseTo(0.6, 6);
+  });
+
+  test("久置的边共现一次就回满基线，不再被 0.2 门槛挡着", async () => {
+    const n = await mem("复活测试-邻居");
+    const m = await mem("复活测试", [{ toId: n }]);
+    db.prepare("UPDATE memory_links SET weight = 0.5, last_at = datetime('now', '-180 days') WHERE from_id = ? AND to_id = ?").run(m, n);
+    expect(effOf(m, n)).toBeLessThan(0.05); // 衰到看不见
+    onRecalled(db, [m, n]);
+    expect(effOf(m, n)).toBeGreaterThan(0.5); // 一次共现 ⇒ 回到基线之上
+  });
+});
+
+describe("封顶与分布", () => {
+  test("反复共现不会超过 1.0", async () => {
+    const n = await mem("封顶测试-邻居");
+    const m = await mem("封顶测试", [{ toId: n }]);
+    for (let i = 0; i < 100; i++) onRecalled(db, [m, n]);
+    expect(linkRow(m, n)!.weight).toBeLessThanOrEqual(1.0 + 1e-9);
+    expect(linkRow(m, n)!.hits).toBe(100);
+  });
+
+  test("stats.links 能证明权重真的在动（p50 不是恒 0.5）", async () => {
+    const s = store.stats().links;
+    expect(s.total).toBeGreaterThan(0);
+    expect(s.reinforced).toBeGreaterThan(0);
+    expect(s.byRelation.some((r) => r.relation === "related_to")).toBe(true);
+    expect(s.weight.max).toBeGreaterThan(0.5);
+    expect(typeof s.avgDegree).toBe("number");
+  });
+});
+
+describe("读路径：邻居用有效权重与出度归一", () => {
+  test("getRelated 只返回过门槛的邻居，且带有效权重", async () => {
+    const b = await mem("邻居读路径-B");
+    const a = await mem("邻居读路径-A", [{ toId: b }]);
+    const rel = getRelated(db, a);
+    expect(rel.map((r) => r.id)).toContain(b);
+    const hit = rel.find((r) => r.id === b)!;
+    expect(hit.weight).toBeGreaterThan(0.4);
+    expect(hit.weight).toBeLessThanOrEqual(0.5); // 刚建、未强化、无衰减
+  });
+
+  test("衰到门槛以下的边不再出现在邻居里", async () => {
+    const b = await mem("邻居衰减-B");
+    const a = await mem("邻居衰减-A", [{ toId: b }]);
+    db.prepare("UPDATE memory_links SET weight = 0.5, last_at = datetime('now', '-365 days') WHERE from_id = ? AND to_id = ?").run(a, b);
+    expect(getRelated(db, a).map((r) => r.id)).not.toContain(b);
+  });
+
+  test("枢纽节点霸榜被抑制：同等强度下，度数低的邻居排在前面", async () => {
+    const hub = await mem("枢纽-中心");
+    const leaf = await mem("枢纽-叶子");
+    // hub 连 20 条无关记忆，leaf 只连 1 条
+    for (let i = 0; i < 20; i++) {
+      const extra = await mem(`枢纽-填充${i}`);
+      db.prepare("INSERT INTO memory_links (from_id, to_id, relation, weight, hits, last_at, created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(hub, extra, "related_to", 0.5, 0, null, new Date().toISOString());
+    }
+    const me = await mem("枢纽-考问者");
+    db.prepare("INSERT INTO memory_links (from_id, to_id, relation, weight, hits, last_at, created_at) VALUES (?,?,?,?,?,?,?)")
+      .run(me, hub, "related_to", 0.5, 0, null, new Date().toISOString());
+    db.prepare("INSERT INTO memory_links (from_id, to_id, relation, weight, hits, last_at, created_at) VALUES (?,?,?,?,?,?,?)")
+      .run(me, leaf, "related_to", 0.5, 0, null, new Date().toISOString());
+
+    const rel = getRelated(db, me);
+    expect(rel[0]!.id).toBe(leaf);
+  });
+
+  test("getMemory.links 展示的是有效权重", async () => {
+    const b = await mem("getMemory-B");
+    const a = await mem("getMemory-A", [{ toId: b }]);
+    const g = getMemory(db, a) as { links: { id: string; weight: number }[] };
+    const l = g.links.find((x) => x.id === b)!;
+    expect(l.weight).toBeGreaterThan(0.4);
+  });
+});

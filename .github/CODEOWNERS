@@ -1,0 +1,21 @@
+# 默认审查人 = 版权方维护者账号。
+# ⚠️ owner 必须是 **user 或 org/team**；只写 org 名（@sji-xiaobenben）会被判为无效 owner，
+#    而无效的 CODEOWNERS 整份都不生效 —— 也就是「配了等于没配」，且不会报错。
+*                                   @hongzhi2009hh
+
+# 治理与法律文件：只能由维护者本人改动
+/.github/                           @hongzhi2009hh
+/CLAs/                              @hongzhi2009hh
+/signatures/                        @hongzhi2009hh
+/LICENSE                            @hongzhi2009hh
+/LICENSE-Commercial.md              @hongzhi2009hh
+/NOTICE                             @hongzhi2009hh
+
+# 依赖与构建元数据：外部 PR 不得改动
+/package.json                       @hongzhi2009hh
+/bun.lock                           @hongzhi2009hh
+/src/build-meta.ts                  @hongzhi2009hh
+/tools/                             @hongzhi2009hh
+
+# 内置副本：真源在私有仓，改动一律由维护者同步
+/core/                              @hongzhi2009hh

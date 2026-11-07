@@ -1,0 +1,627 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# cli 发版流水线—— push master 即发布。没有 tag 步骤、没有手动 dispatch、没有审批。
+#
+# 链路：GitHub runner 编译三平台 → OSS 私有桶 → CDN dl.xiaobenben.net → 用户 exe 自更新
+#
+# 为什么放 OSS+CDN，而不是 GitHub / ECS（2026-10-04 逐条否决后拍板）：
+#   · GitHub Release 放包：国内用户下载太慢，否决。
+#   · ECS 放包：几个用户同时下载就会挤占生产记忆读写的带宽，否决。
+#   · OSS 外网流出按量计费、前面挂 CDN 既能加速又能用量封顶——唯一同时满足"国内快"与
+#     "不挤占云端记忆"的方案。GitHub Release 仍保留，但降级为**灾备存档**，不是分发通道。
+#
+# 为什么不用 paths 白名单（只监听 src/**）：
+#   白名单天然会漏，而漏发的代价是静默的——2026-10-04 刚发生过"改了没发"（c617f7e 已推送、
+#   CI 全绿、线上仍跑旧版）。所以默认方向必须是"一律发"，只对**确定不影响产物**的路径走
+#   paths-ignore。方向反了就是把已知事故类型重新引入。
+#
+#   两个豁免方向的判据（2026-10-16 补"为什么值得收窄"与收窄后的护栏）：
+#     · `**/*.md` / `LICENSE` / `docs/**` —— 纯文档，不进二进制。
+#     · `tools/**` —— 开发工具（smoke / bench / 清单签名脚本）。产物只由
+#       `bun build --compile src/index.ts` 决定，tools 一个字节都不进 exe。
+#       ⚠️ 唯一的例外曾是 `tools/poc/bundle-entry.ts`（onnxruntime 打包入口，**是构建输入**），
+#       2026-10-16 已移到 `src/ort-bundle-entry.ts`。**今后任何构建输入都不许放 tools/**，
+#       否则就是这个豁免要防的那类静默漏发。
+#       ⚠️ `tools/check-tray-embedded.ts` 是**产物查验闸**（改变的是"怎么验"，不是产物本身）：
+#       改它不触发发版，新版查验逻辑会在下一次发版时生效 —— 这是可接受的。
+#
+#   为什么值得收窄：客户端自更新是**全量下载**（单文件 exe 91MB），而"推了就发"意味着
+#   每 push 一次全体用户就重下 91MB。只改了文档或工具却发版，是纯自伤的出网账单。
+#
+# 密钥纪律：
+#   · 签名私钥只在 GitHub Secrets（UPDATE_SIGNING_KEY）与本机 ~/.xbb-keys，绝不落 git。
+#   · 阿里云凭据走 OIDC 免密钥联合身份（RAM 签发短期 STS），仓库/runner 里不存任何 AK/SK。
+#   · 出包前强制自检"私钥与内置公钥配对"——密钥轮换而 build-meta 忘了同步，会让全量客户端
+#     静默拒更新，而服务端、CI、上传全部正常，没有任何其他环节会报错。
+# ─────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "LICENSE-Commercial.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - "docs/**"
+      # 治理类文件不进二进制：workflow / CODEOWNERS / PR 模板 / CLA 与签署记录。
+      # 仓库公开后这些路径会被 PR 频繁改动，不豁免的话每次改动都要发一次全量版。
+      - ".github/**"
+      - "CLAs/**"
+      - "signatures/**"
+      # ⚠️ 别把构建输入搬进来（见文首注释）——tools/ 里只放「不改变产物」的开发工具
+      - "tools/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cli
+  cancel-in-progress: false
+
+env:
+  SIGNING_KEY_PRESENT: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
+  # 版本号形态 0.<minor>.<run_number>：minor 手工推进（体现语义化主次），补丁位取 run_number 保唯一。
+  VERSION: 0.4.${{ github.run_number }}
+  # 分发根：编译期注入的更新源、manifest 里所有 url 的前缀，全部由它派生——换域名只改这一处。
+  DIST_BASE: https://dl.xiaobenben.net
+  OSS_BUCKET: xiaobenben-dl-prod
+  # ossutil 2.0 按「环境变量」取名，不写进命令行：OSS_REGION / OSS_ENDPOINT /
+  # OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET / OSS_SESSION_TOKEN。
+  # OSS_REGION 看似没被引用，实际是 ossutil 隐式消费的——切到加速端点后必然要用它定位区域，
+  # 所以上传命令里仍显式传 --region，避免它被当成死配置删掉。
+  OSS_REGION: cn-shenzhen
+  # OSS 端点。整条链路上唯一的未知数就是**跨境上行速率**：runner 在境外，而桶在深圳，
+  # server 侧实测过 runner → 深圳自建 registry 只有 ~30KB/s。本次单次上传约 292MB，
+  # 若实测过慢：到 OSS 控制台开通「传输加速」，再把仓库变量 OSS_ENDPOINT_HOST 设为
+  # oss-accelerate.aliyuncs.com 即可（只改变量，不改代码，也不用重发版）。
+  OSS_ENDPOINT_HOST: ${{ vars.OSS_ENDPOINT_HOST || 'oss-cn-shenzhen.aliyuncs.com' }}
+  # ossutil 固定版本 + 固定校验和：不从公网抓一个会变的二进制直接执行
+  OSSUTIL_VERSION: "2.2.1"
+  OSSUTIL_SHA256: fbf1026bd383a5d9bee051cd64a6226c730357ba569491f7c7b91af66560ef1d
+
+jobs:
+  # ── 闸门：测试套件只跑一次。
+  # 原先 typecheck/测试塞在每个矩阵分支里，三平台各跑一遍 = 白烧两份分钟数；
+  # 收进独立 job 后既省钱，又能把完整测试套件（含自更新契约测试）变成发布前置条件。
+  gate:
+    # 发版开关：只有仓库变量 RELEASE_ENABLED=true 时才允许发版。
+    #
+    # 为什么需要这道闸：push 即发版的前提是「只有维护者能推 master」。仓库公开后，
+    # master 会接收合并，而 run_number 型版本号一旦在新仓库从 1 起算，首个 run 会产出
+    # 比现网更低的版本号并覆盖生产 channels/stable.json —— 版本倒挂不可回滚。
+    # 打开方式：Settings → Secrets and variables → Actions → Variables → New variable。
+    if: vars.RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cli
+      - name: "Guard: 签名私钥缺失时明确失败（否则发不出客户端认可的清单）"
+        if: env.SIGNING_KEY_PRESENT != 'true'
+        run: |
+          echo "::error::UPDATE_SIGNING_KEY 未配置——manifest 签不出来，已验证签名的客户端会 fail-closed 拒绝一切更新。"
+          echo "::error::配置路径：repo Settings → Secrets and variables → Actions → New secret UPDATE_SIGNING_KEY（ed25519 PKCS#8 PEM 全文）"
+          exit 1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      # onnxruntime-node 的 npm 包内含**全部**平台的二进制（解压后 288MB）——
+      # 不缓存的话每次发版要在 4 个 job 里各下载一遍。
+      - uses: actions/cache@v4
+        with:
+          path: cli/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('cli/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - name: Install
+        working-directory: cli
+        run: bun install --backend copyfile
+      - name: "Guard: 私钥必须与 exe 内置公钥配对（否则全量客户端静默拒更新）"
+        working-directory: cli
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: bun run tools/check-signing-key.ts
+      - name: Typecheck
+        working-directory: cli
+        run: bun run typecheck
+      - name: 测试套件（含自更新契约测试 update-smoke）
+        working-directory: cli
+        run: bun run test:ci
+
+  build:
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 改为在 ubuntu 上交叉编译：GitHub 计分倍率 Linux 1× / Windows 2× / macOS 10×，
+          # 原先三平台矩阵里 macOS 一项就吃掉约 79% 的分钟数。bun 的 --target 交叉编译已实测可用
+          # （本机交叉出 darwin-arm64 后验 Mach-O 头 = cffaedfe0c000001 通过）。
+          # 代价：darwin 产物无法在 ubuntu 上执行，冒烟退化为验文件头（见下方 Smoke 步骤）。
+          - os: windows-latest
+            target: bun-windows-x64
+            art: windows-x64
+            ext: .exe
+            external: ""
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            art: linux-x64
+            ext: ""
+            external: ""
+          - os: ubuntu-latest
+            target: bun-darwin-arm64
+            art: darwin-arm64
+            ext: ""
+            external: ""
+          # ── darwin-x64（Intel Mac）：2026-10-08 补回 ──────────────────────────────
+          # ⚠️ 上游 onnxruntime-node **不发 darwin/x64 原生绑定**。平台矩阵实测只有
+          #    darwin/arm64、linux/{arm64,x64}、win32/{arm64,x64}（用「bun 安装缓存解包目录」
+          #    与「编译期报错」双重实证；ONNX Runtime 官方亦已停发 macOS x86_64 产物）。
+          #    由此派生两条不可省略的差异：
+          #      · external：必须把 onnxruntime-node 外部化，否则 bun 展开 binding.js 里那句
+          #        `require(`../bin/napi-v6/${process.platform}/${process.arch}/...node`)` 时
+          #        会解析 darwin/x64 而直接 `Could not resolve` —— **编译期就失败**（本机实测）。
+          #      · 无向量旁路：该平台没有原生库可打（见下方 Pack 步骤的跳过分支），故不产出
+          #        xbb-ort-darwin-x64.zip。向量检索按 embedder.ts 的「双降级」红线退化为
+          #        纯词法检索，其余功能完整 —— 这是设计内的降级，不是残缺。
+          - os: ubuntu-latest
+            target: bun-darwin-x64
+            art: darwin-x64
+            ext: ""
+            external: "--external onnxruntime-node"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cli
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: cli/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('cli/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - name: Install
+        working-directory: cli
+        run: bun install --backend copyfile
+      - name: Inject VERSION + BUILD_TIME + 更新源（编译期注入）
+        working-directory: cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT=$(date -u '+%Y-%m-%d %H:%M')
+          sed -i.bak "s#export const VERSION = \".*\";#export const VERSION = \"${{ env.VERSION }}\";#" src/build-meta.ts
+          sed -i.bak "s#export const BUILD_TIME = \".*\";#export const BUILD_TIME = \"${BT}\";#" src/build-meta.ts
+          sed -i.bak "s#export const UPDATE_URL_DEFAULT = \".*\";#export const UPDATE_URL_DEFAULT = \"${{ env.DIST_BASE }}/channels/stable.json\";#" src/build-meta.ts
+          rm -f src/build-meta.ts.bak
+          grep -E '^export const (VERSION|BUILD_TIME|UPDATE_URL_DEFAULT)' src/build-meta.ts
+      - name: Build onnxruntime bundle（PoC 定案：依赖树单文件 CJS + .node external）
+        working-directory: cli
+        run: bun build --target=bun --format=cjs --external "*.node" --outfile node_modules/onnxruntime-node/dist/ort-bundle.cjs src/ort-bundle-entry.ts
+      - name: Build 单文件产物
+        working-directory: cli
+        # matrix.external 仅 darwin-x64 非空：该平台无 onnx 原生绑定，不外部化则 bun 在
+        # 解析 binding.js 的 arch 路径段时就编译失败（其余平台为空串，命令行无影响）。
+        run: bun build --compile --target=${{ matrix.target }} ${{ matrix.external }} --outfile xbb-${{ matrix.art }}${{ matrix.ext }} src/index.ts
+      - name: Smoke（能跑的真跑；交叉编译产物退化为验文件头）
+        working-directory: cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          ART="xbb-${{ matrix.art }}${{ matrix.ext }}"
+          case "${{ matrix.target }}" in
+            bun-darwin-*)
+              # darwin 产物无法在本 runner 上执行。至少断言它是**目标架构**的 Mach-O，
+              # 拦住"产出了空壳/坏壳却照样发版"这种最贵的失败（用户装了启动不了）。
+              # 头 8 字节 = magic(4) + cputype(4，小端)：
+              #   magic    cffaedfe = MH_MAGIC_64
+              #   cputype  0c000001 = CPU_TYPE_ARM64  | CPU_ARCH_ABI64(0x01000000)
+              #            07000001 = CPU_TYPE_X86_64 | CPU_ARCH_ABI64(0x01000000)
+              # ⚠️ 别把架构验成"任意一种 Mach-O 就算过"——那正好放行架构搞反的产物：
+              #    Intel Mac 拿到 arm64 壳（或反之）都是装完启动不了，而这里不报错就发出去了。
+              case "${{ matrix.art }}" in
+                darwin-arm64) WANT="cffaedfe0c000001"; ARCH_DESC="arm64" ;;
+                darwin-x64)   WANT="cffaedfe07000001"; ARCH_DESC="x86_64" ;;
+                *) echo "::error::未登记的 darwin 产物段: ${{ matrix.art }}（补登记时须同步更新本断言）"; exit 1 ;;
+              esac
+              MAGIC=$(od -An -tx1 -N8 "$ART" | tr -d ' \n')
+              if [ "$MAGIC" != "$WANT" ]; then
+                echo "::error::$ART 不是有效的 darwin-$ARCH_DESC Mach-O（magic=$MAGIC，期望 $WANT）"
+                exit 1
+              fi
+              echo "✓ $ART 是 darwin-$ARCH_DESC Mach-O（交叉编译产物不可执行，故仅验头）"
+              # 顺带把 file(1) 的判断打进日志，便于人工复核"架构没搞反"
+              command -v file >/dev/null 2>&1 && file "$ART" || true
+              ;;
+            *)
+              chmod +x "$ART"
+              "./$ART" version
+              ;;
+          esac
+          # 托盘资产必须真的嵌进产物。这条是 2026-10-07「托盘在所有正式版里
+          # 从未起过」的回归闸：`bun build --compile` 只打包 JS，按路径读的 assets/ 与
+          # systray2 的 Go 二进制都不进 exe —— 而托盘的失败模式是**静默降级**，
+          # 跑 `version` 永远不会暴露它。纯字节比对，交叉编译的 darwin 产物也能查。
+          REST="${{ matrix.target }}"; REST="${REST#bun-}"; OSN="${REST%%-*}"
+          case "$OSN" in
+            windows) PLAT=win32 ;;
+            linux)   PLAT=linux ;;
+            darwin)  PLAT=darwin ;;
+            *) echo "::error::未知平台段: $OSN"; exit 1 ;;
+          esac
+          bun run tools/check-tray-embedded.ts "$ART" "$PLAT"
+      - name: Pack 向量旁路（只装本平台原生库）
+        working-directory: cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="${{ matrix.target }}"     # bun-windows-x64
+          REST="${T#bun-}"             # windows-x64
+          OSN="${REST%-*}"             # windows
+          ARN="${REST##*-}"            # x64
+          case "$OSN" in
+            windows) OSP=win32 ;;
+            linux)   OSP=linux ;;
+            darwin)  OSP=darwin ;;
+            *) echo "::error::未知平台段: $OSN"; exit 1 ;;
+          esac
+
+          P=node_modules/onnxruntime-node
+          # 上游 onnxruntime-node 不是每个「OS/arch」组合都发原生库：darwin/x64 就没有
+          # （实测平台矩阵只有 darwin/arm64、linux/{arm64,x64}、win32/{arm64,x64}）。
+          # 无原生库 ⇒ 该平台本就不存在可用的向量旁路，这里**跳过而非失败**：编译期已把
+          # onnxruntime-node 外部化，运行时 loadOrt() 取不到模块即按 embedder.ts 的
+          # 双降级红线退化为纯词法检索，其余功能完整。
+          if [ ! -d "$P/bin/napi-v6/$OSP/$ARN" ]; then
+            echo "── 跳过向量旁路：$OSP/$ARN 无 onnxruntime 原生库（上游未发布该组合）──"
+            echo "   ⇒ 不产出 xbb-ort-${{ matrix.art }}.zip；该平台向量检索退化为纯词法，其余功能不受影响。"
+            echo -n "   该 OS 现有组合："; ( cd "$P/bin/napi-v6/$OSP" && ls -1 | tr '\n' ' ' ) || true; echo
+            exit 0
+          fi
+          S=.ort-stage/onnxruntime-node
+          rm -rf .ort-stage
+          mkdir -p "$S/bin/napi-v6/$OSP"
+
+          cp -R "$P/dist" "$S/dist"
+          cp -R "$P/lib" "$S/lib"
+          cp "$P/package.json" "$S/package.json"
+          # 只拷本平台原生库：整包分发会让每个用户下载 288MB，其中 5/6 是自己平台用不到的。
+          cp -R "$P/bin/napi-v6/$OSP/$ARN" "$S/bin/napi-v6/$OSP/$ARN"
+
+          # 运行时解析路径写死在 dist/binding.js：require(`../bin/napi-v6/${platform}/${arch}/...`)
+          NEED="$S/bin/napi-v6/$OSP/$ARN/onnxruntime_binding.node"
+          if [ ! -f "$NEED" ]; then
+            echo "::error::旁路包缺 $NEED —— 用户解压后向量检索会直接失败"
+            exit 1
+          fi
+
+          echo "── 旁路包构成（stage vs 原始整包）──"
+          du -sh "$S" "$P"
+
+          if command -v zip >/dev/null 2>&1; then
+            # -y：把符号链接存成符号链接（darwin 包内 libonnxruntime.1.dylib 是软链，
+            # 解引用会凭空多出 44MB 重复内容）
+            ( cd .ort-stage && zip -q -r -y "../xbb-ort-${{ matrix.art }}.zip" onnxruntime-node )
+          else
+            # Windows runner 无 zip。python zipfile 不保留符号链接，但 win32 目录本就没有软链
+            ( cd .ort-stage && python -m zipfile -c "../xbb-ort-${{ matrix.art }}.zip" onnxruntime-node )
+          fi
+          ls -l "xbb-ort-${{ matrix.art }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.art }}
+          # darwin-x64 没有 ort 旁路包（上游无该平台原生库）⇒ 这类平台会命中
+          # "No files were found ... xbb-ort-darwin-x64.zip" 的**预期内**警告。
+          # 刻意保持 warn 而非 error：error 会把「上游不发该组合原生库」这一既有事实
+          # 变成每次发版都红，逼后人去绕闸门——那比一条已知警告更糟。
+          if-no-files-found: warn
+          path: |
+            cli/xbb-${{ matrix.art }}${{ matrix.ext }}
+            cli/xbb-ort-${{ matrix.art }}.zip
+          # artifact 只是 job 之间的中转，产物马上进 OSS —— 留 1 天足够
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # job 级 permissions 会整体覆盖工作流级，所以两个 scope 都要显式列出
+    permissions:
+      contents: write   # 建 GitHub Release 存档
+      id-token: write   # OIDC 换取阿里云短期凭据
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cli
+      # 本 job 只跑 tools/*.ts，它们仅依赖 node: 内置模块 —— 刻意不装 node_modules
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true   # 三个 artifact 摊平进一个目录，OSS 路径与清单都简单
+      - name: "Guard: 阿里云 OIDC 变量缺失时明确失败"
+        if: vars.ALIYUN_ROLE_ARN == '' || vars.ALIYUN_OIDC_PROVIDER_ARN == ''
+        run: |
+          echo "::error::缺少仓库变量 ALIYUN_ROLE_ARN / ALIYUN_OIDC_PROVIDER_ARN"
+          echo "::error::配置路径：repo Settings → Secrets and variables → Actions → Variables"
+          echo "::error::ALIYUN_ROLE_ARN        形如 acs:ram::<账号ID>:role/<角色名>"
+          echo "::error::ALIYUN_OIDC_PROVIDER_ARN 形如 acs:ram::<账号ID>:oidc-provider/<提供商名>"
+          exit 1
+      - name: 取阿里云短期凭据（OIDC 免密钥联合身份）
+        id: aliyun
+        uses: aliyun/configure-aliyun-credentials-action@v1.1.0
+        with:
+          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-expiration: 1800
+      - name: 组装 manifest.json（sha256/size 由各平台产物现算）
+        shell: bash
+        run: bun run cli/tools/assemble-manifest.ts artifacts "$VERSION" "${DIST_BASE}/releases/v${VERSION}" > manifest.json
+      - name: 签名 manifest（ed25519）
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: bun run cli/tools/sign-manifest.ts manifest.json
+      - name: 上传前本地验签（最后一道闸）
+        run: bun run cli/tools/verify-manifest.ts manifest.json
+      - name: 装 ossutil（固定版本 + 校验 sha256）
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-${OSSUTIL_VERSION}-linux-amd64.zip"
+          echo "${OSSUTIL_SHA256}  /tmp/ossutil.zip" | sha256sum -c -
+          rm -rf /tmp/ossutil-bin && mkdir -p /tmp/ossutil-bin
+          unzip -q -o /tmp/ossutil.zip -d /tmp/ossutil-bin
+          # 压缩包内是嵌套目录（ossutil-<ver>-linux-amd64/ossutil），路径不能写死
+          OSSBIN=$(find /tmp/ossutil-bin -type f -name ossutil | head -1)
+          [ -n "$OSSBIN" ] || { echo "::error::压缩包内找不到 ossutil"; exit 1; }
+          chmod +x "$OSSBIN"
+          echo "OSSBIN=$OSSBIN" >> "$GITHUB_ENV"
+          "$OSSBIN" version
+      - name: 上传到 CDN 源站（OSS 私有桶）
+        shell: bash
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          # ossutil 2.0 从环境变量取凭据：OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET / OSS_SESSION_TOKEN
+          # 刻意不用命令行 -i/-k/-t：那些会出现在进程列表与日志里
+          export OSS_ENDPOINT="https://${OSS_ENDPOINT_HOST}"
+          echo "端点: $OSS_ENDPOINT · 区域: $OSS_REGION"
+          PREFIX="oss://${OSS_BUCKET}/releases/v${VERSION}"
+
+          # ⚠️ ossutil 2.x 用 --cache-control 设 HTTP 缓存头；1.x 的 --meta 在 2.x 已被移除，
+          #    传了会直接 "Error: unknown flag: --meta" 而中断发布（2026-10-05 首次真发版实测踩到）。
+          echo "── 1) 版本化产物（路径含版本号，永不覆盖）—— $(date -u '+%H:%M:%SZ') ──"
+          "$OSSBIN" cp -r -f --region "$OSS_REGION" \
+            --cache-control "public,max-age=31536000,immutable" artifacts/ "$PREFIX/"
+
+          # AGPL §6：对外分发二进制时，接收者必须能取得许可副本与对应源码的获取方式。
+          # CDN 是主要下载通道（官网 → latest/），只发 exe 不发许可等于没履行这项义务。
+          # 刻意**不进 manifest**：签名载荷只覆盖二进制，塞进来会让清单与程序对不上。
+          echo "── 1b) 许可副本 ──"
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "public,max-age=31536000,immutable" \
+            "${GITHUB_WORKSPACE}/cli/LICENSE" "${PREFIX}/LICENSE"
+
+          echo "── 2) 固定入口清单（必须不缓存，否则整条更新通道会被 CDN 冻住）──"
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "no-cache" manifest.json "oss://${OSS_BUCKET}/channels/stable.json"
+
+          echo "── 3) 回读校验：确认落地的字节就是签过的那份 ──"
+          "$OSSBIN" cp -f --region "$OSS_REGION" "oss://${OSS_BUCKET}/channels/stable.json" /tmp/roundtrip.json
+          bun run cli/tools/verify-manifest.ts /tmp/roundtrip.json
+          cmp manifest.json /tmp/roundtrip.json
+          echo "✓ 回读字节与本地完全一致（完成于 $(date -u '+%H:%M:%SZ')）"
+      # latest/ = 官网下载页 / 安装文档 / AI 给用户指路的**唯一稳定地址**（不带版本号）。
+      # 起因：官网 /exe/ 曾是一批手工快照，与这里自动发布的产物分叉（用户被永久卡在旧版，
+      # 且照官方文档核对永远得出「已是最新」）。收敛为一个真源后，这类分叉在结构上不再可能。
+      # 缓存：/latest/ 在 CDN 侧配了 ttl=0（与 /channels/ 同法）——稳定别名必须实时，
+      #       否则它自己就会变成「永远旧版」，比没有更糟。
+      # 权限：发布角色只有 Put/Get，**没有 ListObjects** → 只能逐文件复制，不能 `cp -r`。
+      - name: 刷新 latest/ 稳定别名
+        shell: bash
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          export OSS_ENDPOINT="https://${OSS_ENDPOINT_HOST}"
+          VDIR="oss://${OSS_BUCKET}/releases/v${VERSION}"
+          LDIR="oss://${OSS_BUCKET}/latest"
+
+          # 校验清单从**已签名**的 manifest.json 生成（文件名取 url 的 basename）：
+          # 单一真源，杜绝「两处各写一份命名表 → 分叉 → 用户校验永远失败」。
+          # 先算出来，它同时就是下面那份"要发布哪些文件"的清单。
+          # 注意：SHA256SUMS.txt 只上传、绝不放进 artifacts/，否则 assemble-manifest
+          # 会因「未识别文件」直接 exit 1（那是刻意的防漏闸）。
+          echo "── 1) 生成 SHA256SUMS.txt（版本 ${VERSION}）──"
+          bun run cli/tools/gen-sha256sums.ts manifest.json > SHA256SUMS.txt
+
+          # ⚠️ 逐文件服务端复制，**刻意不用 `ossutil cp -r`**：
+          #    递归复制要先 ListObjectsV2 列举源前缀，而 OIDC 发布角色
+          #    XbbCliReleaseOssPolicy 只授了 Put/Get → 403
+          #    `AccessDenied: The bucket you access does not belong to you.`
+          #    （2026-10-06 Release #20 实测踩到；这条报错极具误导性，别去查桶归属、
+          #     也别去怀疑 OIDC 配置——就是缺 ListObjects）。
+          #    逐文件复制只需 GetObject(源) + PutObject(目标)，与既有权限完全吻合；
+          #    文件清单直接来自**已签名清单**，故不会漏发也不会多发。
+          #    仍必须是服务端复制（CopyObject）而非下载再上传：实测 27MB/1s、零跨境流量，
+          #    而 runner 的公网出口实测约 30KB/s，292MB 会拖死发布。
+          echo "── 2) 服务端逐文件复制 ${VDIR}/ → ${LDIR}/ ──"
+          while read -r _sha f; do
+            [ -z "$f" ] && continue
+            printf '  · %s\n' "$f"
+            "$OSSBIN" cp -f --region "$OSS_REGION" "${VDIR}/${f}" "${LDIR}/${f}"
+          done < <(grep -v '^#' SHA256SUMS.txt)
+
+          # 索引最后写：SHA256SUMS.txt 才是「latest/ 里现在有什么」的声明
+          echo "── 3) 上传 SHA256SUMS.txt ──"
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "no-cache" SHA256SUMS.txt "${LDIR}/SHA256SUMS.txt"
+
+          # 许可副本同步到稳定别名目录，官网下载页可直接指向 latest/LICENSE。
+          # 不进 SHA256SUMS.txt：那份清单由已签名清单生成，只描述二进制。
+          "$OSSBIN" cp -f --region "$OSS_REGION" "${VDIR}/LICENSE" "${LDIR}/LICENSE"
+
+          # 回读：latest/ 必须与本次版本**同源**。用两个探针，**都不依赖 `ossutil stat`**。
+          #
+          # ⚠️ 为什么弃用 `ossutil stat`（2026-10-06 Release #21 实测踩到）：
+          #    阿里云文档写明 stat 需要 oss:GetObject + **oss:GetObjectAcl** + **oss:GetBucketInfo**
+          #    三个权限；而发布角色 XbbCliReleaseOssPolicy **刻意只授** PutObject/GetObject，
+          #    资源还是对象级 `xiaobenben-dl-prod/*`——GetBucketInfo 是桶级 ARN，连匹配都谈不上。
+          #    后果：CI 里 stat 被拒、**stdout 全空**，校验对 6 个文件齐刷刷报「空 vs 空」；
+          #    而本机 AK 权限宽，同一段脚本本地跑得通 → 典型的「本地验证过、CI 必挂」假安全。
+          #    （同族教训：`cp -r` 需要 ListObjects，发布角色也没有，见上面第 2 步。）
+          #    纪律：**发布链路上的读操作只准用 GetObject；非要用别的权限，先怀疑自己的设计，
+          #    而不是去给最小角色加权限。**
+          echo "── 4) 回读校验 latest/ 与 releases/v${VERSION}/ 同源 ──"
+
+          # 探针 A（本体，只用 GetObject）：latest/SHA256SUMS.txt 必须与本地生成的那份**逐字节相同**。
+          # 它是「latest/ 里现在有什么」的声明；这一条不过，后面逐产物比对都无意义。
+          "$OSSBIN" cp -f --region "$OSS_REGION" "${LDIR}/SHA256SUMS.txt" "$RUNNER_TEMP/latest-SHA256SUMS.txt"
+          if ! cmp -s SHA256SUMS.txt "$RUNNER_TEMP/latest-SHA256SUMS.txt"; then
+            echo "::error::latest/SHA256SUMS.txt 与本地生成的不一致"
+            diff SHA256SUMS.txt "$RUNNER_TEMP/latest-SHA256SUMS.txt" || true
+            exit 1
+          fi
+          echo "  ✓ latest/SHA256SUMS.txt 与本地逐字节一致"
+
+          # 探针 B（用户真实路径，**零鉴权**）：从公网 CDN 的头比对 ETag + Content-Length。
+          # 比在 OSS 内部自比更强——它证明的是**用户实际会拿到什么**，且完全不吃 ossutil 的行为怪癖。
+          # 带 ?v=<版本> 是为了保证命中源站而不是读到 /releases/ 的长期缓存（缓存键含查询串）。
+          cdn_head() {  # $1 = 以 / 开头的路径 → 输出 "<etag> <content-length>"（取不到则空串）
+            { curl -fsS -I --max-time 30 "${DIST_BASE}$1?v=${VERSION}" 2>/dev/null || true; } \
+              | tr -d '\r' \
+              | awk 'tolower($1)=="etag:"{e=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s %s", e, l}'
+          }
+          fail=0
+          while read -r _sha f; do
+            [ -z "$f" ] && continue
+            # ⚠️ 2026-11-04 实测的假红：latest/ 的复核打的是 **CDN**，而 CDN 边缘第一次
+            #   回源几十 MB 的对象可能要几十秒。v0.4.45 那次就是「releases 有值、latest 空」
+            #   被判「不同源」，50 秒后复检全部一致 —— 产物一直是好的，红的是这个检查。
+            #   原来的「重试一次 sleep 2」挡不住这种量级的延迟，于是绿灯变噪音。
+            #   改法：退避重试到 ~63 秒；并且**把「取不到」和「取到了但对不上」分开报**——
+            #   前者是 CDN 时序问题，后者才是真的发错了。混成一句话，排障方向会完全错。
+            a=""; b=""
+            for i in 1 2 3 4 5 6; do
+              a=$(cdn_head "/releases/v${VERSION}/${f}" || true)
+              b=$(cdn_head "/latest/${f}" || true)
+              if [ -n "$a" ] && [ -n "$b" ]; then break; fi
+              sleep $((i * 3))
+            done
+            if [ -z "$b" ] || [ -z "$a" ]; then
+              echo "::error::取不到 ${f} 的远端信息（63 秒内 6 次重试：releases=${a:-空} latest=${b:-空}）"
+              echo "::error::  这不是「发错了」而是「还没就绪」——先看 CDN 边缘是否已回源，别急着重新发版。"
+              fail=1
+            elif [ "$a" != "$b" ]; then
+              echo "::error::latest/${f} 与 releases/v${VERSION}/${f} 确实不同源（${a} vs ${b}）"
+              fail=1
+            else
+              echo "  ✓ ${f}  ${a}"
+            fi
+          done < <(grep -v '^#' SHA256SUMS.txt)
+
+          # 探针 C（**零下载**）：证实「发出去的字节 == 构建出来的字节」。
+          # 依据：单段 PUT 的 OSS 对象 ETag 就是内容 MD5（本项目实测成立的例子：87MB 的 exe
+          # 也是单段，ETag 与 stat 里的 Content-Md5 逐位相同），所以拿本地 `md5sum` 就能与
+          # 远端 ETag 直接对账，不必把 292MB 再拉回来（跨境下载会拖死发布）。
+          # 若哪天真出现分段上传，ETag 会带 `-N` 后缀 —— 那时**明确跳过**并打印出来，
+          # 而不是悄悄当作通过（宁可少一条断言，不可多一条假绿灯）。
+          while read -r _sha f; do
+            [ -z "$f" ] && continue
+            p="artifacts/${f}"
+            if [ ! -f "$p" ]; then
+              echo "::error::本地 artifacts/ 里找不到 ${f}（下载产物缺失？）"
+              fail=1; continue
+            fi
+            lm=$(md5sum "$p" | cut -d' ' -f1 | tr 'a-f' 'A-F')
+            rt=$(cdn_head "/latest/${f}" | awk '{print $1}' | tr -d '"')
+            case "$rt" in
+              ""|-*) echo "  ! ${f} 远端 ETag 不可作 MD5 比对（${rt:-空}），跳过"; continue ;;
+            esac
+            if [ "$lm" != "$rt" ]; then
+              echo "::error::${f} 构建件 md5 ${lm} ≠ 线上 ETag ${rt}（发出去的不是构建出来的那份）"
+              fail=1
+            else
+              echo "  ✓ ${f}  md5=${lm}"
+            fi
+          done < <(grep -v '^#' SHA256SUMS.txt)
+
+          [ "$fail" = 0 ] || exit 1
+          echo "✓ latest/ 已指向 v${VERSION}（完成于 $(date -u '+%H:%M:%SZ')）"
+      # CDN 域名/证书/缓存规则属控制台侧配置，生效有延迟，不该因此判发布失败；
+      # 但必须发出响亮警告——客户端在 CDN 就绪前取不到更新。
+      - name: CDN 端到端探针（不阻断，失败仅告警）
+        shell: bash
+        run: |
+          set -uo pipefail
+          EXE="${DIST_BASE}/releases/v${VERSION}/xbb-windows-x64.exe"
+          code=""
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$EXE" || true)
+            if [ "$code" = "200" ]; then break; fi
+            echo "第 $i 次探测: HTTP $code，等 15s 重试"
+            sleep 15
+          done
+          if [ "$code" != "200" ]; then
+            echo "::warning::CDN 尚不可用（$EXE → HTTP $code）。检查 dl.xiaobenben.net 的 CNAME 解析、HTTPS 证书、CDN 缓存规则与私有桶回源授权。清单已上传，CDN 就绪前客户端取不到更新。"
+            exit 0
+          fi
+          echo "✓ 产物可经 CDN 下载"
+          if curl -fsS "${DIST_BASE}/channels/stable.json" -o /tmp/cdn-stable.json; then
+            bun run cli/tools/verify-manifest.ts /tmp/cdn-stable.json \
+              || echo "::warning::CDN 上那份 stable.json 验签未通过——若刚发布，多半是 CDN 缓存了旧清单，需刷新。"
+          else
+            echo "::warning::CDN 上取不到 channels/stable.json（缓存规则或路径映射需检查）。"
+          fi
+          # latest/ 是官网与文档唯一的指路目标：它若取不到，新用户从官网下载直接失败。
+          # 同样只告警（CDN 侧配置生效有延迟），但要足够响亮。
+          LATEST="${DIST_BASE}/latest"
+          lcode=$(curl -s -o /tmp/cdn-sums.txt -w '%{http_code}' "${LATEST}/SHA256SUMS.txt" || true)
+          if [ "$lcode" = "200" ]; then
+            if grep -q "v${VERSION} " /tmp/cdn-sums.txt; then
+              echo "✓ latest/ 可经 CDN 取到，且指向 v${VERSION}"
+            else
+              echo "::warning::latest/SHA256SUMS.txt 里没有 v${VERSION}——latest/ 可能未刷新，或 CDN 缓存住了旧清单（检查 /latest/ 的 ttl 是否为 0）。"
+            fi
+          else
+            echo "::warning::CDN 上取不到 latest/SHA256SUMS.txt（HTTP $lcode）——官网下载页与安装文档都指这里，必须修。"
+          fi
+          lexe=$(curl -s -o /dev/null -w '%{http_code}' -I "${LATEST}/xbb-windows-x64.exe" || true)
+          echo "latest/xbb-windows-x64.exe → HTTP $lexe"
+          [ "$lexe" = "200" ] || echo "::warning::latest/ 下的产物取不到（HTTP $lexe），官网 Windows 下载会失败。"
+      - name: 存档到 GitHub Release（灾备，非下载源）
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          files: |
+            artifacts/*
+            manifest.json
+            LICENSE
+            NOTICE
+          generate_release_notes: true
+          body: |
+            下载请走 CDN：${{ env.DIST_BASE }}/releases/v${{ env.VERSION }}/
+
+            本 Release 仅作存档/灾备。国内直连 GitHub 下载慢，不作为分发通道。
+
+            ---
+
+            **许可**：本版本以 GNU Affero 通用公共许可协议第 3 版（AGPL-3.0-only）发布，
+            许可全文见本 Release 附带的 `LICENSE`，商标与第三方依赖声明见 `NOTICE`。
+
+            **对应源码（Corresponding Source）**：
+            https://github.com/sji-xiaobenben/xbb-cli/tree/v${{ env.VERSION }}
+
+            如需闭源分发、闭源对外服务或 OEM 预装，请另行取得商业许可（见 `LICENSE-Commercial.md`）。

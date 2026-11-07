@@ -1,0 +1,201 @@
+# CLA 门禁
+#
+# 判定规则（不依赖任何第三方服务）：
+#   1. PR 来自同仓分支（head.repo.fork == false）→ 只有写权限成员能创建 → 内部贡献，直接通过
+#   2. PR 来自 fork，但作者在本仓有 write 以上权限 → 同样视为内部（维护者偶尔从自己的 fork 提 PR）
+#   3. PR 本身想修改 signatures/ → 拒绝。签署记录只能由维护者直接推到基线分支，
+#      由贡献者在 PR 里「自己写一份声明」自证，法律上不成立，技术上还会死锁（见下）
+#   4. 基线分支里存在该登录名的签署记录，且 CLA-Version 与当前版本一致 → 通过
+#
+# 为什么签名记录不能靠 PR 提交：本 workflow 读的是**基线分支**的 signatures/。
+# 如果签署记录要靠一个 PR 进来，那个 PR 自己会因「找不到签署记录」而永远合不进——
+# 先有鸡还是先有蛋。正确顺序是人先签（邮件）→ 维护者落库 → 贡献者的 PR 自动通过。
+#
+# 安全要点：
+#   · pull_request_target 是为了拿到写权限去写提交状态，但**只 checkout 基线分支**，
+#     绝不 checkout PR 头提交 —— 避免在有权上下文里执行外部代码。
+#   · 不执行 PR 提供的任何脚本、不安装依赖、不读取 PR 里的文件内容；
+#     列 PR 改了哪些文件用的是 API 元数据，不是把代码取下来看。
+#
+# 配套：分支保护里把 `cla` 设为 required status check。⚠️ 注意 GitHub Free 的**私有仓
+# 不支持分支保护**，这一步只能在仓库转 public 之后做。
+
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+# 条款发生实质变化时改这里，并把所有记录重新签署。别为了变绿去改记录里的版本号。
+env:
+  CLA_VERSION: "1"
+
+concurrency:
+  group: cla-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cla:
+    # 机器人提交的依赖升级不适用 CLA（其改动由 CODEOWNERS 人工把关）
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 读取基线分支的签署记录
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          sparse-checkout: signatures
+          persist-credentials: false
+
+      - name: 判定
+        id: judge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -eu
+          LOGIN=$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')
+          echo "login=${LOGIN}" >> "$GITHUB_OUTPUT"
+
+          if [ "$IS_FORK" = "false" ]; then
+            echo "同仓分支（需写权限才能创建）→ 内部贡献"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "reason=internal" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 维护者从自己的 fork 提 PR 也会命中 fork 分支，这里再确认一次身份
+          PERM=$(gh api "repos/${REPO}/collaborators/${AUTHOR}/permission" --jq '.permission' 2>/dev/null || echo none)
+          case "$PERM" in
+            admin|write|maintain)
+              echo "作者在本仓权限=${PERM} → 视为内部"
+              echo "passed=true" >> "$GITHUB_OUTPUT"
+              echo "reason=internal" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # 自证拦截：签署记录必须由维护者落到基线分支，不能由 PR 夹带
+          if gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename' \
+               | grep -qE '^signatures/'; then
+            echo "PR 修改了 signatures/ —— 签署记录不允许由贡献者提交"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=self-record" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          REC=""
+          for c in "signatures/icla/${LOGIN}.md" "signatures/ccla/covered/${LOGIN}.md"; do
+            [ -f "$c" ] && REC="$c" && break
+          done
+
+          if [ -z "$REC" ]; then
+            echo "未找到 ${LOGIN} 的签署记录"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          GOT=$(awk -F': *' '/^CLA-Version:/{print $2; exit}' "$REC" | tr -d '[:space:]')
+          if [ "$GOT" != "$CLA_VERSION" ]; then
+            echo "签署记录 ${REC} 的版本为 ${GOT:-空}，当前要求 ${CLA_VERSION}"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=stale" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "命中 ${REC}（CLA-Version=${GOT}）"
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+          echo "reason=signed" >> "$GITHUB_OUTPUT"
+
+      - name: 写入提交状态
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PASSED: ${{ steps.judge.outputs.passed }}
+          REASON: ${{ steps.judge.outputs.reason }}
+        run: |
+          set -eu
+          if [ "$PASSED" = "true" ]; then
+            STATE=success
+            case "$REASON" in
+              signed) DESC="CLA 已签署" ;;
+              *)      DESC="内部贡献，无需 CLA" ;;
+            esac
+          else
+            STATE=failure
+            case "$REASON" in
+              self-record) DESC="签署记录不能由 PR 提交，请按邮件流程办理" ;;
+              stale)       DESC="CLA 版本已更新，需要重新签署" ;;
+              *)           DESC="缺少 CLA 签署记录" ;;
+            esac
+          fi
+          gh api -X POST "repos/${REPO}/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f context="cla" \
+            -f description="$DESC" > /dev/null
+          echo "已写入状态：${STATE}（${REASON}）"
+
+      - name: 未通过时留言说明
+        if: steps.judge.outputs.passed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LOGIN: ${{ steps.judge.outputs.login }}
+          REASON: ${{ steps.judge.outputs.reason }}
+        run: |
+          set -eu
+          if [ "$REASON" = "self-record" ]; then
+            BODY=$(cat <<EOF
+          这份 PR 修改了 \`signatures/\`，而签署记录不接受由贡献者提交。
+
+          原因有两个：技术上，本检查读的是基线分支，靠 PR 带进来的记录永远等不到自己；
+          法律上，一份自己写的声明文件不是签署件。请把这个 PR 里的签名相关文件去掉，
+          签署走邮件流程：
+
+          1. 阅读 \`CLAs/ICLA.md\`（代表公司则读 \`CLAs/CCLA.md\`）
+          2. 打印签字扫描，或使用公司认可的电子签
+          3. 发到 **admin@sji.xin**，正文写明 GitHub 登录名 \`${LOGIN}\`
+          4. 维护者登记后，本检查会自动重跑并通过
+
+          你的著作权仍归你自己，CLA 授予的是「永久、不可撤销、可再许可」的使用权，不是版权转让。
+          EOF
+            )
+          elif [ "$REASON" = "stale" ]; then
+            BODY=$(cat <<EOF
+          你的签署记录还在，但 CLA 条款已更新版本，需要重新签署一次。
+
+          方法同首次签署：签好 \`CLAs/ICLA.md\` 的扫描件发到 **admin@sji.xin**，正文写明
+          GitHub 登录名 \`${LOGIN}\`。旧记录不会被删除，只会被新版本覆盖。
+          EOF
+            )
+          else
+            BODY=$(cat <<EOF
+          合并前需要先完成 CLA 签署，这一步不能跳过——它是这个项目能同时以 AGPL-3.0
+          和商业许可两种方式提供的前提。
+
+          **流程**（签署件不进公开仓库，避免你的签名长期挂在搜索引擎里）：
+
+          1. 个人：阅读 \`CLAs/ICLA.md\`；代表公司：阅读 \`CLAs/CCLA.md\`
+          2. 打印签字扫描，或使用你公司认可的电子签
+          3. 发到 **admin@sji.xin**，正文写明 GitHub 登录名 \`${LOGIN}\`
+             （代表公司的还要写公司全称与签署人职务）
+          4. 维护者核对后登记进 \`signatures/\`，本检查会在下一轮自动通过
+
+          不需要你在 PR 里添加任何文件。
+
+          你的著作权仍归你自己，CLA 授予的是「永久、不可撤销、可再许可」的使用权，不是版权转让。
+          EOF
+            )
+          fi
+          gh pr comment "$PR" --body "$BODY"

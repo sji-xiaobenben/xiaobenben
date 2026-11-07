@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+# 依赖只有本仓内的 core/（见 core/VENDORED.md），不再跨仓 checkout，
+# 因此不需要任何 PAT，fork 来的 PR 也能跑完整检查。
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 基础矩阵：Linux（计费倍率 ×1）+ Windows（×2）。
+        os: [ubuntu-latest, windows-latest]
+        # ── macOS 真机测试：默认**不跑**（2026-10-07 起）────────────────────────
+        # 计费倍率 Linux 1× / Windows 2× / macOS **10×**。实测：macOS 每月只跑约 76
+        # 分钟，却吃掉 760 计分 = 免费额度（2000 分）的 38% —— 全仓最大单项浪费。
+        # 所以它从「每次 push 都跑」降级为「按需开启」。
+        #
+        # 要验 macOS 真机行为时，把 repo 变量 CI_MACOS 设为 true 即恢复：
+        #   gh variable set CI_MACOS --body true --repo sji-xiaobenben/xbb-cli
+        # 设回 false（或在 Actions 变量页删掉它）即回到默认的不跑。
+        # 未设置该变量时走 `||` 分支 = 空数组 = 不产生 macos job（跳过的 job 不计费）。
+        #
+        # ⚠️ 边界（很重要）：本开关只关「macOS 上真机跑测试」这一件事。
+        #   **darwin 产物照旧在 ubuntu 上交叉编译**并发往 CDN（见 release.yml 的 build
+        #   矩阵），它不消耗任何 macOS 分钟 ⇒ Mac 用户的更新通道完全不受影响。
+        include: ${{ fromJSON(vars.CI_MACOS == 'true' && '[{"os":"macos-latest"}]' || '[]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install
+        run: bun install --backend copyfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test
+        run: bun run test:ci
+      # dev 通、exe 挂 - 本项目最贵的一类失败（托盘就是这么在正式版里坏了 10 天没人发现）。
+      # 只编一个 linux-x64 来验「资产真的嵌进产物」，零成本换来 PR 级防护。
+      - name: "产物闸：托盘资产确实嵌进 exe"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run build:linux
+          bun run tools/check-tray-embedded.ts dist/xbb-linux-x64 linux

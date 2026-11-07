@@ -1,0 +1,38 @@
+# NOTICE
+
+小本本（xiaobenben）客户端 —— `xbb-cli`
+Copyright (C) 2026 世纪之城（广州）信息科技有限公司
+All rights reserved.
+
+本产品以 **AGPL-3.0-only** 发布（见 `LICENSE`），并另有商业许可可选（见 `LICENSE-Commercial.md`）。
+
+## 商标
+
+「小本本」「xiaobenben」「SJi」及相关名称、标识、图标为 世纪之城（广州）信息科技有限公司 的商标或商业标识。
+
+本项目的著作权许可**不包含商标许可**。你可以自由复制、修改、分发本项目的代码，但不得以「小本本」「xiaobenben」「SJi」或其近似标识命名、推广你的衍生版本，也不得暗示本项目作者为你的衍生版本背书。如需使用上述标识，请事先取得书面许可。
+
+## 内置依赖
+
+`@xbb/core`（领域纯规则：uuidv7 / 事件哈希链 / 端口与错误码）随本仓一同发布，位于 `core/`，著作权同上，许可同上。
+
+## 第三方组件
+
+| 组件 | 版本 | 许可证 | 用途 |
+|---|---|---|---|
+| `@modelcontextprotocol/sdk` | 1.30.1 | MIT | MCP 协议实现 |
+| `onnxruntime-node` | 1.30.0 | MIT | 本地向量推理运行时 |
+| `systray2` | 2.1.4 | MIT | 系统托盘 |
+| `zod` | 3.25.76 | MIT | 运行时数据校验 |
+
+其中 `onnxruntime-node` 内含 ONNX Runtime，其版权归 Microsoft Corporation 所有，同样以 MIT 许可分发。
+
+完整的间接依赖清单与许可证以 `bun.lock` 解析结果为准。
+
+## 嵌入模型
+
+本程序使用 `bge-small-zh-v1.5`（int8 量化）作为本地嵌入模型，版权归北京智源人工智能研究院（BAAI），以 MIT 许可发布。
+
+**模型权重不随本仓库分发**，也不随官方分发包一同提供：首次启动时会从公开源（HuggingFace 等）按清单下载，并做 sha256 与文件大小双重校验后才落盘。下载失败时程序降级为纯全文检索，不影响可用性。
+
+相关代码见 `src/embedder.ts`、`src/models.ts`。

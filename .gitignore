@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.db
+*.sqlite
+.env
+.env.*
+*.local
+.DS_Store
+.smoke-home/
+*.db
+*.db-shm
+*.db-wal
+tools/poc/*.exe
+tools/poc/dist-poc/

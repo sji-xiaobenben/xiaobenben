@@ -1,0 +1,3 @@
+# cli 仓与 core 同款：hoisted 布局保证 Node 生态工具链兼容
+[install]
+linker = "hoisted"

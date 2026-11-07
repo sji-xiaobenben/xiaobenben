@@ -1,0 +1,102 @@
+name: Bug 报告
+description: 报告可复现的错误或异常行为
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量把下面的信息填全，缺项往往需要来回几轮才能定位。
+
+        > [!WARNING]
+        > **贴日志前请先删掉隐私内容。**
+        > 小本本存的是你的记忆正文。日志里可能出现记忆片段、文件路径、项目名。
+        > 请在粘贴前删掉这些行——issue 一旦发出就会进入公开存档，删不回来。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 运行 `xbb version` 的输出
+      placeholder: 0.4.46
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式
+      options:
+        - 官网下载的 exe / 二进制
+        - 从源码构建
+        - 其他（在描述里说明）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai_client
+    attributes:
+      label: 使用的 AI 客户端
+      multiple: true
+      options:
+        - opencode
+        - Claude Code
+        - Cursor
+        - WorkBuddy
+        - Codex
+        - 其他（在描述里说明）
+    validations:
+      required: false
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 发生了什么
+      description: 实际行为 vs 你期望的行为
+      placeholder: |
+        实际：recall_topic 返回空结果，但记忆确实存在。
+        期望：返回匹配的记忆。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 启动 xbb serve
+        2. 在 opencode 里写入三条记忆
+        3. 调用 recall_topic
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（已删除隐私内容）
+      description: 相关日志片段。没有就留空。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已删除日志中涉及个人记忆内容、文件路径、密钥的行
+          required: true
+        - label: 我已搜索现有 issue，确认不是重复问题
+          required: true

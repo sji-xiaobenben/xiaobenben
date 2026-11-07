@@ -1,0 +1,65 @@
+# 贡献者审计 —— 兜底检查，防止未签署 CLA 的提交混进 master
+#
+# 为什么需要这一层：CLA 门禁靠 pull_request_target 的机器人，理论上 PR 阶段就拦住了。
+# 但管理员手动合并、直接 push、rebase 合并等路径可能绕过门禁。这个每周任务会回头核对
+# master 上出现的每一个作者邮箱，是否都能对应到一条签署记录。
+#
+# 判定标准：作者邮箱以 @sji.xin 结尾（公司自有），或在 signatures/ 的任何记录里出现过。
+
+name: 贡献者审计
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 核对 master 上的作者
+        run: |
+          set -u
+          KNOWN="$(mktemp)"
+          MISSING_FILE="$(mktemp)"
+
+          grep -rhiE '^[[:space:]]*email:' signatures/ 2>/dev/null \
+            | sed -E 's/^[[:space:]]*email:[[:space:]]*//' \
+            | tr 'A-Z' 'a-z' \
+            | sed -E 's/[[:space:]]+$//' \
+            | grep -v '^$' \
+            | sort -u > "$KNOWN" || true
+
+          git log --format='%ae' \
+            | tr 'A-Z' 'a-z' \
+            | sort -u \
+            | grep -v '@sji\.xin$' \
+            | grep -v '^$' \
+            | sort -u > "$MISSING_FILE" || true
+
+          UNMATCHED=""
+          while IFS= read -r email; do
+            [ -z "$email" ] && continue
+            if ! grep -qxF "$email" "$KNOWN"; then
+              UNMATCHED="$UNMATCHED
+            $email"
+            fi
+          done < "$MISSING_FILE"
+
+          if [ -n "$UNMATCHED" ]; then
+            echo "::error::以下邮箱在 master 上提交过，但找不到对应的 CLA 签署记录：$UNMATCHED"
+            echo ""
+            echo "处理方式二选一："
+            echo "  1) 让作者补签 CLA，由维护者把记录登记进 signatures/（贡献者不得自行提交）"
+            echo "  2) 如果确认是公司员工的个人邮箱，在 signatures/ 中补一条记录说明归属"
+            exit 1
+          fi
+
+          echo "审计通过：master 上所有作者邮箱均可追溯。"
