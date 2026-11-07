@@ -70,6 +70,16 @@ bun run build:mac-intel
 
 **内部使用不触发任何开源义务** —— 公司内部部署、内部二次开发、用本软件处理自己的数据，都不需要商业许可。
 
+每个源码文件头都带一行机器可读的许可标识：
+
+```
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+```
+
+`LicenseRef-Commercial` 是 SPDX 规范里的自定义许可引用，指向上面那份商业许可文档。
+扫描工具提示"未知许可 `LicenseRef-Commercial`"是正常的——它不是标准许可编号，
+也不应该被替换成 `MIT`、`Apache-2.0` 之类的名字。合规审查请直接读 [`LICENSE-Commercial.md`](LICENSE-Commercial.md)。
+
 ## 商标
 
 「小本本」「xiaobenben」「SJi」及相关名称与标识为 世纪之城（广州）信息科技有限公司 的商标或商业标识。著作权许可**不包含商标许可**：可以自由修改和分发代码，但不得以相同或近似标识命名、推广衍生版本。详见 [`NOTICE`](NOTICE)。
