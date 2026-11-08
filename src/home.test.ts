@@ -439,5 +439,12 @@ describe("进程枚举：跨平台与 --keep-mcp", () => {
     const procs = H.runningProcs();
     expect(Array.isArray(procs)).toBe(true);
     expect(procs.some((p) => p.pid === process.pid)).toBe(false);
-  });
+  }, 30_000);
+  // ↑ 显式放宽到 30s。这条跑的是**真实**进程枚举：Windows 走 PowerShell 的
+  //   Get-CimInstance（WMI 查询，冷启动本身就要 1-3s），在 github 的 windows-latest 上
+  //   叠加负载后实测 5.4s，正好压在 bun 默认的 5s 线上——于是它偶发超时、rerun 即绿，
+  //   而失败信息看起来像"功能坏了"。耗时由机器上有多少进程和 WMI 健康度决定，不由本仓
+  //   代码决定，所以给它单独的预算，而不是让默认值去猜。
+  //   真要压这个耗时得换掉 CIM 查询，但 `--keep-mcp` 靠命令行区分进程，tasklist 给不出
+  //   命令行——那是另一个取舍，不该在这道测试里顺手改。
 });
