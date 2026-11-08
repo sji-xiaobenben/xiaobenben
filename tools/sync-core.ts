@@ -83,13 +83,22 @@ function normalizeLicense(): void {
   if (next !== text) writeFileSync(p, next, "utf8");
 }
 
+const mode = process.argv[2] === "check" ? "check" : "sync";
+
 if (!existsSync(SRC)) {
+  if (mode === "check") {
+    // 「无法检查」不等于「检查失败」。fork 出来的仓里根本没有上游目录，这是设计如此，
+    // 用非零退出码会让 `bun run core:check` 看起来像环境坏了——而它一次都没跑起来过。
+    console.log(`[core:check] 找不到上游目录 ${SRC}`);
+    console.log("             本命令只在上游（含私有仓）的开发环境里可用；贡献者无需运行。");
+    console.log("[core:check] 已跳过（没有上游可比对）——这不代表内置副本有问题");
+    process.exit(0);
+  }
+  // sync 是写操作，没写成就是失败：不能让人以为"同步过了"
   console.error(`[core:sync] 找不到上游目录 ${SRC}`);
   console.error("           本命令只在上游（含私有仓）的开发环境里可用；贡献者无需运行。");
   process.exit(2);
 }
-
-const mode = process.argv[2] === "check" ? "check" : "sync";
 
 if (mode === "sync") {
   rmSync(DST, { recursive: true, force: true });

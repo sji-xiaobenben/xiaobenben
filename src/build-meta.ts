@@ -3,8 +3,9 @@
 
 /**
  * 构建元数据 —— 产品版本与版权署名的单一来源。
- * BUILD_TIME 在每次正式编译前更新（发布脚本/手工），同时作为构建指纹的输入：
- * `xbb version` 输出指纹：同源构建指纹一致，用于核对版本是否出自同一次构建。
+ * VERSION / BUILD_TIME 在正式发版时由 release.yml 用 sed 注入（真源分别是 package.json
+ * 的 version 与发版时刻），两者同时作为构建指纹的输入：`xbb version` 输出指纹，同源构建
+ * 指纹一致，用于核对版本是否出自同一次构建。
  * 注意：MCP stdio 模式下这些信息只进协议字段（serverInfo），不得打印到 stdout。
  */
 import { createHash } from "node:crypto";
@@ -14,7 +15,10 @@ export const PRODUCT_EN = "xiaobenben";
 // 本地开发的占位值：CI 发版时会被 sed 替换成 package.json 里的 version（真源在那里）。
 // 这里跟着改成当前版本，只是为了让本地直接构建出的产物不至于声称自己是个旧版本。
 export const VERSION = "0.4.47";
-export const BUILD_TIME = "2026-10-24 04:32";
+// 发版时同样被 sed 注入成 `2026-11-08 17:40` 这样的实际时刻；本地直接构建保持 "local"。
+// **刻意不写一个具体日期**：那会让 fork 者今天构建出的产物自称是某个历史时间构建的，
+// 排查「这个 exe 到底哪来的」时会把人带偏——宁可说"不知道"，也不要说一个错的。
+export const BUILD_TIME = "local";
 export const VENDOR = "世纪之城（广州）信息科技有限公司";
 export const VENDOR_SHORT = "SJi";
 export const OFFICIAL_SITE = "https://www.xiaobenben.net";
