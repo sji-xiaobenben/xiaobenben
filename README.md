@@ -1,151 +1,209 @@
-# 小本本 · xbb-cli
+<div align="center">
 
-**面向 AI 的个人记忆库客户端。** local-first，Bun 编译的单文件可执行（Windows / macOS / Linux），本地 SQLite 存储，通过 MCP 接入各类 AI 客户端。
+<a href="https://xiaobenben.net"><img src="assets/brand/logo.svg" width="96" height="96" alt="XiaoBenBen logo" /></a>
 
-> 让 AI 记住跨年跨会话的事，而记忆始终留在你自己的机器上。
+<h1>XiaoBenBen</h1>
 
-不注册、不登录、零遥测；断网也能完整读写记忆（用不了的是云端协作）。装完双击即跑，没有运行时依赖，不用装系统服务，也不用先写配置文件。
+**Local-first memory for AI agents.**
 
----
+One SQLite file on your own disk. Any MCP client. Memory that outlives sessions, models and reinstalls.
 
-## 它解决什么问题
+<a href="https://github.com/sji-xiaobenben/xbb-cli/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/sji-xiaobenben/xbb-cli?style=flat-square&label=release&color=F22222"></a>
+<a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-F22222?style=flat-square"></a>
+<a href="https://github.com/sji-xiaobenben/xbb-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sji-xiaobenben/xbb-cli/ci.yml?branch=master&style=flat-square&label=CI"></a>
+<img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4a4a4a?style=flat-square">
+<img alt="MCP stdio" src="https://img.shields.io/badge/MCP-stdio-4a4a4a?style=flat-square">
+<a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2ea44f?style=flat-square"></a>
 
-AI 的记忆现状是三条断点：
+[Website](https://xiaobenben.net) &middot; [Docs](https://xiaobenben.net/docs/) &middot; [Leaderboard](#leaderboard) &middot; [Install](#install) &middot; [CLI](#cli-reference) &middot; [FAQ](https://xiaobenben.net/docs/personal-local/faq/)
 
-1. **每次对话从零开始。** 上下文窗口一关，昨天定的方案、上周踩过的坑、你的偏好和禁忌，全部归零。你不得不反复复述同一段背景。
-2. **换个客户端就断片。** opencode 里聊的、Cursor 里改的、Claude Code 里定的，各自为政，互不相通。
-3. **想让它记住，就得交出去。** 现成的"AI 记忆"大多在云端：你的项目结构、客户名字、内部决策、密钥片段，全都要过别人的服务器。
+</div>
 
-小本本的做法是：**记忆存在你机器上的一个 SQLite 文件里**，AI 通过 MCP 读写它。换客户端、换模型、换机器（走云端组织模式），记忆都跟着你走。
+> [!IMPORTANT]
+> **Download only from [xiaobenben.net](https://xiaobenben.net) or this repository's [Releases](https://github.com/sji-xiaobenben/xbb-cli/releases).**
+> The self-updater only trusts manifests signed by the official key, and only official builds
+> (compiled from this repository) look for updates at all. A mirrored binary or a copy of this
+> README does not make anything official.
 
----
+XiaoBenBen (小本本, "the little notebook") is a memory service that your AI client launches as an MCP stdio server. Memories live in a single SQLite file on your machine. Your AI queries it before answering, writes conclusions into it when a decision is made, and the next session — or the next model, or the next IDE — picks up where you left off.
 
-## 特性一览
+No account. No login. No telemetry. Works fully offline (only cloud collaboration needs the network). One file to download, no runtime, no system service, no config file to write first.
 
-### 记忆模型
+## Why this exists
 
-| 能力 | 说明 |
+AI memory today breaks in three places:
+
+1. **Every conversation starts from zero.** The context window closes and yesterday's design decisions, last week's traps, your preferences and dealbreakers are gone. You retype the same background over and over.
+2. **Switching clients erases it.** What you told opencode, Cursor and Claude Code stays in opencode, Cursor and Claude Code. Nothing is shared.
+3. **To be remembered, you have to hand it over.** Almost every "AI memory" product is a cloud service, so your project layout, customer names, internal decisions and key fragments pass through somebody else's servers.
+
+XiaoBenBen puts the database on your disk and lets the AI reach it over MCP. Change client, change model, change machine (via the cloud organisation mode) — the memory follows you, not the app.
+
+## What you get
+
+### Memory model
+
+| Capability | What it does |
 |---|---|
-| **双层记忆** | `episodes` 原话层（当时具体说了什么，append-only 冷存档）+ `memories` 蒸馏层（我们定了什么，可检索的原子事实）。两者用 `source_chunk` 互指，细节丢了能回原文 |
-| **类型与用途** | 五种内容类型 `fact` / `preference` / `decision` / `event` / `procedure`，叠加四种用途 `kind` = `memory` / `directive`（限时叮嘱）/ `habit`（长期习惯）/ `constraint`（长期约束）。同一套工具、同一张表，用途不同检索语义不同 |
-| **延续链** | 信息更新时不删旧条目，而是 `supersede` 成链：**链头 = 当前真相**，历史环仍可查。改过的偏好不会与旧偏好同时命中 |
-| **双时间轴** | `occurred_at`（事情何时发生，可只精确到年月）与 `created_at`（何时入库）分开存。问"去年这个时候我们在干什么"才有意义 |
-| **实体与别名** | 同一个人/项目/产品的大小写、缩写、旧名归并到同一实体，`recall_topic` 按实体聚合 |
-| **语义链接** | `related_to` / `elaborates` / `caused_by` / `contradicts` 四种关系显式声明，配赫布式权重（越常一起被召回越强，长期不用会衰减） |
-| **附件** | 图片、PDF、日志、设计稿按内容寻址（sha256）挂到记忆上；本地**只登记引用、不搬字节**，同一文件挂 12 条记忆也只存一份 |
-| **密钥摘出** | 凭据从正文里摘进保险箱，正文只留 `[[xbb_secret_id:N]]` 占位。复制、导出、同步记忆时密钥不会跟着走 |
-| **可审计** | 所有变更落 SHA-256 哈希链（`events` 表，`prev_hash` 串联），`xbb verify` 一条命令验全库 |
-| **遗忘即墓碑** | `forget` 是打墓碑而非 `DELETE`：检索立刻看不到，审计链上仍留痕 |
+| **Two layers** | `episodes` keeps the raw record (what was actually said, append-only cold storage) and `memories` keeps the distilled layer (what we decided, as retrievable atomic facts). They point at each other through `source_chunk`, so a conclusion can always be traced back to the sentence it came from |
+| **Types and intents** | Five content types `fact` / `preference` / `decision` / `event` / `procedure`, plus four intents `kind` = `memory` / `directive` (time-boxed instruction) / `habit` (long-term habit) / `constraint` (hard rule). Same tools, same table — different retrieval semantics |
+| **Supersede chains** | An update never deletes the old entry, it chains it: **the head of the chain is the current truth**, older rings stay queryable. A preference you changed cannot be recalled alongside its stale version |
+| **Two timelines** | `occurred_at` (when it happened, may be month-precision only) is stored separately from `created_at` (when it was recorded). That is what makes "what were we doing this time last year" answerable |
+| **Entities and aliases** | Case variants, abbreviations and former names of the same person / project / product collapse into one entity; `recall_topic` aggregates per entity |
+| **Explicit links** | Four relations — `related_to` / `elaborates` / `caused_by` / `contradicts` — with Hebbian weights: links you keep recalling together get stronger, unused ones decay |
+| **Attachments** | Images, PDFs, logs, design files addressed by content (sha256) and attached to memories. Locally the library **registers the reference and never copies the bytes**; the same file attached to twelve memories is stored once |
+| **Secret extraction** | Credentials are pulled out of the body into a local vault, leaving a `[[xbb_secret_id:N]]` placeholder behind. Copy, export or sync a memory and the secret does not travel with it |
+| **Auditable** | Every change lands in a SHA-256 hash chain (`events`, linked by `prev_hash`). One command — `xbb verify` — proves the whole library is intact |
+| **Forget is a tombstone** | `forget` marks a tombstone instead of `DELETE`: it disappears from retrieval immediately, but the audit chain still shows it happened |
 
-### 检索
+### Retrieval
 
-| 能力 | 说明 |
+| Capability | What it does |
 |---|---|
-| **三路词法并行** | FTS5 trigram（CJK 友好的子串匹配）∥ 着陆垫倒排（AI 写入时生成的同义词/上位词/场景词）∥ 实体精确匹配，按 IDF 加权融合 |
-| **第四路向量** | 本地跑 `bge-small-zh-v1.5` INT8（24 MB，512 维），与词法结果用 RRF 融合。**不联网、不调 API** |
-| **延续链重定向** | 命中历史环时自动跳到链头（当前真相），旧值作为附注一并给出 —— 解决"记着的都是旧信息"这个最常见的记忆失效 |
-| **1-hop 链接扩展** | 命中一条即带出它声明的邻居，按链接强度排序，可逐层深挖 |
-| **换词引导** | 没命中时返回 `related_tags`，告诉 AI"换这些说法再试"，而不是干巴巴一句"无结果" |
-| **预算封顶** | 结果条数与 token 数双闸，永不把整库灌进上下文窗口 |
-| **自动降级** | 模型缺失 / 加载失败 / 推理异常 → 静默退回纯词法，明文照存，**永不因模型故障挂掉** |
+| **Three lexical passes in parallel** | FTS5 trigram (substring matching that behaves for CJK) ∥ a landing-pad inverted index (synonyms / hypernyms / situational terms generated at write time) ∥ exact entity match — fused with IDF weighting |
+| **A fourth, vector pass** | `bge-small-zh-v1.5` INT8 runs locally (24 MB, 512 dims) and joins the lexical results via RRF. **No network, no model API** |
+| **Chain-head redirect** | A hit on a historical ring jumps to the chain head (current truth) and shows the old value as an annotation — the single most common memory failure is confidently recalling a stale fact |
+| **1-hop expansion** | A hit brings along the neighbours it declares, ranked by link strength, expandable hop by hop |
+| **Miss guidance** | On an empty result you get `related_tags` — "try these phrasings instead" — rather than a bare "nothing found" |
+| **Hard budgets** | Row count and token count are both capped; the library is never dumped into a context window |
+| **Silent degradation** | Model missing / load failure / inference error → quietly fall back to lexical-only. Plain text is still stored, and **a broken model never breaks the app** |
 
-### 接入
+### Integration
 
-| 能力 | 说明 |
+| Capability | What it does |
 |---|---|
-| **MCP stdio** | 一段配置即接入，宿主自动拉起、退出即回收，不改客户端代码 |
-| **六宿主钩子** | 一份零依赖脚本兼容 Claude Code / Cursor / Trae / WorkBuddy / Codex CLI，另有 opencode 专用插件。每回合把文本转给本地服务做内存检索，宿主零感知 |
-| **五个采集源** | opencode / Cursor / WorkBuddy / Claude Code / Codex 的本地会话库，直接读、只读、幂等 |
-| **识别结构而非客户端** | 专用解析器优先命中，不中就走格式描述符，再走通用嗅探。上游改字段名不再致命，并记结构指纹，改版当天就能从 `xbb ingest --status` 看出来 |
+| **MCP stdio** | One config stanza and the host spawns it, reaps it on exit. No client-side code |
+| **Turn hooks for six hosts** | One zero-dependency script covers Claude Code / Cursor / Trae / WorkBuddy / Codex CLI, plus a dedicated plugin for opencode. Each turn is forwarded to the local service for in-memory retrieval, invisibly to the host |
+| **Five session collectors** | Read the local session stores of opencode / Cursor / WorkBuddy / Claude Code / Codex — read-only, idempotent, in place |
+| **Structure not client names** | A dedicated parser tries first, then a format descriptor, then generic sniffing. An upstream field rename is no longer fatal, and structural fingerprints show up in `xbb ingest --status` the day it changes |
 
-### 隐私与主权
+### Privacy and sovereignty
 
-- **零登录** —— 不注册、不绑定账号、不填邮箱，装完即用
-- **零遥测** —— 代码里不存在任何上报使用数据、崩溃信息或统计指标的通道
-- **local-first** —— 个人记忆 100% 在本地 SQLite；组织（企业）记忆 100% 不落本地
-- **不自动上传** —— 只有你显式使用云端功能时才有网络出站
-- **原话层永不上云** —— `episodes` 是纯本地冷存档，云端后端根本不实现这个能力
-- **采集全在本地** —— 读取其他 AI 工具的数据只在内存与本地库之间流动
+- **No login** — no account, no email, no binding. Install and go
+- **No telemetry** — the codebase contains no channel that reports usage, crashes or metrics
+- **Local-first** — personal memory is 100% local SQLite; organisation (enterprise) memory is 100% not local
+- **No silent upload** — outbound traffic happens only when you explicitly use a cloud feature
+- **The raw layer never goes to the cloud** — `episodes` is local-only cold storage; the cloud backend does not implement it
+- **Collection stays local** — reading other AI tools' data happens between memory and local file, nowhere else
 
-### 安全与供应链
+### Security and supply chain
 
-- **自更新先验签再比版本** —— ed25519 签名清单，签名不过直接拒绝，不存在"验签失败就跳过"的分支
-- **双重校验** —— sha256 + 文件大小，任一不符即拒绝替换
-- **失败自动回滚** —— 新版装完起不来会换回旧版并拉黑该版本，不会把你钉在一个坏版本上
-- **非编译形态拒绝替换** —— 只有编译后的单文件二进制才允许被 swap
-- **本地服务来源校验** —— Host / Origin 在**一切路由之前**拦截，抵御 DNS rebinding 与跨站调用
-- **威胁模型公开** —— 不夸大防御能力，[`SECURITY.md`](SECURITY.md) 逐条列出已知取舍（含"密钥保险箱是掩码不是加密"）
+- **Verify before compare** — the update manifest is ed25519-signed; a bad signature is rejected outright. There is no "skip verification on failure" branch
+- **Double check** — sha256 plus file size; either mismatch refuses the swap
+- **Roll back on failure** — a build that will not start gets replaced by the previous one and blacklisted
+- **Compiled builds only** — only a compiled single-file binary may be swapped in
+- **Local service origin checks** — Host / Origin are checked **before any route**, defeating DNS rebinding and cross-site calls
+- **Published threat model** — no inflated claims; [`SECURITY.md`](SECURITY.md) lists every known trade-off, including "the secret vault is masking, not encryption"
 
-### 三平台体验
+### Desktop experience
 
-- **开机自启** —— 三平台默认开启（Windows 注册表 / macOS launchd / Linux XDG），登录后无窗口静默起服务 + 托盘图标
-- **托盘菜单** —— 打开管理窗口、校验、导出诊断、检查更新、切换本地/云端、开关自启、退出
-- **管理窗口** —— `http://127.0.0.1:17630/ui`：列表 / 搜索 / 按会话查 / 按类型筛选（记忆·叮嘱·习惯·约束）/ 编辑 / 删除（墓碑）/ 保险箱 / 云端绑定 / 清理预览 / 诊断报告
-- **桌面通知** —— 组织里有人给你发记忆、有人签收了你发的东西，系统气泡通知（Windows Toast / macOS 通知中心 / libnotify）
-- **本地 ⇄ 云端一键切换** —— 切到本地时**保留密钥**，随时切回来，不必回控制台重新走一遍绑定
+- **Start on login** — on by default on all three platforms (Windows registry / macOS launchd / Linux XDG); a windowless service plus a tray icon after login
+- **Tray menu** — open the admin window, verify, export diagnostics, check for updates, switch local/cloud, toggle autostart, quit
+- **Admin window** — `http://127.0.0.1:17630/ui`: browse, search, per-session recall, filter by intent (memory / directive / habit / constraint), edit, delete (tombstone), vault, cloud binding, cleanup preview, diagnostics
+- **Desktop notifications** — when a colleague sends you a memory or acknowledges something you sent (Windows Toast / macOS Notification Center / libnotify)
+- **Local ⇄ cloud in one switch** — switching back to local **keeps your key**, so you can switch on again without a new binding ceremony
 
----
+## How it works
 
-## 它是怎么做到的
+### Who writes what
 
-### 为什么写入由 AI 发起，而不是"自动抓取对话"
+MCP is request/response; the engine cannot see the conversation. So there are three entry points, each owning one layer:
 
-MCP 是请求-响应协议，引擎**看不到**对话流。所以小本本开了三个入口，各管一层：
-
-| 入口 | 怎么进来 | 写进哪一层 |
+| Entry point | How it arrives | Which layer it writes |
 |---|---|---|
-| `xbb mcp` | AI 宿主以 MCP stdio 拉起 | **蒸馏层** `memories` —— AI 主动蒸馏的原子事实 |
-| `xbb serve` 回合钩子 | 插件 / 钩子 POST 到 `/hooks/turn` | **原话层** `episodes` —— 实时回合 |
-| `xbb ingest` | 只读扫描客户端本地库 | **原话层** `episodes` —— 历史会话 |
+| `xbb mcp` | The AI host spawns it as an MCP stdio server | **Distilled layer**, `memories` — atomic facts the AI chose to distil |
+| `xbb serve` turn hook | Plugin / hook POSTs to `/hooks/turn` | **Raw layer**, `episodes` — live turns |
+| `xbb ingest` | Read-only scan of client session stores | **Raw layer**, `episodes` — historical sessions |
 
-- **蒸馏层由 AI 主动写**：AI 判断什么值得长期记住（结论、决策、踩过的坑、你的纠正），把它蒸馏成原子事实并附上检索着陆垫。这是记忆质量的来源。
-- **原话层由引擎自己抓**：钩子拿实时回合、采集器读客户端落盘的历史会话。不依赖任何客户端配合，也就不存在"每新增一个 agent 就要写一个插件"。
+- **The distilled layer is written by the AI.** The AI decides what is worth keeping long term — conclusions, decisions, traps, your corrections — and distils it into atomic facts with retrieval landing pads. This is where memory quality comes from.
+- **The raw layer is captured by the engine.** Hooks take live turns; collectors read what the clients already wrote to disk. No client cooperation required, so there is no "write a plugin for every new agent".
 
-两层都落在同一个本地 SQLite 文件里，`source_chunk` 互指：蒸馏层记结论，原话层留证据。
+Both layers live in the same SQLite file and point at each other via `source_chunk`: the distilled layer records the conclusion, the raw layer keeps the evidence.
 
-### 检索管线
+### The retrieval pipeline
 
 ```
-查询词群（由 AI 扩展：同义词 / 上位词 / 场景词 / 实体名）
-   ├─ FTS5 trigram 子串匹配
-   ├─ 着陆垫倒排（≥3 字）
-   ├─ 着陆垫倒排（1–2 字）
-   └─ 本地向量 cosine（512 维）
+query terms (expanded by the AI: synonyms / hypernyms / situational words / entity names)
+   ├─ FTS5 trigram substring match
+   ├─ landing-pad inverted index (>= 3 chars)
+   ├─ landing-pad inverted index (1-2 chars)
+   └─ local vector cosine (512 dims)
          ↓
-   IDF 加权融合 + RRF（向量并轨）
+   IDF-weighted fusion + RRF (vector track)
          ↓
-   链头重定向 → 预算封顶 → 1-hop 扩展 → 换词引导
+   chain-head redirect → budget cap → 1-hop expansion → miss guidance
 ```
 
-全部是本地 SQL 与本地推理，**零网络、零模型 API**。查询词群由 AI 侧扩展后传入 —— 这是"机制不语义"的体现：引擎只提供检索机器，语义判断交给更懂上下文的那个 AI。
+Everything is local SQL and local inference. **Zero network, zero model API.** The query terms are expanded by the AI before the call — which is the point of "mechanism, not semantics": the engine ships the retrieval machinery and leaves meaning to the model that can actually see the conversation.
 
-### 三条设计原则
+### Three rules everything follows
 
-这三条贯穿全项目，也是它和"给记忆加个向量库"最本质的区别：
+1. **Mechanism, not semantics.** The engine presets no categories and enumerates no "domains". A constraint's `domain` is an empty container: which domains exist (UI design, code style, tone of voice) is merged dynamically as the AI writes. Memory `terms` are generated by the AI. There is no hard-coded business taxonomy in the code, so a new use case needs no engine change.
+2. **Append-only.** Changes go through an event hash chain, forgetting is a tombstone, raw speech is cold storage. Every "edit" leaves a trace, and `xbb verify` proves the ledger was not rewritten.
+3. **Conservative by default.** Cloud visibility defaults to private (sharing must be explicit); a library that is not where it is expected **refuses to start** (better to fail than to silently run on an empty database); creating a database requires an explicit `--force`; autostart can be switched off permanently and never quietly re-enabled.
 
-1. **机制不语义。** 引擎不预设分类，也不枚举"有哪些域"。约束的 `domain` 是个空容器，具体有哪些域（UI 设计 / 代码风格 / 沟通语气）由 AI 写入时动态归并；记忆的 `terms` 由 AI 生成。代码里没有一张硬编码的业务分类表，所以加新场景不需要改引擎。
-2. **append-only。** 变更走事件哈希链，遗忘是墓碑，原话是冷存档。任何"改"都留痕，`xbb verify` 能证明账没被改过。
-3. **默认态保守。** 云端可见性默认私有（要共享必须显式指定）；库不在预期位置**拒绝启动**（宁可起不来，也不在空库上继续用）；建库必须显式 `--force`；自启可以一键永久关掉且不会被偷偷写回。
+### How this differs from cloud memory SaaS
 
-### 与云端记忆产品的区别
-
-| 维度 | 小本本（local-first） | 典型云端记忆 SaaS |
+| Dimension | XiaoBenBen (local-first) | Typical cloud memory SaaS |
 |---|---|---|
-| 数据位置 | 你自己的磁盘，一个 SQLite 文件 | 厂商服务器 |
-| 离线可用 | 可用（云端协作除外） | 通常不可用或降级 |
-| 延迟 | 本地 SQL，无网络往返 | 每次检索一次往返 |
-| 密钥/敏感信息 | 可摘进本地保险箱，不出机器 | 通常需上传 |
-| 审计 | 哈希链在本地，可自证未被篡改 | 依赖厂商日志 |
-| 跨设备 | 个人版本地；组织模式走云端 API | 天然支持 |
-| 换客户端 | MCP 是标准协议，通用 | 各自生态 |
+| Where data lives | Your own disk, one SQLite file | Vendor servers |
+| Offline | Works (except cloud collaboration) | Usually unavailable or degraded |
+| Latency | Local SQL, no round trip | One round trip per retrieval |
+| Secrets / sensitive data | Extracted into a local vault, never leaves the machine | Usually uploaded |
+| Audit | Hash chain on your disk, self-verifiable | Depends on vendor logs |
+| Cross-device | Personal: local; organisation: cloud API | Native |
+| Switching clients | MCP is a standard, works everywhere | Each ecosystem its own |
 
-不是所有场景都该选本地：团队跨地域协作、需要集中检索时，云端是对的。小本本的选择是**默认留在本地，需要时才上行**。
+Local is not the right answer for everything: for geographically distributed teams that need central retrieval, cloud is correct. XiaoBenBen's choice is **local by default, upstream only when you ask**.
 
----
+## Leaderboard
 
-## 接入 AI 客户端
+Sixteen products, twenty-one capabilities, every cell scored 0–10 (0 means the mechanism does not exist). Scored October 2026.
 
-在客户端的 MCP 配置里把 `xbb` 加为 stdio server 即可。宿主会自动拉起进程，不需要手动跑。
+| # | Product | Origin | Retrieval<br><sub>41.1%</sub> | Memory structure<br><sub>19.9%</sub> | Delivery &amp; sovereignty<br><sub>24.5%</sub> | Storage &amp; context<br><sub>14.6%</sub> | Overall |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 1 | **XiaoBenBen** | China | **8.78** | **9.37** | **9.70** | **9.86** | **9.28** |
+| 2 | Graphiti | United States | 7.46 | 5.40 | 6.64 | 8.09 | 6.94 |
+| 3 | Zep | United States | 7.68 | 5.40 | 7.15 | 6.14 | 6.87 |
+| 4 | MemOS | China | 7.01 | 4.83 | 6.09 | 7.32 | 6.40 |
+| 5 | Mem0 | United States | 6.80 | 4.83 | 6.22 | 7.09 | 6.31 |
+| 6 | Cognee | Germany | 6.00 | 4.73 | 6.09 | 7.09 | 5.93 |
+| 7 | Letta | United States | 5.85 | 4.90 | 5.43 | 7.05 | 5.73 |
+| 8 | Obsidian | Canada | 4.14 | 4.83 | 8.39 | 6.95 | 5.73 |
+| 9 | QwenWork | China | 5.22 | 5.23 | 6.05 | 7.05 | 5.69 |
+| 10 | DouBao Work | China | 5.65 | 6.17 | 5.43 | 4.80 | 5.58 |
+| 11 | WorkBuddy | China | 5.17 | 4.47 | 6.34 | 6.23 | 5.47 |
+| 12 | Supermemory | United States | 5.27 | 4.23 | 6.46 | 5.32 | 5.36 |
+| 13 | Qoder | China | 3.97 | 6.00 | 5.96 | 6.45 | 5.22 |
+| 14 | Codex | United States | 3.56 | 4.33 | 6.65 | 7.23 | 5.01 |
+| 15 | Kimi Work | China | 4.89 | 4.73 | 4.68 | 5.09 | 4.83 |
+| 16 | ima | China | 4.69 | 2.73 | 4.74 | 4.95 | 4.35 |
+
+**How to read it.** The four groups are weighted means of the 21 capabilities (retrieval 7 columns, memory structure 4, delivery / portability / sovereignty / cost 6, storage / capacity / context cost 4). Weights sum to 151; the group percentages are those weights divided by 151. Overall is the weighted mean of all 21 cells, which is why the group scores and the total always agree — re-weighting the groups gives you the same total back.
+
+**Read a row, not the ranking.** A single number hides the interesting part. Obsidian scores 4.14 on retrieval and 8.39 on delivery, because it is a notebook rather than a memory engine — and if what you want is a notebook, it is the right answer.
+
+**Where we don't lead.** Three of the 21 capabilities: **semantic retrieval** (7.5, behind Mem0's 8.5 — our vector track is a small local INT8 model, theirs is a hosted embedding service), **temporal** (8.5, behind Graphiti and Zep at 9 — their graph stores are built around time), and **cross-platform** (8.5, behind Zep's 9.5 — we ship desktop binaries, not a managed SaaS with a browser client). All three are deliberate trade-offs, not oversights.
+
+**Scores are ours.** The matrix reflects what we think matters for a memory layer that an AI calls every turn, and it is arithmetic, not a survey: no external reviewers scored these cells. The full 21-column matrix — every cell, heat-mapped, with per-column weights — is on the [website](https://xiaobenben.net/#matrix), so you can check any single claim rather than trust the summary.
+
+## Install
+
+Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xbb-cli/releases). No runtime dependency. After that the binary updates itself from the signed official manifest.
+
+```bash
+xbb --help          # every command, zero side effects
+xbb serve           # start the local service (127.0.0.1:17630)
+xbb stop            # stop it
+xbb stop --keep-mcp # stop the service but keep MCP connections
+xbb version         # version + build fingerprint
+```
+
+`--help` is intercepted before anything else runs, works anywhere in the line, and executes nothing — `xbb stop --help` will not stop anything.
+
+## Connect your AI client
+
+Add `xbb` as a stdio server in your client's MCP config. The host spawns the process; you do not run it by hand.
 
 ```json
 {
@@ -155,189 +213,169 @@ MCP 是请求-响应协议，引擎**看不到**对话流。所以小本本开�
 }
 ```
 
-Windows 上若 exe 不在 `PATH` 里，把 `command` 写成完整路径（如 `C:\\Users\\你\\.xiaobenben\\bin\\xbb.exe`）。
+On Windows, if the exe is not on `PATH`, use the full path (e.g. `C:\\Users\\you\\.xiaobenben\\bin\\xbb.exe`).
 
-### MCP 工具面
+Twelve hosts are verified. Six of them go beyond MCP:
 
-工具按**一次检索旅程**排列：写入 → 检索 → 取用 → 规则 → 维护 → 组织。
+| Host | MCP stdio | Turn hook | Session collector |
+|---|:---:|:---:|:---:|
+| opencode | ✅ | ✅ (dedicated plugin) | ✅ |
+| Claude Code | ✅ | ✅ | ✅ |
+| Cursor | ✅ | ✅ | ✅ |
+| WorkBuddy | ✅ | ✅ | ✅ |
+| Codex CLI | ✅ | ✅ | ✅ |
+| Trae | ✅ | ✅ | — |
+| Copilot · Qoder · Kimi Code · OpenClaw · MaxClaw · Muse | ✅ | — | — |
 
-数量本身不是指标——上下文窗口是稀缺资源，每多一个工具，宿主的提示里就多一段描述要读、多一次选错的可能。所以这里刻意**不设**「记忆分类管理」这类入口：分类是 AI 写入时该判断的事，不该变成用户维护的目录树。
+Per-client steps (and the screenshots) are in the [install guide](https://xiaobenben.net/docs/personal-local/install/).
 
-| 类别 | 工具 | 干什么 |
+### Tool surface
+
+Tools are ordered as one retrieval journey: write → retrieve → fetch → rules → maintain → organisation.
+
+The count is not a metric — the context window is scarce, and every extra tool costs a paragraph of description and one more chance to pick wrong. That is why there is deliberately **no** "manage memory categories" entry: categorisation is the AI's job at write time, it should not become a taxonomy tree users maintain.
+
+| Group | Tools | What for |
 |---|---|---|
-| 写入 | `write_memory` `log_episodes` | 批量落 3–5 条原子事实、补录原话 |
-| 检索 | `search_memory` `recall_topic` `recall_session` `recall_timeline` `recall_episodes` `recall_transcript` | 混合检索、按实体聚合、按会话回放、按时间线还原、按原文翻页 |
-| 取用 | `get_memory` `get_related` `get_asset` `reveal_secret` | 取全文与延续链、1-hop 邻居、附件字节、密钥明文 |
-| 规则 | `recall_directives` `recall_constraints` | 新会话必查：长期习惯 + 限时叮嘱 + 全局约束 + 按任务词群命中领域约束 |
-| 维护 | `supersede` `forget` `stats` `inbox` `ack` `outbox` | 修链、墓碑、用量、待办收件箱、签收、发件箱 |
-| 组织 | `list_spaces` `list_members` `set_memory_audience` | 空间树、成员、可见范围（云端组织模式） |
+| Write | `write_memory` `log_episodes` | Land 3–5 atomic facts in one call; backfill raw turns |
+| Retrieve | `search_memory` `recall_topic` `recall_session` `recall_timeline` `recall_episodes` `recall_transcript` | Hybrid search, entity aggregation, session replay, timeline reconstruction, paging through the raw record |
+| Fetch | `get_memory` `get_related` `get_asset` `reveal_secret` | Full text plus chain, 1-hop neighbours, attachment bytes, secret plaintext |
+| Rules | `recall_directives` `recall_constraints` | Must-ask at session start: habits + time-boxed instructions + global constraints + domain constraints matched by task terms |
+| Maintain | `supersede` `forget` `stats` `inbox` `ack` `outbox` | Repair chains, tombstones, usage, pending inbox, acknowledgement, sent box |
+| Organisation | `list_spaces` `list_members` `set_memory_audience` | Space tree, members, visibility (cloud organisation mode) |
 
-工具描述里写的是**给 AI 看的判断准则**，不是参数说明 —— 什么该记、什么绝对不该记（"能靠翻原文找到的别记，记那些原文永远不会说出口的结论"）、何时必须先检索、密钥怎么标。这些准则直接决定记忆库的长期质量。
+Tool descriptions are **judgement criteria for the model**, not parameter docs: what to remember, what never to remember ("skip anything the raw record already contains; keep the conclusions the raw record will never state"), when retrieval is mandatory, how to mark a secret. Those criteria are what the library's long-term quality actually rests on.
 
-### 回合钩子（可选）
+### Turn hooks (optional)
 
-想让小本本在**每回合**自动参与（命中相关记忆就推进收件箱），装一个零依赖脚本即可：
+To have XiaoBenBen participate **on every turn** (relevant memories land in the inbox), install one zero-dependency script:
 
-- `plugins/opencode/xbb-push.js` → 放进 `~/.config/opencode/plugins/`
-- `plugins/hooks/xbb-hook.mjs` → 六个宿主通用，接法见 [`plugins/hooks/README.md`](plugins/hooks/README.md)
+- `plugins/opencode/xbb-push.js` → drop into `~/.config/opencode/plugins/`
+- `plugins/hooks/xbb-hook.mjs` → generic across six hosts, wiring in [`plugins/hooks/README.md`](plugins/hooks/README.md)
 
-红线是**候选不注入**：脚本 stdout 恒为空，绝不往宿主上下文里塞任何记忆内容（Trae 等宿主会把 stdout 当上下文注入）。失败一律静默退出 0，绝不阻塞宿主回合。
+The hard rule is **candidates are never injected**: the script's stdout is always empty, so no memory content ever enters the host context (Trae and friends treat stdout as context). Any failure exits 0 silently and never blocks the host's turn.
 
----
+## Cloud mode (optional, backend not open source)
 
-## 云端模式（可选，服务端不开源）
+**By default not a single byte leaves the machine.** Only after you explicitly run `xbb bind` (a one-shot ticket from the console) or `xbb bind-key` (reuse an existing key across machines) does the client talk to `api.xiaobenben.net` — and only while you use a cloud feature.
 
-**默认不发一个字节。** 只有你显式执行 `xbb bind`（控制台发的一次性票）或 `xbb bind-key`（多机复用已有密钥）之后，客户端才会连 `api.xiaobenben.net`，且只在你使用云端功能时出站。
+This layer solves **collaboration**, not storage:
 
-这一层解决的是**协作**，不是存储：
+- **Personal memory stays local** — what goes up is organisation (enterprise) memory, which is 100% not local and physically separate from your personal library
+- **Private by default** — each memory is visible to its author only; sharing with a department or the whole organisation must be explicit, and the write response echoes the effective visibility instead of making you guess
+- **Reversible** — `xbb cloud off` only pauses (the key is kept, `on` brings it back); only `xbb unbind` actually deletes. Without that, "going to the cloud" is a one-way door
+- **Multi-device** — the same long-lived key works on any number of machines
 
-- **个人记忆始终在本地** —— 上云的是组织（企业）记忆，它 100% 不落本地，与个人库物理分离
-- **默认私有** —— 每条记忆只有作者可见；共享给部门或整个组织必须显式指定，写入响应会回显实际可见范围，不靠猜
-- **能退** —— `xbb cloud off` 只是暂停（密钥保留，随时 `on` 切回）；`xbb unbind` 才真删。没有这一步，「上云」就是单向门
-- **多设备** —— 同一条长期密钥可在多台机器复用
+### Getting access
 
-### 怎么开通
+No application, no invite list: after signing in you get 1 GB of free reads and writes per month, then ¥10/GB from your balance, which never expires (prices and quotas: <https://xiaobenben.net/versions/personal-cloud/#pricing>).
 
-不需要申请，也不是邀请制：账号登录后每月有 1 GB 免费读写额度，超出按 ¥10/GB 从余额扣，余额不过期（价格与额度以 <https://xiaobenben.net/versions/personal-cloud/#pricing> 为准）。
-
-绑定分两步，**票和密钥不是一回事**：
+Binding takes two steps, and **the ticket is not the key**:
 
 ```bash
-xbb register-protocol                    # 一次性：把 xubb:// 协议指向本机 exe
-xbb bind "xubb://bind?ticket=…&api=…"    # 控制台「连接我的小本本」生成，60 秒内单次有效
-xbb bind-key <xbb_live_…>                # 已有长期密钥：多机复用、误删配置后恢复
+xbb register-protocol                    # one-off: point the xubb:// protocol at this exe
+xbb bind "xubb://bind?ticket=…&api=…"    # generated by "connect my XiaoBenBen", single use, 60 s
+xbb bind-key <xbb_live_…>                # existing long-lived key: another machine, or after losing config
 ```
 
-`register-protocol` **不会自动执行**，不跑这一步，控制台上的「连接我的小本本」按钮点下去毫无反应——而它不会给出任何错误，只是什么都不发生。这是整条链路上最容易卡住的地方。
+`register-protocol` **does not run automatically**. Skip it and the console's "connect my XiaoBenBen" button does precisely nothing — with no error, no feedback. This is the single most common place to get stuck.
 
-票用来**建立**信任（一次性、60 秒过期、必须回控制台现生成），密钥用来**复用**信任（长期、可多机）。第二台机器重复第二步即可。
+The ticket **establishes** trust (one-shot, expires in 60 seconds, must be generated fresh); the key **reuses** trust (long-lived, many machines). On a second machine, repeat only the last step.
 
-流程入口：账号中心 <https://account.xiaobenben.net> 看额度与余额，工作台 <https://console.xiaobenben.net> 生成绑定票。
+Where to go: <https://account.xiaobenben.net> for quota and balance, <https://console.xiaobenben.net> to generate a binding ticket.
 
-服务端、控制台与组织管理不在本仓，也不开源。这属于边界声明，不是功能清单——实现细节不给，因为给了你也验证不了。**能被验证的是这一条**：不绑定时，`xbb mcp` 与 `xbb serve` 的全部本地功能在断网环境下照常工作，相关代码路径完全不参与运行。
+The server, console and organisation management are not in this repository and are not open source. That is a boundary statement, not a feature list — implementation details would not be verifiable anyway. **What is verifiable is this:** without binding, every local feature of `xbb mcp` and `xbb serve` works with the network unplugged, and none of that code path participates at all.
 
-客户端的接入点只有一个文件：[`src/cloud.ts`](src/cloud.ts)（六工具按 profile 路由本地/云端）。
+The client-side integration point is one file: [`src/cloud.ts`](src/cloud.ts) (six tools routed local/cloud by profile).
 
----
+## Start on login (on by default)
 
-## 安装
-
-从官网下载对应平台的单文件可执行：
-
-<https://xiaobenben.net>
-
-直接运行，无运行时依赖。之后程序会通过官方签名清单自更新。
+The first `xbb serve` writes a startup entry, and every login afterwards starts a silent resident service — no console window, no admin page popping up, the XiaoBenBen icon in the taskbar / menu bar.
 
 ```bash
-xbb --help          # 查看全部命令（零副作用）
-xbb serve           # 启动本地服务（127.0.0.1:17630）
-xbb stop            # 停止服务
-xbb stop --keep-mcp # 停止本地服务但保留 MCP 连接
-xbb version         # 版本 + 构建指纹
+xbb autostart           # inspect: where, pointing at what, what the user asked for
+xbb autostart off       # turn off, and do not write it back later
+xbb autostart on        # turn back on
 ```
 
-`--help` 在参数解析最前面统一拦截，**任意位置都能用且不执行任何动作** —— `xbb stop --help` 不会真的把服务停掉。
+Every platform uses its native mechanism; no extra service is installed:
 
-## 开机自启（默认开启）
-
-第一次跑 `xbb serve` 就会写一条启动项，之后每次登录都在后台静默起一个常驻服务
-——无控制台窗口、不弹管理页，任务栏/菜单栏出现小本本图标。
-
-```bash
-xbb autostart           # 看现状（在哪、指向谁、用户意图）
-xbb autostart off       # 关掉，且之后不再自动写回
-xbb autostart on        # 重新打开
-```
-
-各平台用的都是系统原生的自启机制，不额外装服务：
-
-| 平台 | 位置 | 登录后执行 |
+| Platform | Location | Runs at login |
 |---|---|---|
-| Windows | `HKCU\…\CurrentVersion\Run` → `小本本服务` | `"xbb.exe" serve --detach`（无窗口） |
-| macOS | `~/Library/LaunchAgents/net.xiaobenben.xbb.plist` | launchd 托管 `xbb serve --no-open` |
-| Linux | `~/.config/autostart/xbb.desktop` | `xbb serve --detach`（XDG 自启项） |
+| Windows | `HKCU\…\CurrentVersion\Run` → `小本本服务` | `"xbb.exe" serve --detach` (windowless) |
+| macOS | `~/Library/LaunchAgents/net.xiaobenben.xbb.plist` | launchd runs `xbb serve --no-open` |
+| Linux | `~/.config/autostart/xbb.desktop` | `xbb serve --detach` (XDG autostart) |
 
-两点值得知道：
+Two things worth knowing:
 
-- **`xbb autostart off` 是粘的**。它会在 `config.json` 记下 `autostart: "off"`，此后
-  `serve` 启动时不再自动写回。托盘菜单里那个「开机自启：已开/已关」也是同一个开关。
-- **建议把 exe 放在固定位置**（如 `~/.xiaobenben/bin/xbb`）。启动项记的是绝对路径，
-  如果你从下载目录直接运行，清理下载目录后这条启动项就会指向一个不存在的文件；
-  下次再运行一次 exe 会自动修正。程序目录内有程序时，`autostart status` 会如实显示它指向哪儿。
+- **`xbb autostart off` is sticky.** It records `autostart: "off"` in `config.json`, and `serve` will not re-add the entry afterwards. The tray menu's "Start on login: on/off" is the same switch.
+- **Keep the exe in a fixed location** (e.g. `~/.xiaobenben/bin/xbb`). The startup entry stores an absolute path: run it straight from Downloads, clean up Downloads, and the entry points at a file that no longer exists. Running the exe again fixes it, and `xbb autostart status` always shows where it currently points.
 
----
-
-## 命令速查
+## CLI reference
 
 ```
-服务与接入
-  xbb                                        状态速览（模式 / 库在哪 / 常用命令）
-  xbb serve [--detach|--no-open|--headless]   启动本地服务 + 托盘 + 管理窗口（:17630）
-  xbb mcp                                     MCP stdio（AI 宿主的接入点，由宿主拉起）
-  xbb stop [--keep-mcp]                       停掉本机所有 xbb 进程
-  xbb autostart [on|off|status]               开机自启（默认开；三平台）
+Service and access
+  xbb                                        status overview (mode / where the library is / common commands)
+  xbb serve [--detach|--no-open|--headless]  start service + tray + admin window (:17630)
+  xbb mcp                                    MCP stdio (the entry point AI hosts spawn)
+  xbb stop [--keep-mcp]                      stop every local xbb process
+  xbb autostart [on|off|status]              start on login (on by default; all three platforms)
 
-数据位置
-  xbb home                 看程序在哪、库在哪、凭什么这么判断
-  xbb home move <目录>     把库搬到别的盘：复制 → 校验 → 才切配置；校验不过不切
-  xbb home set <目录>      只改配置不搬库（目标必须已有 memory.db）
-  xbb home find [--deep]   扫各盘找 memory.db，按记忆条数排序
-  xbb home reset           撤掉配置，回到默认位置
-  xbb home init --force    在当前位置新建空库（唯一的建库入口）
+Data location
+  xbb home                 where the program is, where the library is, why it decided that
+  xbb home move <dir>      move the library: copy → verify → only then switch config; no verify, no switch
+  xbb home set <dir>       change config without moving (target must already hold memory.db)
+  xbb home find [--deep]   scan drives for memory.db, sorted by memory count
+  xbb home reset           drop the config, return to the default location
+  xbb home init --force    create an empty library here (the only way to create one)
 
-云端
-  xbb cloud [on|off|status]   本地 ⇄ 云端开关（保留密钥）
-  xbb bind <票>               绑定云端（xubb:// 唤起，或粘 60 秒单用的绑定票）
-  xbb bind-key <密钥>         用手上已有的长期密钥直接绑定
-  xbb unbind                  解除绑定并删除本机密钥（不可恢复）
-  xbb register-protocol       注册 xubb:// 协议处理器（三平台）
+Cloud
+  xbb cloud [on|off|status]   local ⇄ cloud switch (keeps the key)
+  xbb bind <ticket>           bind the cloud (xubb:// invocation, or a 60 s single-use ticket)
+  xbb bind-key <key>          bind with a long-lived key you already have
+  xbb unbind                  unbind and delete the local key (irreversible)
+  xbb register-protocol       register the xubb:// protocol handler (three platforms)
 
-采集与维护
-  xbb ingest [--status|--dry-run|--source=…|--limit=N]   采集本机 AI 客户端会话原文
-  xbb verify                  审计自检：个人库哈希链完整性
-  xbb version                 版本横幅 + 构建指纹
+Collection and maintenance
+  xbb ingest [--status|--dry-run|--source=…|--limit=N]   collect session text from local AI clients
+  xbb verify                  audit: personal library hash-chain integrity
+  xbb version                 version banner + build fingerprint
 
-更新
-  xbb update                  检查并应用更新（放行回滚黑名单）
-  xbb update-status           自更新状态速览
+Update
+  xbb update                  check for and apply updates (clears the rollback blacklist)
+  xbb update-status           self-update status
 ```
 
-命令的取舍也能看出纪律：`xbb home move` 是"复制 → 完整性校验 + 行数逐项比对 → 才切配置"，任何一步不过就中止，原库完好；`xbb home init` 必须显式 `--force`，因为"新建空库"是不可逆的判断，用户会以为记忆全丢了而程序一切正常。
+The command set has the same discipline as the rest: `xbb home move` copies, then verifies integrity and compares row counts item by item, and only then switches the config — any failed step aborts and leaves the original library untouched. `xbb home init` requires an explicit `--force`, because "create an empty library" is irreversible and looks exactly like "all my memories vanished, but the app is fine".
 
----
+## Where your data lives
 
-## 数据在哪
-
-| 内容 | 位置 |
+| Content | Location |
 |---|---|
-| 记忆库 `memory.db` | 程序目录（可用 `xbb home move` 搬到任意盘） |
-| 配置 `config.json` | 程序目录 —— **锚点跟着程序走，绝不跟着库走**，所以"锚点在、货不在"是可检测的异常，而不是"首次运行" |
-| 向量模型 | 数据目录下 `models/`（默认即程序目录，约 24 MB，首启下载） |
-| 云端密钥 | `~/.xiaobenben/cloud.json`（仅云端模式） |
+| Library `memory.db` | The program directory (movable to any drive with `xbb home move`) |
+| Config `config.json` | The program directory — **the anchor follows the program, never the library**, so "anchor present, cargo missing" is a detectable anomaly instead of a first run |
+| Vector model | `models/` under the data directory (defaults to the program dir, ~24 MB, downloaded on first start) |
+| Cloud key | `~/.xiaobenben/cloud.json` (cloud mode only) |
 
-忘记库放哪了：`xbb home find --deep`（按记忆条数排序 —— 同名空库到处都是，条数才能分出哪个是真的）。
+Forgot where the library is? `xbb home find --deep` — sorted by memory count, because empty databases with the same name are everywhere and only the count tells you which one is real.
 
----
+## Engineering
 
-## 工程品质
-
-| 项 | 实测 |
+| Item | Measured |
 |---|---|
-| 测试 | 冒烟钉的是**具体灾难**而不是覆盖率数字：验签失败的清单必须被拒、被篡改的清单必须检出、向量模型缺失要静默降级而不是报错、上游改了字段名要能靠嗅探继续工作、托盘资产必须真嵌进 exe、数据库迁移要能回滚。CI 在 Windows 与 Linux 双平台实跑 |
-| 类型 | `tsc --noEmit` 零错误（`strict: true`） |
-| 产物 | 单文件，Windows 约 87 MB / Linux 约 83 MB / macOS 约 61 MB（含 SQLite 与 ONNX 运行时） |
-| 冷启动 | `xbb --help` 约 140 ms |
-| 依赖 | 4 个生产依赖（MCP SDK / ONNX Runtime / 托盘 / zod），全部来自 npmjs 官方源，`bun.lock` 无内网镜像 |
+| Tests | Smoke tests pin **specific disasters**, not coverage numbers: a badly signed manifest must be rejected, a tampered manifest must be caught, a missing vector model must degrade silently instead of erroring, upstream field renames must still work through sniffing, the tray asset must really be embedded in the exe, the exe icon must be byte-identical to the source `.ico`, and migrations must be able to roll back. CI runs on Windows and Linux |
+| Types | `tsc --noEmit` clean (`strict: true`) |
+| Artifact | Single file: Windows ~87 MB / Linux ~83 MB / macOS ~65 MB (arm64) and ~71 MB (x64), including SQLite and the ONNX runtime |
+| Cold start | `xbb --help` ~140 ms |
+| Dependencies | 4 production dependencies (MCP SDK / ONNX Runtime / tray / zod), all from the official npmjs registry; `bun.lock` contains no internal mirrors |
 
-实际分发进产物的第三方组件（含间接依赖）与许可全文见 [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) —— 按 `bun build --metafile` 的实际打包结果生成，不是按 lockfile 罗列。
+Every third-party component that actually ships inside the binary (including transitive ones) and its full licence text is in [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) — generated from `bun build --metafile` output, i.e. what is really bundled, not a lockfile dump.
 
-`core/` 是 `@xbb/core` 的内置副本（uuidv7 / 事件哈希链 / 端口与错误码），随本仓一同发布，因此 `git clone` 后无需访问任何私有仓即可构建。**不要直接修改 `core/` 下的文件**，说明见 [`core/README.md`](core/README.md)。
+`core/` is a vendored copy of `@xbb/core` (uuidv7 / event hash chain / ports and error codes) published with this repository, so `git clone` builds without access to any private repo. **Do not edit files under `core/` directly**; see [`core/README.md`](core/README.md).
 
----
+## Build from source
 
-## 从源码构建
-
-需要 [Bun](https://bun.sh) ≥ 1.4.2（与 `package.json` 的 `engines` 一致；CI 固定在 1.4.2 上构建）。
+Requires [Bun](https://bun.sh) ≥ 1.4.2 (matching `package.json`'s `engines`; CI pins 1.4.2).
 
 ```bash
 bun install
@@ -350,66 +388,66 @@ bun run build:mac-arm  # dist/xbb-darwin-arm64
 bun run build:mac-intel
 ```
 
-本地构建出的产物 `xbb version` 会自报 `构建 local`，且**默认不参与自更新**：它编进去的是官方签名公钥与官方 CDN，若照常自动更新，只会把你的构建换成官方 exe。要用官方源（或自己的镜像）就显式指定 `XBB_UPDATE_URL`；要长期分发自己的版本，还需换掉公钥，见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的「Fork 之后要分发自己的构建」。
+`build:*` all go through `tools/build.ts`, which is the single definition of "how an artifact is compiled": it stamps the icon, product name, publisher and file version into the Windows resource section (from `assets/app.ico` and `package.json`), then reads the resource section back to prove the icon landed. Regenerate the icons with `bun run gen:app-icon` (exe / logo) or `bun run gen:tray-icon` (tray).
 
-判据是**发布者身份**，不是「有没有构建过」：产物里编了 `BUILD_REPO`，只有它等于 `OFFICIAL_REPO`（官方仓）时才认内置更新源。所以你 fork 之后跑自己的 Actions 发出来的 exe 也不会去官网查更新——哪怕它注入了真实构建时间。核查方式：`xbb update` 会说 `非官方构建：自更新默认关闭（构建来源 <owner/repo>）`。
+A locally built artifact reports `build local` in `xbb version` and **does not take part in self-update by default**: it embeds the official public key and CDN, so updating normally would only replace your build with the official exe. Point `XBB_UPDATE_URL` at the official source (or your own mirror) to opt in; to distribute your own version long term you also need your own key — see "Distributing your own build after forking" in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-> `bun.lock` 记录的是官方源 `registry.npmjs.org`。国内网络如遇安装慢，可临时换镜像：
+The criterion is **publisher identity**, not "was it compiled": the artifact embeds `BUILD_REPO`, and the built-in update source is trusted only when it equals `OFFICIAL_REPO`. So even an exe from your own fork's CI will not ask the official site for updates, even though it has a real build timestamp. To check: `xbb update` reports a non-official build, disables self-update, and names the source repository.
+
+> `bun.lock` records the official registry `registry.npmjs.org`. If installs are slow from mainland China, mirror it temporarily:
 > `bun install --registry https://registry.npmmirror.com`
 
----
+## Privacy
 
-## 隐私
+- **No telemetry** — there is no channel in the code that reports usage; self-update fetches a version manifest and carries no identifier
+- **Model download on first start** — the embedding model ships separately and is downloaded from a public source (HuggingFace / hf-mirror) with sha256 verification; on failure it degrades to full-text retrieval, which does not affect usability
+- **Collection scope** — it reads other AI tools' local data (`opencode.db`, only the `composerData:` and `bubbleId:` keys in Cursor's `state.vscdb`, `.claude`, `.codex`, `.workbuddy`). All processing is local and nothing is uploaded automatically
+- **The raw layer never goes to the cloud** — `episodes` is local only; the cloud backend does not implement it
+- **Cloud visibility defaults to private** — each memory is visible to its author; sharing with the organisation or a department must be explicit, and the write response echoes the effective visibility
 
-- **零遥测**：代码中不存在任何上报使用数据的通道；自更新只拉取版本清单，不带任何标识
-- **首启下载模型**：嵌入模型不随包分发，首次启动从公开源（HuggingFace / hf-mirror）下载并做 sha256 校验；失败时降级为纯全文检索，不影响可用
-- **采集范围**：会读取其他 AI 工具在本机的数据（`opencode.db`、Cursor `state.vscdb` 中仅 `composerData:` 与 `bubbleId:` 两类 key、`.claude`、`.codex`、`.workbuddy`），全部在本地处理，不自动上传
-- **原话层永不上云**：`episodes` 仅本地，云端后端不实现该能力
-- **云端可见性默认私有**：每条记忆只有作者可见；共享给组织或指定部门必须显式指定，写入响应会回显实际可见范围
+The threat model of the local service and every known design trade-off are in [`SECURITY.md`](SECURITY.md) — worth reading before you use it. The short version: local HTTP has no authentication (the boundary is "same user on this machine"), the database is not encrypted (it relies on file permissions), and the secret vault is **masking, not encryption**.
 
-本地服务的威胁模型与全部已知设计取舍见 [`SECURITY.md`](SECURITY.md)，建议使用前读一遍。要点：本地 HTTP 无鉴权（视为"本机同用户"边界）、数据库不加密（依赖文件权限）、密钥保险箱是**掩码不是加密**。
+## License
 
----
+Released under the **GNU Affero General Public License v3.0 only (AGPL-3.0-only)** — see [`LICENSE`](LICENSE).
 
-## 许可
+A commercial licence is available for closed-source distribution, closed-source hosted services, OEM bundling and similar; see [`LICENSE-Commercial.md`](LICENSE-Commercial.md) or write to `admin@sji.xin`.
 
-本项目以 **GNU Affero 通用公共许可协议第 3 版（AGPL-3.0-only）** 发布，见 [`LICENSE`](LICENSE)。
+**Internal use triggers no open-source obligation** — deploying inside your company, forking for internal development, or processing your own data with this software needs no commercial licence.
 
-另有商业许可可选，适用于闭源分发、闭源对外服务、OEM 预装等场景，见 [`LICENSE-Commercial.md`](LICENSE-Commercial.md)。咨询请发邮件至 `admin@sji.xin`。
-
-**内部使用不触发任何开源义务** —— 公司内部部署、内部二次开发、用本软件处理自己的数据，都不需要商业许可。
-
-每个源码文件头都带一行机器可读的许可标识：
+Every source file carries a machine-readable licence identifier:
 
 ```
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 ```
 
-`LicenseRef-Commercial` 是 SPDX 规范里的自定义许可引用，指向上面那份商业许可文档。
-扫描工具提示"未知许可 `LicenseRef-Commercial`"是正常的——它不是标准许可编号，
-也不应该被替换成 `MIT`、`Apache-2.0` 之类的名字。合规审查请直接读 [`LICENSE-Commercial.md`](LICENSE-Commercial.md)。
+`LicenseRef-Commercial` is the SPDX-spec way to reference a custom licence — in this case the commercial document above. A scanner reporting "unknown licence `LicenseRef-Commercial`" is expected: it is not a standard identifier, and it should not be replaced with `MIT`, `Apache-2.0` or anything similar. For compliance review, read [`LICENSE-Commercial.md`](LICENSE-Commercial.md).
 
-## 商标
+## Trademark
 
-「小本本」「xiaobenben」「SJi」及相关名称与标识为 世纪之城（广州）信息科技有限公司 的商标或商业标识。著作权许可**不包含商标许可**：可以自由修改和分发代码，但不得以相同或近似标识命名、推广衍生版本。详见 [`NOTICE`](NOTICE)。
+"小本本", "xiaobenben", "SJi" and the associated names and marks are trademarks or business identifiers of 世纪之城（广州）信息科技有限公司 (SJI). The copyright licence **does not include a trademark licence**: you may modify and distribute the code, but you may not name or promote a derivative with the same or a confusingly similar mark. See [`NOTICE`](NOTICE).
 
-## 反馈与支持
+## Contributing
 
-| 事项 | 去哪里 |
-| --- | --- |
-| 使用问题、bug、功能建议 | 优先开 [issue](https://github.com/sji-xiaobenben/xbb-cli/issues)（公开可搜索，别人也能受益）；不便公开可发 `support@sji.xin` |
-| 安全漏洞 | **不要开公开 issue**，见 [`SECURITY.md`](SECURITY.md) |
-| 商业许可 / OEM 咨询 | 见 [`LICENSE-Commercial.md`](LICENSE-Commercial.md)，邮箱 `admin@sji.xin` |
+Issues and pull requests are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) first — **every external contribution requires signing the CLA**, which is what lets the project keep running on the AGPL + commercial dual track. Also see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
-## 贡献
+## Security
 
-欢迎提交 issue 与 PR。请先读 [`CONTRIBUTING.md`](CONTRIBUTING.md) —— **所有外部贡献都需要先签 CLA**，这是为了让项目能持续以 AGPL + 商业许可双轨运营。
+Do not open a public issue for a vulnerability. Report it as described in [`SECURITY.md`](SECURITY.md).
 
-## 关于本仓库的提交历史
+## Support
 
-本仓库的公开历史从 `v0.4.47` 开始，此前的开发历史由版权方私有保留。本仓只包含客户端，服务端与云端能力不在本仓，也不开源。
+| Topic | Where |
+|---|---|
+| Usage questions, bugs, feature requests | Prefer an [issue](https://github.com/sji-xiaobenben/xbb-cli/issues) (public and searchable, so others benefit); `support@sji.xin` if it cannot be public |
+| Commercial licence / OEM | [`LICENSE-Commercial.md`](LICENSE-Commercial.md), `admin@sji.xin` |
+| Security vulnerabilities | [`SECURITY.md`](SECURITY.md) — never a public issue |
 
-初始提交与发布标签使用 SSH 签名，可用 `git log --show-signature` 验证。
+## A note on this repository's history
+
+The public history starts at `v0.4.47`; earlier development history is retained privately by the copyright holder. This repository contains the client only — the server and cloud capabilities are not here and are not open source.
+
+The initial commit and the release tag are SSH-signed and can be verified with `git log --show-signature`.
 
 ---
 
