@@ -31,6 +31,7 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
 - `assets/` 下新增 `app.ico` 与 `brand/logo.svg`；托盘图标与它共用 `tools/lib/icon-codec.ts`
   的编解码（抽取后重出的 `tray.{png,ico}` 与改动前逐字节一致）。
 - 新增 `tools/check-exe-icon.ts`：产物侧断言"图标真的在 exe 里"，可对存量产物复核。
+- CI 的 Windows job 增加产物闸：编一次 `build:win` 后独立跑该断言，让「图标没进产物」在 PR 阶段就红，而不是等发版。
 
 ## [0.4.47] - 2026-11-08
 

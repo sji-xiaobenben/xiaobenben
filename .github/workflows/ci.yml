@@ -126,3 +126,14 @@ jobs:
           set -euo pipefail
           bun run build:linux
           bun run tools/check-tray-embedded.ts dist/xbb-linux-x64 linux
+      # 同一类失败的 Windows 侧。图标、产品名、发行者、文件版本都是**编译期**写进 PE 资源段的，
+      # 参数漏一项不会报错：产物照样启动，只是资源管理器显示一个空白壳、属性页写着 Bun 1.4.2。
+      # dev 侧完全看不出来，所以只能在产物上验（`build:win` 内部已经断言一次，这里再独立跑一遍
+      # 那个工具——它也可以拿去复核任何存量 exe）。
+      - name: "产物闸：图标与版本资源确实进了 Windows 产物"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run build:win
+          bun run tools/check-exe-icon.ts dist/xbb-windows-x64.exe
