@@ -196,9 +196,27 @@ Windows 上若 exe 不在 `PATH` 里，把 `command` 写成完整路径（如 `C
 - **能退** —— `xbb cloud off` 只是暂停（密钥保留，随时 `on` 切回）；`xbb unbind` 才真删。没有这一步，「上云」就是单向门
 - **多设备** —— 同一条长期密钥可在多台机器复用
 
+### 怎么开通
+
+不需要申请，也不是邀请制：账号登录后每月有 1 GB 免费读写额度，超出按 ¥10/GB 从余额扣，余额不过期（价格与额度以 <https://www.xiaobenben.net/versions/personal-cloud/#pricing> 为准）。
+
+绑定分两步，**票和密钥不是一回事**：
+
+```bash
+xbb register-protocol                    # 一次性：把 xubb:// 协议指向本机 exe
+xbb bind "xubb://bind?ticket=…&api=…"    # 控制台「连接我的小本本」生成，60 秒内单次有效
+xbb bind-key <xbb_live_…>                # 已有长期密钥：多机复用、误删配置后恢复
+```
+
+`register-protocol` **不会自动执行**，不跑这一步，控制台上的「连接我的小本本」按钮点下去毫无反应——而它不会给出任何错误，只是什么都不发生。这是整条链路上最容易卡住的地方。
+
+票用来**建立**信任（一次性、60 秒过期、必须回控制台现生成），密钥用来**复用**信任（长期、可多机）。第二台机器重复第二步即可。
+
+流程入口：账号中心 <https://account.xiaobenben.net> 看额度与余额，工作台 <https://console.xiaobenben.net> 生成绑定票。
+
 服务端、控制台与组织管理不在本仓，也不开源。这属于边界声明，不是功能清单——实现细节不给，因为给了你也验证不了。**能被验证的是这一条**：不绑定时，`xbb mcp` 与 `xbb serve` 的全部本地功能在断网环境下照常工作，相关代码路径完全不参与运行。
 
-客户端的接入点只有一个文件：[`src/cloud.ts`](src/cloud.ts)（六工具按 profile 路由本地/云端）。功能与开通方式见 <https://www.xiaobenben.net> 。
+客户端的接入点只有一个文件：[`src/cloud.ts`](src/cloud.ts)（六工具按 profile 路由本地/云端）。
 
 ---
 
@@ -310,8 +328,8 @@ xbb autostart on        # 重新打开
 | 产物 | 单文件，Windows 约 87 MB / Linux 约 83 MB / macOS 约 61 MB（含 SQLite 与 ONNX 运行时） |
 | 冷启动 | `xbb --help` 约 140 ms |
 | 依赖 | 4 个生产依赖（MCP SDK / ONNX Runtime / 托盘 / zod），全部来自 npmjs 官方源，`bun.lock` 无内网镜像 |
-| 许可头 | 每个源码文件带 SPDX 标识，CI 有闸防止新增文件漏加 |
-| 版本 | 版本号真源是 `package.json`，发版流水线有单调性闸 |
+
+实际分发进产物的第三方组件（含间接依赖）与许可全文见 [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) —— 按 `bun build --metafile` 的实际打包结果生成，不是按 lockfile 罗列。
 
 `core/` 是 `@xbb/core` 的内置副本（uuidv7 / 事件哈希链 / 端口与错误码），随本仓一同发布，因此 `git clone` 后无需访问任何私有仓即可构建。**不要直接修改 `core/` 下的文件**，说明见 [`core/README.md`](core/README.md)。
 
