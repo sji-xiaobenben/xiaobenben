@@ -502,13 +502,38 @@ export function migrateV9(db: Database): void {
   if (v.user_version < 9) db.exec("PRAGMA user_version = 9");
 }
 
+/**
+ * 建库/升级入口。**全部 DDL 必须在一个事务里**。
+ *
+ * 为什么：下面每一步都是几十条 `db.exec`，不包事务时每条 DDL 都是一个独立隐式事务、
+ * 各自 fsync。实测新建库要 310 ms，其中九成耗在提交次数上；包成一个事务后只剩一次提交。
+ * 这不只是测试变快——真实用户第一次启动、以及任何需要迁移的升级，付的都是这笔钱。
+ *
+ * 为什么是 `BEGIN`（deferred）而不是 `BEGIN IMMEDIATE`：deferred 只在第一条写语句时取锁，
+ * 与原来「每条 DDL 各取一次锁」的行为一致但窗口更小；用 IMMEDIATE 则会在 open 的瞬间就抢写锁，
+ * 而 `xbb serve` 与各客户端的 `xbb mcp` 可能同时打开同一个库，那会让并发启动互相等待。
+ *
+ * 回滚失败不再抛：SQLite 在部分错误下会自动回滚，此时 ROLLBACK 会报「no transaction is active」，
+ * 盖掉真正的错误原因。原错误必须原样抛出。
+ */
 export function initSchemaV2(db: Database): void {
-  initSchema(db);
-  migrateV2(db);
-  migrateV4(db);
-  migrateV5(db);
-  migrateV6(db);
-  migrateV7(db);
-  migrateV8(db);
-  migrateV9(db);
+  db.exec("BEGIN");
+  try {
+    initSchema(db);
+    migrateV2(db);
+    migrateV4(db);
+    migrateV5(db);
+    migrateV6(db);
+    migrateV7(db);
+    migrateV8(db);
+    migrateV9(db);
+    db.exec("COMMIT");
+  } catch (e) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* 已自动回滚 */
+    }
+    throw e;
+  }
 }
