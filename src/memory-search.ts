@@ -131,6 +131,58 @@ function normTime(t: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/**
+ * 给一批记忆算 1-hop 邻居预览（不含正文，只有 id + 关系 + 30 字）。
+ *
+ * 抽成函数是因为它有**两个调用方**：词法管线的命中，以及混合检索里纯向量命中的
+ * 那部分。两份实现一定会漂移——而这一处漂移过一次（见下面那条注释），代价是
+ * 「功能永远返回空数组，且没人发现」。
+ *
+ * `exclude` 放已在结果里的 id：邻居本身已经给过正文，就不该再花 25 token 给一份
+ * 摘要，那纯属同一信息付两次钱。
+ *
+ * 排序读的是**有效权重**（含时间衰减）：久不共现的边会自然沉下去，而不是永久占位。
+ */
+export function linkedPreviewFor(
+  db: Database,
+  ids: string[],
+  exclude: Set<string>,
+  limit = 10,
+): SearchResult["linkedPreview"] {
+  if (!ids.length || limit <= 0) return [];
+  const ph = ids.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT l.from_id, l.to_id, l.relation, m.content
+    FROM memory_links_eff l JOIN memories m ON m.id = CASE WHEN l.from_id IN (${ph}) THEN l.to_id ELSE l.from_id END
+    WHERE (l.from_id IN (${ph}) OR l.to_id IN (${ph})) AND l.eff > ${LINK_VISIBLE_MIN}
+    ORDER BY l.eff DESC
+    LIMIT ${limit}
+  `).all(...ids, ...ids, ...ids) as Array<{ from_id: string; to_id: string; relation: string; content: string }>;
+
+  const idSet = new Set(ids);
+  const out: SearchResult["linkedPreview"] = [];
+  for (const r of rows) {
+    // 对面那条：边至少有一端在 ids 里（见上面 WHERE），取另一端。
+    // ⚠️ 2026-11-08 修：这里原来写的是
+    //     if (hits.some((h) => h.id === r.from_id || h.id === r.to_id)) continue;
+    //   而这个条件与 WHERE 的 `from_id IN (…) OR to_id IN (…)` 完全等价 ⇒ 恒为真，
+    //   每一行都被跳过，linkedPreview **永远是空数组**。功能从上线起就没生效过，
+    //   而 search_memory 的工具描述还一直对 AI 承诺 "linkedPreview neighbors" ——
+    //   AI 读到空数组会认定「没有关联」，于是不再往下去找，比缺功能更糟。
+    //   没有任何测试断言过 linkedPreview，所以它安静地空了很久。现在的判据是
+    //   「**另一端**是否已在结果里」：在，就不必再占一份预览 token；不在，才推。
+    const other = idSet.has(r.from_id) ? r.to_id : r.from_id;
+    if (exclude.has(other)) continue;
+    exclude.add(other); // 同一邻居被多条命中共享时只推一次
+    out.push({
+      id: other,
+      relation: r.relation,
+      preview: maskSecrets(r.content.length > 30 ? r.content.slice(0, 30) + "…" : r.content),
+    });
+  }
+  return out;
+}
+
 export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const limit = Math.min(params.limit ?? 5, 10);
   const budget = params.budget ?? 2000;
@@ -273,25 +325,10 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   }
 
   // ── 1-hop 链接扩展（折叠为单行预览，~25 token）──
-  // 排序读的是**有效权重**（含时间衰减）：久不共现的边会自然沉下去，而不是永久占位。
-  const linkedPreview: SearchResult["linkedPreview"] = [];
-  if (hits.length) {
-    const ids = hits.map((h) => h.id);
-    const ph = ids.map(() => "?").join(",");
-    const rows = db.prepare(`
-      SELECT l.from_id, l.to_id, l.relation, m.content
-      FROM memory_links_eff l JOIN memories m ON m.id = CASE WHEN l.from_id IN (${ph}) THEN l.to_id ELSE l.from_id END
-      WHERE (l.from_id IN (${ph}) OR l.to_id IN (${ph})) AND l.eff > ${LINK_VISIBLE_MIN}
-      ORDER BY l.eff DESC
-      LIMIT 10
-    `).all(...ids, ...ids, ...ids) as Array<{ from_id: string; to_id: string; relation: string; content: string }>;
-    for (const r of rows) {
-      if (hits.some((h) => h.id === r.from_id || h.id === r.to_id)) continue;
-      const preview = maskSecrets(r.content.length > 30 ? r.content.slice(0, 30) + "…" : r.content);
-      linkedPreview.push({ id: r.to_id || r.from_id, relation: r.relation, preview });
-      tokensUsed += 25;
-    }
-  }
+  const linkedPreview = hits.length
+    ? linkedPreviewFor(db, hits.map((h) => h.id), new Set(hits.map((h) => h.id)))
+    : [];
+  tokensUsed += linkedPreview.length * 25;
 
   // ── related_tags：命中项的标签/实体，引导 AI 下一轮换词 ──
   const tagSet = new Set<string>();
@@ -389,7 +426,20 @@ export async function searchHybrid(
         matchedTerms: ["vector"], onThisDevice: true,
       });
     }
-    return { hits: merged, linkedPreview: lexical.linkedPreview, relatedTags: lexical.relatedTags, tokensUsed: tokens, vecHits: vecHits.length };
+    // 纯向量命中的条目不在 lexical.hits 里，它们的出边不会被词法管线算到——
+    // 而「说法完全不同、语义相近」正是向量通道存在的理由（9 月说"吃饭的锅"、
+    // 7 月记的是"电饭煲"）。漏在这里，等于多跳链在最需要它的那条路径上断掉。
+    const lexIds = new Set(lexical.hits.map((h) => h.id));
+    let linkedPreview = lexical.linkedPreview;
+    const extraIds = merged.filter((h) => !lexIds.has(h.id)).map((h) => h.id);
+    if (extraIds.length) {
+      const seen = new Set(merged.map((h) => h.id));
+      for (const p of linkedPreview) seen.add(p.id);
+      const extra = linkedPreviewFor(db, extraIds, seen, Math.max(0, 10 - linkedPreview.length));
+      linkedPreview = linkedPreview.concat(extra);
+      tokens += extra.length * 25;
+    }
+    return { hits: merged, linkedPreview, relatedTags: lexical.relatedTags, tokensUsed: tokens, vecHits: vecHits.length };
   } catch {
     return lexical; // 永不因向量故障挂
   }

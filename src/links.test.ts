@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { PersonalStore } from "./store";
 import { getMemory, getRelated } from "./memory-tools";
+import { searchHybrid, searchMemory } from "./memory-search";
 import { onRecalled, reinforceCooccurrence, CO_OCCUR_MAX_NODES } from "./recall-feedback";
 import { initSchemaV2, LINK_HALF_LIFE_DAYS, migrateV6 } from "./schema";
 
@@ -249,5 +250,72 @@ describe("读路径：邻居用有效权重与出度归一", () => {
     const g = getMemory(db, a) as { links: { id: string; weight: number }[] };
     const l = g.links.find((x) => x.id === b)!;
     expect(l.weight).toBeGreaterThan(0.4);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 检索结果里的 1-hop 预览（linkedPreview）
+//
+// 这一组存在的理由：断言写的是「**另一端**在不在命中里」，而实现最初写成了
+// 「任一端在命中里就跳过」——与 SQL 的 WHERE 完全等价，于是恒跳过、永远是空数组。
+// 功能从上线起就是死的，测试一条都没碰过它。下面两条一正一反钉住它。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("search 结果里的 linkedPreview（1-hop 邻居预览）", () => {
+  test("命中的记忆有出边 ⇒ 邻居以预览形式带出，且 id 指向**邻居**而不是自己", async () => {
+    // neighbor 的正文刻意不含「紫电项目」：若它自己也能被这个词搜到，就会进 hits，
+    // 而「邻居已在命中里就不重复推预览」是另一条规则（下面那个用例管它）。
+    const neighbor = await mem("样机外壳走 316 不锈钢，耐盐雾更强");
+    const seed = await mem("紫电项目的样机选材定了", [{ toId: neighbor }]);
+
+    const r = searchMemory(db, { terms: ["紫电项目"], limit: 5 });
+    expect(r.hits.some((h) => h.id === seed)).toBe(true);
+
+    const lp = r.linkedPreview.find((p) => p.id === neighbor);
+    expect(lp).toBeDefined();          // 原来的空数组会让这条直接失败
+    expect(lp!.relation).toBe("related_to");
+    expect(lp!.preview.length).toBeGreaterThan(0);
+    expect(lp!.preview.length).toBeLessThanOrEqual(31); // 30 字 + 省略号
+    // 反向断言：不能把命中项自己塞进预览（旧实现取的是 to_id || from_id）
+    expect(r.linkedPreview.some((p) => p.id === seed)).toBe(false);
+  });
+
+  test("邻居本身也在命中里 ⇒ 不重复推预览（省 token）", async () => {
+    const a = await mem("青岚计划-第一版结论");
+    const b = await mem("青岚计划-第二版结论", [{ toId: a }]);
+
+    // 让两条都命中
+    const r = searchMemory(db, { terms: ["青岚计划"], limit: 5 });
+    const hitIds = new Set(r.hits.map((h) => h.id));
+    if (hitIds.has(a) && hitIds.has(b)) {
+      expect(r.linkedPreview.some((p) => p.id === a || p.id === b)).toBe(false);
+    }
+  });
+});
+
+describe("混合检索：纯向量命中也带出邻居", () => {
+  /** 给记忆塞一个 embedding（512 维），让向量通道能命中它 */
+  function setEmbedding(id: string, v: Float32Array) {
+    db.prepare("UPDATE memories SET embedding = ?, vec_model = ? WHERE id = ?")
+      .run(Buffer.from(v.buffer.slice(0)), "bge-small-zh-v1.5/int8", id);
+  }
+
+  test("词法搜不到、只有向量命中时，它的出边仍然出现在 linkedPreview 里", async () => {
+    // 邻居：正文里没有任何查询词
+    const neighbor = await mem("三一六比三零四含钼，耐盐雾腐蚀强得多");
+    // 种子：正文刻意与查询词零重叠，词法通道必然搜不到它
+    const seed = await mem("那个煮饭的家伙事儿该换了", [{ toId: neighbor }]);
+
+    const v = new Float32Array(512).fill(0.05);
+    setEmbedding(seed, v);
+
+    const r = await searchHybrid(db, async () => v, { terms: ["崟岚工坊"], limit: 5 });
+
+    // 前提成立：词法没命中它（否则测的就不是向量路径了）
+    expect(r.vecHits).toBeGreaterThan(0);
+    expect(r.hits.some((h) => h.id === seed)).toBe(true);
+    expect(r.hits.find((h) => h.id === seed)!.matchedTerms).toContain("vector");
+
+    // 关键断言：向量命中的条目，其邻居也要被带出来
+    expect(r.linkedPreview.some((p) => p.id === neighbor)).toBe(true);
   });
 });
