@@ -18,6 +18,8 @@ All rights reserved.
 
 ## 第三方组件
 
+直接依赖 4 个，全部以 MIT 分发：
+
 | 组件 | 版本 | 许可证 | 用途 |
 |---|---|---|---|
 | `@modelcontextprotocol/sdk` | 1.30.1 | MIT | MCP 协议实现 |
@@ -25,9 +27,11 @@ All rights reserved.
 | `systray2` | 2.1.4 | MIT | 系统托盘 |
 | `zod` | 3.25.76 | MIT | 运行时数据校验 |
 
-其中 `onnxruntime-node` 内含 ONNX Runtime，其版权归 Microsoft Corporation 所有，同样以 MIT 许可分发。
+`onnxruntime-node` 内含 ONNX Runtime，版权归 Microsoft Corporation 所有，同样以 MIT 许可分发。
 
-完整的间接依赖清单与许可证以 `bun.lock` 解析结果为准。
+`systray2` 内嵌三个平台的托盘二进制，该二进制由 systray-portable 编译，其中包含 getlantern/systray 的代码 —— **这部分的许可是 Apache-2.0，不是 MIT**。单独点出来是因为它藏在 MIT 包的 asset 里，只看直接依赖表会漏掉。
+
+分发包实际包含的组件（含间接依赖）、各自版本与**完整许可全文**见 [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md)。该文件按 `bun build --metafile` 的实际打包结果生成，而不是按 `bun.lock` 罗列 —— 后者是安装集，会把没进二进制的包也列进去。
 
 ## 嵌入模型
 

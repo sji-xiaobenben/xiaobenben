@@ -13,3 +13,4 @@ dist/
 tools/poc/*.exe
 tools/poc/dist-poc/
 .selfupdate-probe/
+.third-party-build/

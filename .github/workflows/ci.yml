@@ -57,6 +57,12 @@ jobs:
             exit 1
           fi
           echo "✓ 全部源码文件均带 SPDX 头"
+      # 依赖变了却没重生成 THIRD-PARTY-LICENSES.md 时，分发包里的许可声明就与实际内容不符——
+      # 这属于违反许可，不是"文档过期"，而且不会有任何环节报错。生成结果与平台无关
+      # （脚本对包名排序后再渲染，许可原文来自 node_modules 里附带的文件），所以只跑 Linux 一次。
+      - name: "第三方许可闸：声明与实际打包结果一致"
+        if: runner.os == 'Linux'
+        run: bun run tools/gen-third-party-licenses.ts --check
       - name: Typecheck
         run: bun run typecheck
       # 自更新身份闸：release.yml 的注入只在 RELEASE_ENABLED=true 时才跑，平时静默存在。
