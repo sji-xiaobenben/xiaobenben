@@ -8,7 +8,7 @@
 
 | 组件 | 版本 | 许可 | 分发形态 |
 |---|---|---|---|
-| `@modelcontextprotocol/sdk` | 1.30.1 | MIT | 打包进 exe |
+| `@modelcontextprotocol/sdk` | 1.32.2 | MIT | 打包进 exe |
 | `ajv` | 8.20.0 | MIT | 打包进 exe |
 | `ajv-formats` | 3.0.1 | MIT | 打包进 exe |
 | `fast-deep-equal` | 3.1.3 | MIT | 打包进 exe |
@@ -17,8 +17,8 @@
 | `systray2` | 2.1.4 | MIT | 打包进 exe |
 | `zod` | 3.25.76 | MIT | 打包进 exe |
 | `zod-to-json-schema` | 3.25.2 | ISC | 打包进 exe |
-| `onnxruntime-node` | 1.30.0 | MIT | 运行时旁路加载（外置 node_modules） |
-| `onnxruntime-common` | 1.30.0 | MIT | 运行时旁路加载（外置 node_modules） |
+| `onnxruntime-node` | 1.31.1 | MIT | 运行时旁路加载（外置 node_modules） |
+| `onnxruntime-common` | 1.31.1 | MIT | 运行时旁路加载（外置 node_modules） |
 | `systray-portable（托盘二进制）` | 随 systray2 2.1.4 提供 | MIT | 嵌入 exe（三个平台各一份 Go 二进制） |
 | `getlantern/systray` | systray-portable 的上游 | Apache-2.0 | 嵌入 exe（编译进上面那个托盘二进制） |
 
@@ -29,7 +29,7 @@
 
 # 许可全文
 
-### @modelcontextprotocol/sdk 1.30.1 — MIT
+### @modelcontextprotocol/sdk 1.32.2 — MIT
 
 ```text
 MIT License
@@ -266,7 +266,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### onnxruntime-node 1.30.0 — MIT
+### onnxruntime-node 1.31.1 — MIT
 
 ```text
 MIT License
@@ -292,7 +292,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### onnxruntime-common 1.30.0 — MIT
+### onnxruntime-common 1.31.1 — MIT
 
 ```text
 MIT License
