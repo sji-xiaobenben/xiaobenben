@@ -24,11 +24,19 @@ jobs:
       OSSUTIL_VERSION: "2.2.1"
       OSSUTIL_SHA256: fbf1026bd383a5d9bee051cd64a6226c730357ba569491f7c7b91af66560ef1d
     steps:
-      - name: 打印本次 OIDC subject
+      - name: 打印本次 OIDC token 的真实 subject
         run: |
+          set -euo pipefail
           echo "仓库: ${{ github.repository }}"
           echo "分支: ${{ github.ref }}"
-          echo "预期 subject 之一：repo:${{ github.repository }}:ref:${{ github.ref }}"
+          # 不用 github.repository 拼 sub —— GitHub 自 2026 年起会在 sub 里附上 owner/repo 的
+          # 数字 ID（不可变主体），拼出来的字符串与真实 token 不一致，而信任策略比的是后者。
+          TOKEN=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.aliyuncs.com" | jq -r .value)
+          python3 -c "import base64,json,sys
+p=sys.argv[1].split('.')[1]; p+='='*(-len(p)%4)
+c=json.loads(base64.urlsafe_b64decode(p))
+print('真实 sub:', c['sub']); print('真实 aud:', c['aud']); print('真实 iss:', c['iss'])" "$TOKEN"
       - name: 取阿里云短期凭据（OIDC 免密钥联合身份）
         id: aliyun
         uses: aliyun/configure-aliyun-credentials-action@v1.1.0
