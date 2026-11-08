@@ -198,7 +198,7 @@ Windows 上若 exe 不在 `PATH` 里，把 `command` 写成完整路径（如 `C
 
 ### 怎么开通
 
-不需要申请，也不是邀请制：账号登录后每月有 1 GB 免费读写额度，超出按 ¥10/GB 从余额扣，余额不过期（价格与额度以 <https://www.xiaobenben.net/versions/personal-cloud/#pricing> 为准）。
+不需要申请，也不是邀请制：账号登录后每月有 1 GB 免费读写额度，超出按 ¥10/GB 从余额扣，余额不过期（价格与额度以 <https://xiaobenben.net/versions/personal-cloud/#pricing> 为准）。
 
 绑定分两步，**票和密钥不是一回事**：
 
@@ -224,7 +224,7 @@ xbb bind-key <xbb_live_…>                # 已有长期密钥：多机复用�
 
 从官网下载对应平台的单文件可执行：
 
-<https://www.xiaobenben.net>
+<https://xiaobenben.net>
 
 直接运行，无运行时依赖。之后程序会通过官方签名清单自更新。
 

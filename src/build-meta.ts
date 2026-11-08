@@ -46,7 +46,7 @@ export const BUILD_REPO = "";
 export const IS_OFFICIAL_BUILD = BUILD_TIME !== "local" && BUILD_REPO === OFFICIAL_REPO;
 export const VENDOR = "世纪之城（广州）信息科技有限公司";
 export const VENDOR_SHORT = "SJi";
-export const OFFICIAL_SITE = "https://www.xiaobenben.net";
+export const OFFICIAL_SITE = "https://xiaobenben.net";
 
 /**
  * 自更新默认清单地址。

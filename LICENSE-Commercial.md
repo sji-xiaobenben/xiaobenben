@@ -34,7 +34,7 @@
 请通过以下任一方式联系版权方，说明用途、部署形态与分发方式：
 
 - 邮箱：`admin@sji.xin`
-- 官网：https://www.xiaobenben.net
+- 官网：https://xiaobenben.net
 
 商业许可与 AGPL-3.0 是**并列选项**，不是附加限制：你可以自由选择其一，二者不可同时适用于同一份使用行为。
 

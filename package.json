@@ -7,7 +7,7 @@
   "engines": {
     "bun": ">=1.4.2"
   },
-  "homepage": "https://www.xiaobenben.net",
+  "homepage": "https://xiaobenben.net",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sji-xiaobenben/xbb-cli.git"
