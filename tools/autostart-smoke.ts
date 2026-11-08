@@ -66,6 +66,12 @@ mkdirSync(HOME, { recursive: true });
 const PREV_XBB_HOME = process.env.XBB_HOME;
 process.env.XBB_HOME = join(ROOT, "xbbhome"); // 隔离偏好文件，别动用户真实 config.json
 
+// XDG_CONFIG_HOME 必须临时清掉：它是 Linux 上真正生效的那份配置根，
+// 一旦继承宿主环境（GitHub 的 ubuntu runner 就设了），`home` 注入会被它盖过 ——
+// 断言就会随宿主环境飘（本地绿、CI 红）。下面单独有一条用例把它设回来验优先级。
+const PREV_XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+delete process.env.XDG_CONFIG_HOME;
+
 const fakeShell = (code = 0, out = "") => () => ({ code, out });
 
 async function main() {
@@ -170,12 +176,23 @@ async function main() {
 
   ok(disableAutostart(linOpts).ok && !existsSync(p), "Linux 删除后文件确实消失");
 
-  // XDG_CONFIG_HOME 是相对路径时按规范忽略，不能跟着 cwd 跑
+  // XDG_CONFIG_HOME 是相对路径时按规范忽略，不能跟着 cwd 跑；
+  // 绝对路径则**优先于** ~/.config —— 这条是 Linux 上真正生效的那份（桌面会话里通常已设）
   ok(
-    xdgAutostartPath({ platform: "linux", home: HOME, xdgConfigHome: undefined }) ===
-      join(HOME, ".config", "autostart", XDG_DESKTOP_FILE),
+    xdgAutostartPath({ platform: "linux", home: HOME }) === join(HOME, ".config", "autostart", XDG_DESKTOP_FILE),
     "XDG_CONFIG_HOME 未设时回落到 ~/.config",
   );
+  process.env.XDG_CONFIG_HOME = "/custom/xdg";
+  ok(
+    xdgAutostartPath({ platform: "linux", home: HOME }) === join("/custom/xdg", "autostart", XDG_DESKTOP_FILE),
+    "XDG_CONFIG_HOME 为绝对路径时优先于 ~/.config（桌面会话的常态）",
+  );
+  process.env.XDG_CONFIG_HOME = "relative/xdg";
+  ok(
+    xdgAutostartPath({ platform: "linux", home: HOME }) === join(HOME, ".config", "autostart", XDG_DESKTOP_FILE),
+    "XDG_CONFIG_HOME 为相对路径时按规范忽略（否则自启项会跟着 cwd 跑）",
+  );
+  delete process.env.XDG_CONFIG_HOME;
 
   // ── 4. 非 Windows：不再"假装不支持"，但要能识别未知平台 ─────
   ok(readAutostart({ platform: "darwin", home: HOME }).supported, "macOS：status 如实报告 supported=true");
@@ -290,6 +307,8 @@ async function main() {
 function cleanup(): void {
   if (PREV_XBB_HOME === undefined) delete process.env.XBB_HOME;
   else process.env.XBB_HOME = PREV_XBB_HOME;
+  if (PREV_XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = PREV_XDG_CONFIG_HOME;
   try {
     rmSync(ROOT, { recursive: true, force: true });
   } catch {
