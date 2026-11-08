@@ -38,21 +38,25 @@ jobs:
           bun-version: 1.4.2
       - name: Install
         run: bun install --backend copyfile
-      # 许可头闸：每个 .ts 都要自证许可（SPDX 表达式），新增文件忘加就拦住。
+      # 许可头闸：每个可执行源码文件都要自证许可（SPDX 表达式），新增文件忘加就拦住。
       # 没有这道闸，头会慢慢腐掉——而 OEM 客户做开源合规审查时是逐个文件看的。
+      # 覆盖 .ts/.mjs/.js/.sh：前三个会随 exe 或插件一起落到用户机器上，.sh 是发版旁路，
+      # 都是"被复制走之后仍带着出处"最有价值的那类文件。
       # 只跑 Linux 一次：内容检查与平台无关，两平台各跑一遍纯属白烧分钟数。
-      - name: "许可闸：每个 .ts 都有 SPDX 头"
+      - name: "许可闸：可执行源码都带 SPDX 头"
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          missing=$(grep -rL "SPDX-License-Identifier" src core tools --include='*.ts' --exclude-dir=node_modules || true)
+          missing=$(grep -rL "SPDX-License-Identifier" src core tools plugins \
+            --include='*.ts' --include='*.mjs' --include='*.js' --include='*.sh' \
+            --exclude-dir=node_modules || true)
           if [ -n "$missing" ]; then
-            echo "::error::以下文件缺少 SPDX 许可头，请照抄 src/serve.ts 的前两行："
+            echo "::error::以下文件缺少 SPDX 许可头，请照抄 src/serve.ts 的前两行（脚本类放 shebang 之后）："
             printf '%s\n' "$missing"
             exit 1
           fi
-          echo "✓ 全部 .ts 均带 SPDX 头"
+          echo "✓ 全部源码文件均带 SPDX 头"
       - name: Typecheck
         run: bun run typecheck
       # 自更新身份闸：release.yml 的注入只在 RELEASE_ENABLED=true 时才跑，平时静默存在。

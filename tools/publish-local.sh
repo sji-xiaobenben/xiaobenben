@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+# Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
 # ─────────────────────────────────────────────────────────────────────────────
 # 本地应急发版—— 当 GitHub Actions 不可用（额度耗尽、上游故障、
 # 紧急修一个已发出的坏版本）时的旁路。**这也是"push master 全自动"之外的唯一人工通道。**

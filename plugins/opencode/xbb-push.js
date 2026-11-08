@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// Copyright (C) 2026 世纪之城（广州）信息科技有限公司 (SJI)
 /**
  * 小本本 opencode 适配器（宿主适配器）：
  * 每回合边界把对话文本 POST 到本地 xbb serve（http://127.0.0.1:17630/hooks/turn），
