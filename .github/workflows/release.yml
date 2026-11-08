@@ -276,6 +276,18 @@ jobs:
           sed -i.bak "s#export const UPDATE_URL_DEFAULT = \".*\";#export const UPDATE_URL_DEFAULT = \"${{ env.DIST_BASE }}/channels/stable.json\";#" src/build-meta.ts
           rm -f src/build-meta.ts.bak
           grep -E '^export const (VERSION|BUILD_TIME|UPDATE_URL_DEFAULT)' src/build-meta.ts
+          # 注入必须真的生效。BUILD_TIME 一旦留在 "local"，IS_OFFICIAL_BUILD 就是 false，
+          # 产物出厂即失去自更新 —— 全量用户永久停在旧版，而客户端不会有**任何**报错：
+          # 「已是最新」四个字和正常情况一模一样。这道守只能在 CI 里。
+          if ! grep -qE '^export const BUILD_TIME = "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}";' src/build-meta.ts; then
+            echo "::error::BUILD_TIME 注入失败（仍为 local 或格式不符）—— 这会让全量客户端失去自更新"
+            exit 1
+          fi
+          # VERSION 同理：留在占位值就把发版号写错了，而版本号错了客户端同样只会「已是最新」
+          if ! grep -qF "export const VERSION = \"$VERSION\";" src/build-meta.ts; then
+            echo "::error::VERSION 注入失败（期望 $VERSION）"
+            exit 1
+          fi
       - name: Build onnxruntime bundle（PoC 定案：依赖树单文件 CJS + .node external）
         working-directory: cli
         run: bun build --target=bun --format=cjs --external "*.node" --outfile node_modules/onnxruntime-node/dist/ort-bundle.cjs src/ort-bundle-entry.ts

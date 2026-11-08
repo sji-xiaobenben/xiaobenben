@@ -19,6 +19,15 @@ export const VERSION = "0.4.47";
 // **刻意不写一个具体日期**：那会让 fork 者今天构建出的产物自称是某个历史时间构建的，
 // 排查「这个 exe 到底哪来的」时会把人带偏——宁可说"不知道"，也不要说一个错的。
 export const BUILD_TIME = "local";
+
+/**
+ * 是否官方发布构建 —— 取决于 release.yml 有没有把真实时刻注入进来。
+ *
+ * 自更新靠它区分两件本质不同的事：「这套公钥和 CDN 是我自己发布的」与
+ * 「我只是 fork 了别人的代码，但继承了对方的公钥和 CDN」。后者一旦自动更新，
+ * 官方发版时弹的「要不要更新到 0.4.48」会把用户引导成官方 exe，fork 者的定制被顶掉。
+ */
+export const IS_OFFICIAL_BUILD = BUILD_TIME !== "local";
 export const VENDOR = "世纪之城（广州）信息科技有限公司";
 export const VENDOR_SHORT = "SJi";
 export const OFFICIAL_SITE = "https://www.xiaobenben.net";

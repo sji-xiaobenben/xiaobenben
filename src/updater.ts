@@ -23,7 +23,7 @@ import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, read
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { VERSION as BUILD_VERSION, UPDATE_PUBKEY, UPDATE_URL_DEFAULT } from "./build-meta";
+import { VERSION as BUILD_VERSION, UPDATE_PUBKEY, UPDATE_URL_DEFAULT, IS_OFFICIAL_BUILD } from "./build-meta";
 import { buildUpdatePayload, type ManifestFiles } from "./update-payload";
 
 export interface UpdateManifest {
@@ -74,6 +74,25 @@ export function updateRoot(): string {
  */
 export function resolveUpdateUrl(): string {
   return process.env.XBB_UPDATE_URL ?? UPDATE_URL_DEFAULT;
+}
+
+/**
+ * 这个产物有没有资格用「编译期内置的」更新源。
+ *
+ * 官方发版由 release.yml 把 BUILD_TIME 注入成真实时刻，本地构建与第三方构建保持 "local"
+ * —— 所以 IS_OFFICIAL_BUILD 就是「这是不是我们自己发的版」。
+ *
+ * 非官方构建默认**不**自更新。原因不是安全，是身份：[`UPDATE_PUBKEY`] 和
+ * [`UPDATE_URL_DEFAULT`] 都是编译期常量，fork 出来的产物把**官方的**公钥和 CDN
+ * 一起编了进去。官方一发版，它就会在用户面前弹「要不要更新到 0.4.48」，用户点了，
+ * 验签会通过（那本来就是官方签的），然后 fork 者的定制代码被官方 exe 顶掉。
+ * 他继承的是我们发布链路的身份，但不该继承它的更新去向。
+ *
+ * 显式设了 `XBB_UPDATE_URL`（含空串）即放行：那是用户在明说「我知道我在连哪里」。
+ * 空串随后会在 `resolveUpdateUrl()` 那层变成「关闭」——两件事各管各的，不冲突。
+ */
+export function usesBuiltinUpdateSource(): boolean {
+  return process.env.XBB_UPDATE_URL !== undefined || IS_OFFICIAL_BUILD;
 }
 
 /**
@@ -271,7 +290,7 @@ export class Updater {
   private checking = false;
 
   get enabled(): boolean {
-    return !!resolveUpdateUrl();
+    return !!resolveUpdateUrl() && usesBuiltinUpdateSource();
   }
 
   /**
@@ -282,6 +301,16 @@ export class Updater {
     const url = resolveUpdateUrl();
     if (!url) {
       if (manual) console.log("[update] 自更新已关闭（XBB_UPDATE_URL 为空）");
+      return { status: "disabled" };
+    }
+    if (!usesBuiltinUpdateSource()) {
+      // 刻意不是 "failed"：没有出任何错，是这个产物不该自动更新。
+      // 提示要给出「想连官方源」的完整命令，否则用户只会看到一句「关了」而无从下手。
+      if (manual) {
+        console.log("[update] 本地构建：自更新默认关闭");
+        console.log("         本产物内置的是官方更新源与签名公钥，自动更新会把你的构建换成官方 exe。");
+        console.log(`         确实要连官方源：XBB_UPDATE_URL=${UPDATE_URL_DEFAULT}`);
+      }
       return { status: "disabled" };
     }
     if (this.checking) return { status: "failed", reason: "already_checking" };

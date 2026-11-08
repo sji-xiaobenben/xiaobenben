@@ -51,6 +51,8 @@ bun run build:mac-intel
 
 `core/` 是 `@xbb/core` 的内置副本（uuidv7 / 事件哈希链 / 端口与错误码），随本仓一同发布，因此 `git clone` 后无需访问任何私有仓即可构建。**不要直接修改 `core/` 下的文件**，说明见 [`core/README.md`](core/README.md)。
 
+本地构建出的产物 `xbb version` 会自报 `构建 local`，且**默认不参与自更新**：它编进去的是官方签名公钥与官方 CDN，若照常自动更新，只会把你的构建换成官方 exe。要用官方源（或自己的镜像）就显式指定 `XBB_UPDATE_URL`；要长期分发自己的版本，还需换掉公钥，见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的「Fork 之后要分发自己的构建」。
+
 > `bun.lock` 记录的是官方源 `registry.npmjs.org`。国内网络如遇安装慢，可临时换镜像：
 > `bun install --registry https://registry.npmmirror.com`
 

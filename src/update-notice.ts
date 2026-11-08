@@ -30,6 +30,7 @@ import {
   readBlocklist,
   resolveUpdateUrl,
   updateRoot,
+  usesBuiltinUpdateSource,
   type ProbeOutcome,
 } from "./updater";
 
@@ -104,7 +105,12 @@ export function isStale(state: UpdateNoticeState | null, now = Date.now()): bool
  */
 export function noticeEnabled(): boolean {
   if (!resolveUpdateUrl()) return false;
-  return isCompiledExe() || process.env.XBB_UPDATE_NOTICE_FORCE === "1";
+  // 冒烟测试的强制口：它要同时绕过「非编译产物」和「非官方构建」两道闸，
+  // 否则这段判定在真机形态之外根本无法被覆盖。
+  if (process.env.XBB_UPDATE_NOTICE_FORCE === "1") return true;
+  // 身份闸与 updater 同源：fork 出来的产物不该被告知「官方有新版本」——
+  // 那条提示对这个用户是误导，他一点确认，定制代码就被官方 exe 顶掉。
+  return isCompiledExe() && usesBuiltinUpdateSource();
 }
 
 export interface DeriveOpts {
