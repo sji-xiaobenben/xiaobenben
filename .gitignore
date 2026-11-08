@@ -12,3 +12,4 @@ dist/
 *.db-wal
 tools/poc/*.exe
 tools/poc/dist-poc/
+.selfupdate-probe/

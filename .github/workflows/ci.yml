@@ -55,6 +55,56 @@ jobs:
           echo "✓ 全部 .ts 均带 SPDX 头"
       - name: Typecheck
         run: bun run typecheck
+      # 自更新身份闸：release.yml 的注入只在 RELEASE_ENABLED=true 时才跑，平时静默存在。
+      # 而注入一旦失配（有人给常量加了类型标注、改了常量名、换了占位值形状），sed 会**静默**
+      # 替换不上：产物只是失去自更新，客户端照样回报「已是最新」，全量用户永久停在旧版。
+      # 等发版当天才发现太晚，所以每次 CI 都用与 release.yml 同形的 sed 演一遍判定。
+      # 只跑 Linux 一次：纯字符串与类型判定，与平台无关。
+      - name: "自更新身份闸：官方仓才检索更新，fork 与本地构建不检索"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 用仓内相对目录而不是 mktemp：bun -e 的动态 import 走的是原生路径，
+          # /tmp/... 在 Windows 上解析不到（本地复跑这道闸时会踩），相对路径两平台一致。
+          tmp=".selfupdate-probe"
+          rm -rf "$tmp" && mkdir -p "$tmp"
+          trap 'rm -rf "$tmp"' EXIT
+          official_repo=$(sed -nE 's/^export const OFFICIAL_REPO(: string)? = "(.*)";/\2/p' src/build-meta.ts)
+          if [ -z "$official_repo" ]; then
+            echo "::error::从 src/build-meta.ts 读不到 OFFICIAL_REPO"
+            exit 1
+          fi
+          probe() {
+            local repo="$1" want="$2"
+            cp src/build-meta.ts "$tmp/build-meta.ts"
+            # 与 release.yml 注入步骤逐字同形
+            sed -i "s#export const VERSION = \".*\";#export const VERSION = \"9.9.9\";#" "$tmp/build-meta.ts"
+            sed -i "s#export const BUILD_TIME = \".*\";#export const BUILD_TIME = \"2026-01-01 00:00\";#" "$tmp/build-meta.ts"
+            sed -i "s#export const BUILD_REPO = \".*\";#export const BUILD_REPO = \"$repo\";#" "$tmp/build-meta.ts"
+            # 替换不上时 sed 会原样保留旧行，这里必须自己验，否则后面读到的是没注入的文件
+            if ! grep -qF "export const BUILD_REPO = \"$repo\";" "$tmp/build-meta.ts"; then
+              echo "::error::BUILD_REPO 注入失配（期望 $repo）—— release.yml 的 sed 与自己已不同步"
+              exit 1
+            fi
+            got=$(bun -e "const m = await import('./$tmp/build-meta.ts'); console.log(m.IS_OFFICIAL_BUILD)" | tr -d '\r')
+            if [ "$got" != "$want" ]; then
+              echo "::error::BUILD_REPO=$repo 时 IS_OFFICIAL_BUILD 应为 $want，实际 $got"
+              exit 1
+            fi
+            echo "✓ BUILD_REPO=$repo → official=$got"
+          }
+          probe "$official_repo" true
+          probe "someone-else/xbb-cli" false
+          probe "${official_repo}-fork" false   # 仓库名长得像官方也不行
+          # 未注入的本地构建同样必须是非官方
+          cp src/build-meta.ts "$tmp/build-meta.ts"
+          got=$(bun -e "const m = await import('./$tmp/build-meta.ts'); console.log(m.IS_OFFICIAL_BUILD)" | tr -d '\r')
+          if [ "$got" != "false" ]; then
+            echo "::error::未注入的本地构建被判成官方（IS_OFFICIAL_BUILD=$got）—— 本地 exe 会去官网查更新"
+            exit 1
+          fi
+          echo "✓ 未注入（本地直接构建）→ official=false"
       - name: Test
         run: bun run test:ci
       # dev 通、exe 挂 - 本项目最贵的一类失败（托盘就是这么在正式版里坏了 10 天没人发现）。
