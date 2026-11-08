@@ -1,0 +1,74 @@
+# 临时探针：验证新仓能否用 OIDC 换取阿里云短期凭据并读写 OSS 桶。
+#
+# 为什么需要它：仓从 xbb-cli 改名为 xbb-cli-archive、又新建了一个 xbb-cli，
+# 而 RAM 角色 xbb-cli-release 的信任策略里写死的 OIDC subject 是「仓库名 + 分支」。
+# 改名之后那个 subject 到底落在哪个仓上，光看 GitHub 侧看不出来 —— 只能真的去 AssumeRole。
+#
+# 探针通过后本文件即删除：它不是流水线的一部分，留着就是一条没人维护的权限入口。
+name: OIDC Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      OSS_BUCKET: xiaobenben-dl-prod
+      OSS_REGION: cn-shenzhen
+      OSS_ENDPOINT_HOST: ${{ vars.OSS_ENDPOINT_HOST || 'oss-cn-shenzhen.aliyuncs.com' }}
+      OSSUTIL_VERSION: "2.2.1"
+      OSSUTIL_SHA256: fbf1026bd383a5d9bee051cd64a6226c730357ba569491f7c7b91af66560ef1d
+    steps:
+      - name: 打印本次 OIDC subject
+        run: |
+          echo "仓库: ${{ github.repository }}"
+          echo "分支: ${{ github.ref }}"
+          echo "预期 subject 之一：repo:${{ github.repository }}:ref:${{ github.ref }}"
+      - name: 取阿里云短期凭据（OIDC 免密钥联合身份）
+        id: aliyun
+        uses: aliyun/configure-aliyun-credentials-action@v1.1.0
+        with:
+          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-expiration: 1800
+      - name: 装 ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-${OSSUTIL_VERSION}-linux-amd64.zip"
+          echo "${OSSUTIL_SHA256}  /tmp/ossutil.zip" | sha256sum -c -
+          rm -rf /tmp/ossutil-bin && mkdir -p /tmp/ossutil-bin
+          unzip -q -o /tmp/ossutil.zip -d /tmp/ossutil-bin
+          OSSBIN=$(find /tmp/ossutil-bin -type f -name ossutil | head -1)
+          chmod +x "$OSSBIN"
+          echo "OSSBIN=$OSSBIN" >> "$GITHUB_ENV"
+          "$OSSBIN" version
+      - name: 探桶：读通道清单 + 写删一个探针对象
+        shell: bash
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
+        run: |
+          set -euo pipefail
+          export OSS_ENDPOINT="https://${OSS_ENDPOINT_HOST}"
+          echo "端点: $OSS_ENDPOINT · 区域: $OSS_REGION"
+          echo "AK 前缀: ${OSS_ACCESS_KEY_ID:0:6}…（仅用于确认凭据确实取到，不打印全量）"
+
+          echo "── 1) 读：线上稳定清单 ──"
+          "$OSSBIN" cat --region "$OSS_REGION" "oss://${OSS_BUCKET}/channels/stable.json" | head -5
+
+          echo "── 2) 写：往 _probe/ 放一个对象 ──"
+          echo "oidc probe $(date -u '+%FT%TZ') repo=${{ github.repository }}" > /tmp/probe.txt
+          "$OSSBIN" cp -f --region "$OSS_REGION" /tmp/probe.txt "oss://${OSS_BUCKET}/_probe/oidc.txt"
+
+          echo "── 3) 删：清掉探针对象 ──"
+          "$OSSBIN" rm -f --region "$OSS_REGION" "oss://${OSS_BUCKET}/_probe/oidc.txt"
+          echo "✓ OIDC → AssumeRole → OSS 读写删 全链路通过"
