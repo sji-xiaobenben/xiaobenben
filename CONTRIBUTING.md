@@ -52,6 +52,21 @@ bun run build:mac-intel
 
 构建产物是 Bun 单文件可执行，不需要额外运行时。
 
+四个 `build:*` 都只是 `tools/build.ts` 的薄壳，**不要绕开它直接调 `bun build --compile`**：
+Windows 产物的图标、产品名、发行者、文件版本都写在 PE 资源段里，参数漏一项不会报错，
+只会让用户装到一个「属性里写着 Bun 1.4.2」、资源管理器里没有图标的 exe。脚本编完会读回
+资源段，把图标字节和 `assets/app.ico` 逐字节比一遍，对不上直接失败。
+
+图标与 logo 也是生成物，改品牌图形时改生成器、不要手绘 PNG：
+
+```bash
+bun run gen:app-icon     # -> assets/app.ico（exe 资源段）+ assets/brand/logo.svg（README 抬头）
+bun run gen:tray-icon    # -> assets/tray.ico / assets/tray.png（托盘）
+```
+
+两个生成器共用 `tools/lib/icon-codec.ts`，图形几何各在自己文件里（托盘是透明底裸书签，
+应用图标是红底白书签），颜色都取品牌红 `#F22222`。
+
 ### 关于 `core/` 目录
 
 `core/` 是 `@xbb/core` 的内置副本（唯一真源在维护者的私有仓）。**请不要直接修改 `core/` 下的文件**——下次同步会覆盖，你的改动会丢。

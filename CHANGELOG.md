@@ -9,7 +9,27 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
 
 ## [未发布]
 
+### 新增
+
+- **exe 有了真正的应用图标**：此前 Windows 产物用的是 bun 的默认空白壳（资源管理器里
+  一排同名 exe 分不出来，任务栏固定也没有标识）。现按品牌红方块 + 白色书签生成九档尺寸的
+  `assets/app.ico`（16/20/24/32/40/48/64/128/256），同一份几何同时产出 README 抬头的
+  `assets/brand/logo.svg`——所以资源管理器里的图标和文档里的 logo 不可能长得不一样。
+- **Windows 版本资源不再是 bun 的**：「属性 → 详细信息」里原先写着 ProductName `Bun`、
+  CompanyName `Oven`、FileVersion `1.4.2`。现在产品名、说明、发行者、文件版本、版权
+  全部来自 `package.json` 与 `assets/app.ico`。
+- **构建入口收成一个**：四个 `build:*` 与发版流水线都改走 `tools/build.ts`。此前两处各写一条
+  `bun build --compile`，谁的参数都不全，而漏参数**不会让构建失败**——只会静默产出没有图标、
+  属性写着 bun 的 exe。脚本编完会读回 PE 资源段，把图标字节与源文件逐字节比对，对不上即失败。
+
+### 变更
+
+- `assets/` 下新增 `app.ico` 与 `brand/logo.svg`；托盘图标与它共用 `tools/lib/icon-codec.ts`
+  的编解码（抽取后重出的 `tray.{png,ico}` 与改动前逐字节一致）。
+- 新增 `tools/check-exe-icon.ts`：产物侧断言"图标真的在 exe 里"，可对存量产物复核。
+
 ## [0.4.47] - 2026-11-08
+
 
 首个开源版本。以下条目相对线上 0.4.46，只列**用户能感知**的变化，内部重构不记。
 

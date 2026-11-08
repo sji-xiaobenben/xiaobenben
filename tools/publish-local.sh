@@ -137,7 +137,10 @@ for art in $ALL_ARTS; do
   EXTRA=""
   if [ "$art" = "darwin-x64" ]; then EXTRA="--external onnxruntime-node"; fi
   printf '  · %-14s → %s\n' "$art" "$tgt"
-  bun build --compile --target="$tgt" $EXTRA --outfile "$ART/xbb-$art$ext" src/index.ts
+  # 走 tools/build.ts（与 release.yml 同一条命令）：Windows 产物的图标 / 产品名 / 发行者 /
+  # 文件版本都写在 PE 资源段里，漏写任何一项都不会让构建失败，只会让用户装到一个
+  # 「属性里写着 Bun 1.4.2」、资源管理器里没有图标的 exe。脚本编完会读回资源段比对图标字节。
+  bun run tools/build.ts --target="$tgt" $EXTRA --outfile "$ART/xbb-$art$ext"
 done
 
 # ── 3) 冒烟 ──────────────────────────────────────────────────────────────────

@@ -17,6 +17,13 @@
  * `<path d="M2 0h14v22l-7-5-7 5z" fill="#F22"/>` —— 本文件把这条 path 的顶点直接抄成常量，
  * 换品牌图形时两边要一起改（favicon 是 18×22 的 viewBox，路径实际占 14×22）。
  *
+ * ## 托盘为什么不套底板（而 exe 图标套了）
+ *
+ * 菜单栏 / 通知区域是**贴着别人的底色**渲染的，套一个红底板会在浅色任务栏上变成一个
+ * 突兀的红方块；托盘要的正是「透明底 + 裸图形」。exe 图标相反——它在资源管理器里与一排
+ * 图标并列，没有底板的裸图形会显得又小又空，所以 `gen-app-icon.ts` 用同一份图形套了底板。
+ * 同一个品牌、两种落位，不是两套设计。
+ *
  * ## 三个像素级决定
  *
  * 1. **8×8 超采样抗锯齿**：小尺寸下书签底部的 V 形缺口全靠 alpha 过渡才不糊成方块。
@@ -28,9 +35,9 @@
  * 用法：`bun run tools/gen-tray-icon.ts [--preview]`
  *   --preview 额外打印 16×16 / 32×32 的 ASCII 预览，用来肉眼核对形状（CI 不跑）。
  */
-import { deflateSync } from "node:zlib";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { encodeIco, encodePng, insidePolygon } from "./lib/icon-codec";
 
 /** 品牌红书签的顶点（来源见文件头注释；坐标即 favicon.svg 的原坐标）。 */
 const PATH: ReadonlyArray<readonly [number, number]> = [
@@ -88,7 +95,7 @@ function renderRgba(size: number): Uint8Array {
         for (let sx2 = 0; sx2 < SS; sx2++) {
           const x = px + (sx2 + 0.5) / SS;
           const y = py + (sy + 0.5) / SS;
-          if (inside(pts, x, y)) hits++;
+          if (insidePolygon(pts, x, y)) hits++;
         }
       }
       if (hits === 0) continue;
@@ -103,131 +110,6 @@ function renderRgba(size: number): Uint8Array {
   return out;
 }
 
-/** 射线法判定点是否在多边形内（顶点按给定顺序构成简单闭合多边形）。 */
-function inside(pts: ReadonlyArray<readonly [number, number]>, x: number, y: number): boolean {
-  let hit = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [xi, yi] = pts[i] as readonly [number, number];
-    const [xj, yj] = pts[j] as readonly [number, number];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) hit = !hit;
-  }
-  return hit;
-}
-
-// ── PNG 编码（RGBA8、无滤波） ───────────────────────────────────────────────
-
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-
-function crc32(buf: Uint8Array): number {
-  let c = 0xffffffff;
-  for (const b of buf) c = (CRC_TABLE[(c ^ b) & 0xff] as number) ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function chunk(type: string, data: Uint8Array): Buffer {
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length);
-  const body = Buffer.concat([Buffer.from(type, "latin1"), Buffer.from(data)]);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body));
-  return Buffer.concat([len, body, crc]);
-}
-
-function encodePng(size: number, rgba: Uint8Array): Buffer {
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // color type: RGBA
-  ihdr[10] = 0; // deflate
-  ihdr[11] = 0; // filter
-  ihdr[12] = 0; // no interlace
-  // 每行前置一个 filter 字节 0（None）
-  const raw = Buffer.alloc((size * 4 + 1) * size);
-  for (let y = 0; y < size; y++) {
-    raw[y * (size * 4 + 1)] = 0;
-    Buffer.from(rgba.buffer, rgba.byteOffset + y * size * 4, size * 4).copy(raw, y * (size * 4 + 1) + 1);
-  }
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(raw, { level: 9 })),
-    chunk("IEND", new Uint8Array(0)),
-  ]);
-}
-
-// ── ICO 编码 ────────────────────────────────────────────────────────────────
-
-/** 32bpp BMP（含 AND 掩码）—— 小尺寸走这条，见文件头第 3 点。 */
-function dibForIcon(size: number, rgba: Uint8Array): Buffer {
-  const xorSize = size * size * 4;
-  const maskRow = Math.ceil(size / 8 / 4) * 4;
-  const maskSize = maskRow * size;
-  const header = Buffer.alloc(40);
-  header.writeUInt32LE(40, 0); // biSize
-  header.writeInt32LE(size, 4); // biWidth
-  header.writeInt32LE(size * 2, 8); // biHeight = XOR + AND
-  header.writeUInt16LE(1, 12); // biPlanes
-  header.writeUInt16LE(32, 14); // biBitCount
-  header.writeUInt32LE(0, 16); // BI_RGB
-  header.writeUInt32LE(xorSize + maskSize, 20); // biSizeImage
-  const xor = Buffer.alloc(xorSize);
-  const mask = Buffer.alloc(maskSize);
-  for (let y = 0; y < size; y++) {
-    const srcRow = size - 1 - y; // BMP 自下而上
-    for (let x = 0; x < size; x++) {
-      const s = (srcRow * size + x) * 4;
-      const d = (y * size + x) * 4;
-      xor[d] = rgba[s + 2] as number; // B
-      xor[d + 1] = rgba[s + 1] as number; // G
-      xor[d + 2] = rgba[s] as number; // R
-      xor[d + 3] = rgba[s + 3] as number; // A
-      if ((rgba[s + 3] as number) === 0) {
-        const bit = 7 - (x & 7);
-        mask[y * maskRow + (x >> 3)] = (mask[y * maskRow + (x >> 3)] as number) | (1 << bit);
-      }
-    }
-  }
-  return Buffer.concat([header, xor, mask]);
-}
-
-function encodeIco(sizes: ReadonlyArray<number>): Buffer {
-  const images: Buffer[] = [];
-  for (const size of sizes) {
-    const rgba = renderRgba(size);
-    images.push(size >= 256 ? encodePng(size, rgba) : dibForIcon(size, rgba));
-  }
-  const dir = Buffer.alloc(6);
-  dir.writeUInt16LE(0, 0);
-  dir.writeUInt16LE(1, 2); // type = icon
-  dir.writeUInt16LE(images.length, 4);
-  let offset = 6 + images.length * 16;
-  const entries: Buffer[] = [];
-  for (let i = 0; i < images.length; i++) {
-    const size = sizes[i] as number;
-    const e = Buffer.alloc(16);
-    e[0] = size >= 256 ? 0 : size; // 256 记为 0
-    e[1] = size >= 256 ? 0 : size;
-    e[2] = 0; // 调色板色数
-    e[3] = 0; // reserved
-    e.writeUInt16LE(1, 4); // planes
-    e.writeUInt16LE(32, 6); // bpp
-    e.writeUInt32LE((images[i] as Buffer).length, 8);
-    e.writeUInt32LE(offset, 12);
-    offset += (images[i] as Buffer).length;
-    entries.push(e);
-  }
-  return Buffer.concat([dir, ...entries, ...images]);
-}
-
 // ── 输出 ────────────────────────────────────────────────────────────────────
 
 const root = join(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"), ".");
@@ -235,7 +117,7 @@ const pngPath = join(root, "assets", "tray.png");
 const icoPath = join(root, "assets", "tray.ico");
 
 const png = encodePng(PNG_SIZE, renderRgba(PNG_SIZE));
-const ico = encodeIco(ICO_SIZES);
+const ico = encodeIco(ICO_SIZES, renderRgba);
 writeFileSync(pngPath, png);
 writeFileSync(icoPath, ico);
 

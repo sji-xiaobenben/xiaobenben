@@ -320,7 +320,11 @@ jobs:
         working-directory: cli
         # matrix.external 仅 darwin-x64 非空：该平台无 onnx 原生绑定，不外部化则 bun 在
         # 解析 binding.js 的 arch 路径段时就编译失败（其余平台为空串，命令行无影响）。
-        run: bun build --compile --target=${{ matrix.target }} ${{ matrix.external }} --outfile xbb-${{ matrix.art }}${{ matrix.ext }} src/index.ts
+        # 不直接写 `bun build` 而走 tools/build.ts：Windows 产物的图标 / 产品名 / 发行者 /
+        # 文件版本都写在 PE 资源段里，它们必须与 package.json 的 version、assets/app.ico 同源，
+        # 而漏写任何一项都**不会让构建失败**（产物照样能跑，只是属性里写着 Bun 1.4.2 / Oven、
+        # 图标是空白壳）。这个脚本是「怎么编」的唯一一处定义，编完还会读回资源段比对图标字节。
+        run: bun run tools/build.ts --target=${{ matrix.target }} ${{ matrix.external }} --outfile=xbb-${{ matrix.art }}${{ matrix.ext }}
       - name: Smoke（能跑的真跑；交叉编译产物退化为验文件头）
         working-directory: cli
         shell: bash
