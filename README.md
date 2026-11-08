@@ -337,7 +337,7 @@ xbb autostart on        # 重新打开
 
 ## 从源码构建
 
-需要 [Bun](https://bun.sh) ≥ 1.4。
+需要 [Bun](https://bun.sh) ≥ 1.4.2（与 `package.json` 的 `engines` 一致；CI 固定在 1.4.2 上构建）。
 
 ```bash
 bun install

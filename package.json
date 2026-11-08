@@ -4,6 +4,9 @@
   "description": "面向 AI 的个人记忆库客户端 · local-first · Bun 单文件可执行 · MCP stdio",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
   "homepage": "https://www.xiaobenben.net",
   "repository": {
     "type": "git",
