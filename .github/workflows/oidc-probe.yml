@@ -33,10 +33,7 @@ jobs:
           # 数字 ID（不可变主体），拼出来的字符串与真实 token 不一致，而信任策略比的是后者。
           TOKEN=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.aliyuncs.com" | jq -r .value)
-          python3 -c "import base64,json,sys
-p=sys.argv[1].split('.')[1]; p+='='*(-len(p)%4)
-c=json.loads(base64.urlsafe_b64decode(p))
-print('真实 sub:', c['sub']); print('真实 aud:', c['aud']); print('真实 iss:', c['iss'])" "$TOKEN"
+          python3 -c "import base64,json,sys; p=sys.argv[1].split('.')[1]; p+='='*(-len(p)%4); c=json.loads(base64.urlsafe_b64decode(p)); print('真实 sub:',c['sub']); print('真实 aud:',c['aud']); print('真实 iss:',c['iss'])" "$TOKEN"
       - name: 取阿里云短期凭据（OIDC 免密钥联合身份）
         id: aliyun
         uses: aliyun/configure-aliyun-credentials-action@v1.1.0
