@@ -174,10 +174,17 @@ const AUTOSTART_HELP = `用法: xbb autostart [on|off|status]
 
 开机自启（缺省 = status，先看清现状再动手）。
 
-当前只在 Windows 落地并验证过（HKCU Run 项 + 无窗口启动器）。macOS / Linux 会明确
-返回"暂不支持"，不假装成功。
+**默认就是开的**：装好后第一次运行会自动写一条启动项，之后每次登录都会在后台静默
+起一个常驻服务 —— 无控制台窗口，也不弹管理页，右下角/菜单栏出现小本本图标。
+不想开机启动？\`xbb autostart off\`（或在托盘菜单里点「开机自启：已开」），
+之后不会再被自动写回。
 
-登录后：常驻服务在后台静默启动 —— 无控制台窗口，也不弹管理页。`;
+三平台各走系统原生机制：
+  Windows   HKCU\\…\\CurrentVersion\\Run → 「小本本服务」
+  macOS     ~/Library/LaunchAgents/net.xiaobenben.xbb.plist（launchd）
+  Linux     ~/.config/autostart/xbb.desktop（XDG）
+
+想立刻体验：xbb serve --detach`;
 
 const INGEST_HELP = `用法: xbb ingest [--status] [--dry-run] [--source=a,b] [--limit=N]
 
@@ -230,7 +237,7 @@ const OVERVIEW = `xbb — 小本本个人客户端
   xbb serve [--detach|--no-open|--headless]   启动本地服务 + 托盘 + 管理窗口（:17630）
   xbb mcp                                     MCP stdio（AI 宿主的接入点，由宿主拉起）
   xbb stop [--keep-mcp]                       停掉本机所有 xbb 进程
-  xbb autostart [on|off|status]               开机自启（Windows）
+  xbb autostart [on|off|status]               开机自启（默认开；三平台）
 
 数据位置
 ${DATA_LOCATION}

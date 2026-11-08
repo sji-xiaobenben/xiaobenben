@@ -10,6 +10,7 @@
 - **local-first** —— 个人记忆存本地 SQLite；组织（企业）记忆 100% 不落本地
 - **MCP 接入** —— 以 stdio 方式接入支持 MCP 的 AI 客户端，无需改客户端代码
 - **本地服务** —— `xbb serve` 监听 `127.0.0.1:17630`，带 Host / Origin 校验，抵御 DNS rebinding 与跨站调用
+- **开机自启** —— 三平台默认开启（Windows 注册表 / macOS launchd / Linux XDG），登录后无窗口静默起服务 + 托盘图标；`xbb autostart off` 一句话关掉
 - **自更新** —— ed25519 签名清单，先验签再比版本，sha256 + 大小双校验，非编译形态拒绝替换
 - **零遥测** —— 不上报任何使用数据、崩溃信息或统计指标
 - **密钥摘出** —— 凭据从记忆正文里摘出、正文只留编号占位符（**掩码存储，非加密**，理由见 [`SECURITY.md`](SECURITY.md)）
@@ -29,6 +30,33 @@ xbb stop            # 停止服务
 xbb stop --keep-mcp # 停止本地服务但保留 MCP 连接
 xbb version         # 版本 + 构建指纹
 ```
+
+### 开机自启（默认开启）
+
+第一次跑 `xbb serve` 就会写一条启动项，之后每次登录都在后台静默起一个常驻服务
+——无控制台窗口、不弹管理页，任务栏/菜单栏出现小本本图标。
+
+```bash
+xbb autostart           # 看现状（在哪、指向谁、用户意图）
+xbb autostart off       # 关掉，且之后不再自动写回
+xbb autostart on        # 重新打开
+```
+
+各平台用的都是系统原生的自启机制，不额外装服务：
+
+| 平台 | 位置 | 登录后执行 |
+|---|---|---|
+| Windows | `HKCU\…\CurrentVersion\Run` → `小本本服务` | `"xbb.exe" serve --detach`（无窗口） |
+| macOS | `~/Library/LaunchAgents/net.xiaobenben.xbb.plist` | launchd 托管 `xbb serve --no-open` |
+| Linux | `~/.config/autostart/xbb.desktop` | `xbb serve --detach`（XDG 自启项） |
+
+两点值得知道：
+
+- **`xbb autostart off` 是粘的**。它会在 `config.json` 记下 `autostart: "off"`，此后
+  `serve` 启动时不再自动写回。托盘菜单里那个「开机自启：已开/已关」也是同一个开关。
+- **建议把 exe 放在固定位置**（如 `~/.xiaobenben/bin/xbb`）。启动项记的是绝对路径，
+  如果你从下载目录直接运行，清理下载目录后这条启动项就会指向一个不存在的文件；
+  下次再运行一次 exe 会自动修正。程序目录内有程序时，`autostart status` 会如实显示它指向哪儿。
 
 ## 接入 AI 客户端
 

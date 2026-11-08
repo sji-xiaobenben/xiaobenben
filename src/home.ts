@@ -41,6 +41,16 @@ export function homeConfigPath(): string {
 export interface HomeConfig {
   /** 记忆库/模型等数据资产的所在目录（绝对路径）。缺省 = 程序目录。 */
   dataDir?: string;
+  /**
+   * 开机自启的**用户意图**。
+   *
+   * 缺省（未设置）= 按默认开启：`serve` 每次启动时若发现启动项缺失、或指向的程序已经不是
+   * 当前这份 exe，就补写/改写（见 `autostart.ts` 的 `ensureAutostartDefault`）。
+   *
+   * `"off"` = 用户明确关过（`xbb autostart off` 或托盘菜单），**此后不再自动写回**。
+   * 这条是"默认开启"能成立的前提：没有它，用户关掉的开关会在下次启动被悄悄打开。
+   */
+  autostart?: "on" | "off";
   /** 记录这份配置是谁、什么时候写的 —— 排障时"谁改的"比"改成什么"更难查 */
   updatedAt?: string;
   updatedBy?: string;

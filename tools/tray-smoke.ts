@@ -97,8 +97,14 @@ async function main() {
   ok(trayIconAssetName("linux") === "tray.png", "linux → tray.png");
 
   // ── 2. 菜单形状（纯函数）────────────────────────────────────
-  const CLOUD_OFF: TrayState = { cloudConfigured: true, cloudEnabled: false, orgLabel: "个人空间" };
-  const CLOUD_ON: TrayState = { cloudConfigured: true, cloudEnabled: true, orgLabel: "个人空间" };
+  const CLOUD_OFF: TrayState = {
+    cloudConfigured: true,
+    cloudEnabled: false,
+    orgLabel: "个人空间",
+    autostartSupported: true,
+    autostartOn: true,
+  };
+  const CLOUD_ON: TrayState = { ...CLOUD_OFF, cloudEnabled: true };
 
   const ids = trayActionIds();
   const menu = trayMenu("ICON", TRAY_STATE_LOCAL);
@@ -110,8 +116,8 @@ async function main() {
     "__id 严格 1..N 且与数组下标对齐（点击回包靠 __id 派发，错位即点错功能）",
   );
   ok(
-    TRAY_ACTIONS.length === 8 && [...ids.keys()].length === 8,
-    `8 个动作全部有落点（打开/校验/报告/更新/退出 + 切云端/切本地/填密钥），实际 ${TRAY_ACTIONS.length}`,
+    TRAY_ACTIONS.length === 9 && [...ids.keys()].length === 9,
+    `9 个动作全部有落点（打开/校验/报告/更新/自启/退出 + 切云端/切本地/填密钥），实际 ${TRAY_ACTIONS.length}`,
   );
   ok(
     TRAY_ACTIONS.every((a) => (ids.get(a) ?? 0) >= 1 && (ids.get(a) ?? 0) <= menu.items.length),
@@ -141,6 +147,22 @@ async function main() {
   ok(at(CLOUD_ON, "to-local").enabled === true, "云端模式下「切换到本地模式」可点");
   ok(at(CLOUD_ON, "to-cloud").enabled === false, "云端模式下「切换到云端模式」是灰的");
   ok(at(TRAY_STATE_LOCAL, "bind-key").enabled === true, "未绑定时「填写云端密钥」必须可点（否则用户无路可走）");
+
+  // 开机自启：标题必须直接写现状（用户不该先点一下才知道现在是开还是关），
+  // 平台不支持时置灰而不是隐藏（隐藏会让人以为没这个功能，置灰至少说明"这里有但不可用"）
+  ok(
+    at({ ...TRAY_STATE_LOCAL, autostartOn: true }, "autostart").title === "开机自启：已开",
+    "自启标题直写「已开」",
+  );
+  ok(
+    at({ ...TRAY_STATE_LOCAL, autostartOn: false }, "autostart").title === "开机自启：已关",
+    "自启标题直写「已关」",
+  );
+  ok(at(TRAY_STATE_LOCAL, "autostart").enabled === true, "支持自启的平台该项可点");
+  ok(
+    at({ ...TRAY_STATE_LOCAL, autostartSupported: false }, "autostart").enabled === false,
+    "不支持的平台该项置灰（不隐藏，否则用户以为没这功能）",
+  );
   ok(
     menu.items.filter((it) => it.enabled === false).length === 3,
     "不可点项恰好 3 个（2 条信息行 + 当前模式那条切换项），实为 " +

@@ -54,6 +54,8 @@ export interface TrayHandle {
   onSwitchLocal(cb: () => void): void;
   /** 打开管理窗口的「云端密钥」填写处（托盘无法输入文本，只能把人送过去）。 */
   onBindKey(cb: () => void): void;
+  /** 切换开机自启（写/删启动项 + 记用户意图）。 */
+  onToggleAutostart(cb: () => void): void;
   onExit(cb: () => void): void;
   /**
    * 收尾：请对端自退（摘图标）再兜底 kill。**幂等**。
@@ -66,7 +68,16 @@ export interface TrayHandle {
 }
 
 /** 菜单动作名。点击回包只带 `__id`，由 `trayActionIds()` 反查回这些名字。 */
-export type TrayAction = "open" | "verify" | "report" | "update" | "exit" | "to-cloud" | "to-local" | "bind-key";
+export type TrayAction =
+  | "open"
+  | "verify"
+  | "report"
+  | "update"
+  | "exit"
+  | "to-cloud"
+  | "to-local"
+  | "bind-key"
+  | "autostart";
 
 /** 分隔线：systray 的约定是**标题字面量** `<SEPARATOR>`（Go 端据此画成一条横线）。 */
 export const TRAY_SEPARATOR = "<SEPARATOR>";
@@ -82,10 +93,23 @@ export interface TrayState {
   cloudEnabled: boolean;
   /** 组织显示名（云端模式下的展示；本地模式忽略） */
   orgLabel: string;
+  /**
+   * 本机是否支持配置开机自启（Windows / macOS / Linux 都支持；未知平台置灰）。
+   * 由调用方现读 `readAutostart().supported`，托盘不自己判断平台。
+   */
+  autostartSupported: boolean;
+  /** 启动项**当前生效**吗 —— 同样每次现读系统，托盘不维护第二份"我以为"的状态。 */
+  autostartOn: boolean;
 }
 
 /** 未绑定的默认态（也用作纯函数单测的入参） */
-export const TRAY_STATE_LOCAL: TrayState = { cloudConfigured: false, cloudEnabled: false, orgLabel: "" };
+export const TRAY_STATE_LOCAL: TrayState = {
+  cloudConfigured: false,
+  cloudEnabled: false,
+  orgLabel: "",
+  autostartSupported: true,
+  autostartOn: false,
+};
 
 /**
  * 菜单项定义 —— **顺序 = 界面顺序 = `__id` 1..N**，`trayMenu()` 与 `trayActionIds()`
@@ -124,6 +148,13 @@ const TRAY_ENTRIES: TrayEntry[] = [
   { kind: "verify", title: () => "校验哈希链", enabled: () => true },
   { kind: "report", title: () => "导出诊断报告", enabled: () => true },
   { kind: "update", title: () => "检查更新", enabled: () => true },
+  {
+    // 既然默认就开着，用户必须能在**看得见的地方**关掉 —— 否则"默认开启"就成了偷装。
+    // 标题直接写现状（每次现读系统），不写"点此开启/关闭"那种要用户先猜状态的说法。
+    kind: "autostart",
+    title: (s) => `开机自启：${s.autostartOn ? "已开" : "已关"}`,
+    enabled: (s) => s.autostartSupported,
+  },
   { kind: "separator", title: () => TRAY_SEPARATOR, enabled: () => true },
   { kind: "exit", title: () => "退出", enabled: () => true },
 ];
@@ -263,6 +294,7 @@ export async function startTray(state: TrayState = TRAY_STATE_LOCAL): Promise<Tr
       onSwitchCloud: (cb) => bind("to-cloud", cb),
       onSwitchLocal: (cb) => bind("to-local", cb),
       onBindKey: (cb) => bind("bind-key", cb),
+      onToggleAutostart: (cb) => bind("autostart", cb),
       onExit: (cb) =>
         bind("exit", () => {
           dispose();

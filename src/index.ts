@@ -145,14 +145,41 @@ if (cmd === "serve") {
     const cloudUrl = `${url}#cloud`; // 管理页的云端区块锚点：托盘里没法输入文本，只能把人送过去
     if (!noOpen) openInBrowser(url); // 管理窗口必须可见（产品纪律）；后台常驻则不带这个副作用
 
-    /** 托盘菜单要的运行态 —— **每次现读 cloud.ts**，托盘自己不维护第二份状态。 */
+    /**
+     * 开机自启的**默认态**：装好、跑一次就生效，不需要用户先敲 `xbb autostart on`。
+     *
+     * 只在这个分支里做 —— `--headless` 是 CI / 无显示环境，往那儿写用户级登录项是错的。
+     * 失败只打一行警告，绝不打断 serve：自启是增强，不是服务能否收发记忆的前提。
+     * 详情（含"用户已 off 就不写回"）在 `autostart.ts` 的 `ensureAutostartDefault`。
+     */
+    const {
+      ensureAutostartDefault,
+      readAutostart,
+      enableAutostart,
+      disableAutostart,
+      setAutostartPref,
+    } = await import("./autostart");
+    {
+      const a = ensureAutostartDefault();
+      if (a.action === "enabled") console.log(`[xbb] 开机自启${a.detail}`);
+      else if (a.action === "disabled") console.log(`[xbb] ${a.detail}`);
+      else if (a.action === "failed") console.warn(`[xbb] 开机自启配置失败（不影响服务）：${a.detail}`);
+    }
+
+    /**
+     * 托盘菜单要的运行态 —— **每次现读 cloud.ts / 系统启动项**，托盘自己不维护第二份状态。
+     * 自启现状也现读：用户可能在系统设置（GNOME 启动应用程序 / 任务管理器）里改过。
+     */
     const trayState = (): TrayState => {
       const raw = loadCloudConfigRaw();
       const live = loadCloudConfig();
+      const auto = readAutostart();
       return {
         cloudConfigured: !!raw,
         cloudEnabled: !!live,
         orgLabel: raw ? orgDisplayName(raw.orgName, raw.orgKind, raw.orgId) : "",
+        autostartSupported: auto.supported,
+        autostartOn: auto.enabled,
       };
     };
 
@@ -211,6 +238,31 @@ if (cmd === "serve") {
       wireTray();
     };
 
+    /**
+     * 托盘里的开机自启开关。
+     *
+     * 两件事都要做，缺一不可：① 动系统里的启动项；② 记下用户意图 —— 只做①的话，
+     * 用户在这里关掉，下次 serve 启动 `ensureAutostartDefault` 又会把它打开。
+     * 切换完必须重建托盘：菜单只在 spawn 时下发一次，标题里的「已开/已关」不会自己变。
+     */
+    const toggleAutostart = async () => {
+      try {
+        const now = readAutostart();
+        if (now.enabled) {
+          const r = disableAutostart();
+          setAutostartPref("off"); // 即使删除失败也记 off：下次启动会再清一次
+          console.log(`${r.ok ? "[xbb]" : "[xbb] ⚠️"} 关闭开机自启${r.ok ? "成功" : `失败：${r.message}`}`);
+        } else {
+          const r = enableAutostart();
+          if (r.ok) setAutostartPref("on");
+          console.log(`${r.ok ? "[xbb]" : "[xbb] ⚠️"} 开启开机自启${r.ok ? "成功" : `失败：${r.message}`}`);
+        }
+      } catch (e) {
+        console.warn("[xbb] 切换开机自启失败：", e instanceof Error ? e.message : e);
+      }
+      await rebuildTray();
+    };
+
     const wireTray = () => {
       if (!tray) return; // 托盘不可用（无显示环境 / 资产异常）⇒ 静默降级，服务照常收发记忆
       tray.onOpenWindow(() => openInBrowser(url));
@@ -220,6 +272,7 @@ if (cmd === "serve") {
       tray.onSwitchCloud(() => void switchMode(true));
       tray.onSwitchLocal(() => void switchMode(false));
       tray.onBindKey(() => openInBrowser(cloudUrl));
+      tray.onToggleAutostart(() => void toggleAutostart());
       tray.onExit(() => process.exit(0));
     };
 
@@ -374,12 +427,21 @@ if (cmd === "serve") {
   process.exit(r.ok ? 0 : 1);
 } else if (cmd === "autostart") {
   // 开机自启（常驻服务）。缺省子命令 = status：**不加参数先看清现状**，避免误写。
-  const { AUTOSTART_VALUE, autostartUnsupportedMessage, readAutostart, enableAutostart, disableAutostart } =
-    await import("./autostart");
+  const {
+    autostartUnsupportedMessage,
+    readAutostart,
+    enableAutostart,
+    disableAutostart,
+    readAutostartPref,
+    setAutostartPref,
+  } = await import("./autostart");
   const sub = args[1] ?? "status";
 
   if (sub === "on") {
     const r = enableAutostart();
+    // 只在实际写入成功后记意图：失败却记下 "on"，下次启动会以为"用户要、只是还没写成"，
+    // 于是每次启动都重试一遍 —— 一条永远失败的写操作会一直出现在日志里。
+    if (r.ok) setAutostartPref("on");
     console.log(`${r.ok ? "✅" : "❌"} 开机自启${r.ok ? "已开启" : "开启失败"}\n   ${r.message}`);
     if (r.ok) {
       console.log("");
@@ -393,7 +455,11 @@ if (cmd === "serve") {
 
   if (sub === "off") {
     const r = disableAutostart();
+    // **无论删除成功与否都记 off**：用户的意愿是"别开机启动我"。记下之后，下次启动时
+    // `ensureAutostartDefault` 会再清一次残留 —— 比"这次删不掉就永远删不掉"好。
+    setAutostartPref("off");
     console.log(`${r.ok ? "✅" : "❌"} ${r.message}`);
+    if (r.ok) console.log("   之后不会再自动开启（xbb autostart on 可恢复）");
     process.exit(r.ok ? 0 : 1);
   }
 
@@ -403,11 +469,17 @@ if (cmd === "serve") {
   }
 
   const s = readAutostart();
+  const pref = readAutostartPref();
   if (!s.supported) {
     console.log(autostartUnsupportedMessage());
   } else {
-    console.log(`开机自启: ${s.present ? "已开启" : "未开启"}（HKCU\\…\\CurrentVersion\\Run → ${AUTOSTART_VALUE}）`);
-    if (s.present) console.log(`  命令: ${s.command}`);
+    const state = s.enabled ? "已开启" : s.present ? "已禁用（系统设置里关掉了）" : "未开启";
+    console.log(`开机自启: ${state}（${s.location}）`);
+    if (s.command) console.log(`  命令: ${s.command}`);
+    // 意图与现状不一致是排障时最容易卡住的一类：用户以为关了，系统里还留着。
+    if (pref === "off") console.log("  用户意图: 已关闭（serve 不再自动写入）");
+    else if (pref === "on") console.log("  用户意图: 已开启");
+    else console.log("  用户意图: 默认开启（没手动关过；启动项缺失或指向变了会自动补）");
   }
 } else if (cmd === "ingest") {
   // 客户端会话采集（V8）：应采尽采。
