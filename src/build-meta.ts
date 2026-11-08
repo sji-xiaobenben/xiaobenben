@@ -5,7 +5,8 @@
  * 构建元数据 —— 产品版本与版权署名的单一来源。
  * VERSION / BUILD_TIME 在正式发版时由 release.yml 用 sed 注入（真源分别是 package.json
  * 的 version 与发版时刻），两者同时作为构建指纹的输入：`xbb version` 输出指纹，同源构建
- * 指纹一致，用于核对版本是否出自同一次构建。
+ * 指纹一致，用于核对版本是否出自同一次构建。BUILD_REPO 同样在发版时注入，只用来判断
+ * 「这个产物有没有资格用内置更新源」——它不进指纹，因为它回答的是「谁发布的」，不是「哪次构建」。
  * 注意：MCP stdio 模式下这些信息只进协议字段（serverInfo），不得打印到 stdout。
  */
 import { createHash } from "node:crypto";
@@ -21,13 +22,28 @@ export const VERSION = "0.4.47";
 export const BUILD_TIME = "local";
 
 /**
- * 是否官方发布构建 —— 取决于 release.yml 有没有把真实时刻注入进来。
+ * 官方仓库（owner/repo）—— 内置更新源只对「本仓自己的构建」生效。
+ * fork 者若要分发自己的版本并让它自更新，把这一行连同 UPDATE_PUBKEY / UPDATE_URL_DEFAULT
+ * 一起换成自己的，三者齐了才自洽（见 CONTRIBUTING「Fork 之后要分发自己的构建」）。
+ */
+export const OFFICIAL_REPO: string = "sji-xiaobenben/xbb-cli";
+// 构建来源仓库，由 release.yml 用 sed 注入成 $GITHUB_REPOSITORY；本地直接构建留空（不知道）。
+// 这行刻意**不加类型标注**：release.yml 靠 `export const BUILD_REPO = "..."` 这个字面形状做
+// sed 替换，写成 `export const BUILD_REPO: string = ...` 就会静默失配。VERSION / BUILD_TIME 同理。
+export const BUILD_REPO = "";
+
+/**
+ * 是否官方发布构建 —— 两个条件同时成立才算：注入了真实时刻、且构建来自官方仓库。
  *
  * 自更新靠它区分两件本质不同的事：「这套公钥和 CDN 是我自己发布的」与
  * 「我只是 fork 了别人的代码，但继承了对方的公钥和 CDN」。后者一旦自动更新，
  * 官方发版时弹的「要不要更新到 0.4.48」会把用户引导成官方 exe，fork 者的定制被顶掉。
+ *
+ * 为什么不能只看 BUILD_TIME：fork 出来的仓**跑的是同一份 release.yml**，它同样会注入
+ * 真实时刻——只看时间的话，fork 在 CI 里编出来的产物会被误判成官方版，又绕回上面那条
+ * 顶掉定制的老路。仓库身份才是「谁是发布者」的判据，时间只说明「是哪一次构建」。
  */
-export const IS_OFFICIAL_BUILD = BUILD_TIME !== "local";
+export const IS_OFFICIAL_BUILD = BUILD_TIME !== "local" && BUILD_REPO === OFFICIAL_REPO;
 export const VENDOR = "世纪之城（广州）信息科技有限公司";
 export const VENDOR_SHORT = "SJi";
 export const OFFICIAL_SITE = "https://www.xiaobenben.net";

@@ -263,19 +263,30 @@ jobs:
       - name: Install
         working-directory: cli
         run: bun install --backend copyfile
-      - name: Inject VERSION + BUILD_TIME + 更新源（编译期注入）
+      - name: Inject VERSION + BUILD_TIME + BUILD_REPO + 更新源（编译期注入）
         working-directory: cli
         shell: bash
         run: |
           set -euo pipefail
           BT=$(date -u '+%Y-%m-%d %H:%M')
+          # 别给下面被 sed 替换的常量加类型标注（`VERSION: string = ...`）：正则按
+          # `export const X = "..."` 这个字面形状匹配，加了标注就静默替换不上。
+          # 空值先拦掉：sed 拿空串去替，产物里就是 BUILD_REPO=""，与「本地直接构建」无从区分，
+          # 官方产物会被自己判成非官方、全量静默失去自更新——和 BUILD_TIME 留在 local 同一个坑。
+          if [ -z "${GITHUB_REPOSITORY}" ]; then
+            echo "::error::GITHUB_REPOSITORY 为空，无法注入构建来源（BUILD_REPO）"
+            exit 1
+          fi
           # $VERSION 来自上一步写入 $GITHUB_ENV 的值（shell 展开），刻意不写成
           # ${{ env.VERSION }} —— 表达式在 job 启动时就求值完了，读不到 GITHUB_ENV。
           sed -i.bak "s#export const VERSION = \".*\";#export const VERSION = \"$VERSION\";#" src/build-meta.ts
           sed -i.bak "s#export const BUILD_TIME = \".*\";#export const BUILD_TIME = \"${BT}\";#" src/build-meta.ts
+          # 产物自报「我是谁的构建」。fork 跑同一份 workflow 时这里会被注成 fork 的 owner/repo，
+          # IS_OFFICIAL_BUILD 随即为 false —— 这正是「fork 编出来的 exe 不去官网检索更新」的落点。
+          sed -i.bak "s#export const BUILD_REPO = \".*\";#export const BUILD_REPO = \"${GITHUB_REPOSITORY}\";#" src/build-meta.ts
           sed -i.bak "s#export const UPDATE_URL_DEFAULT = \".*\";#export const UPDATE_URL_DEFAULT = \"${{ env.DIST_BASE }}/channels/stable.json\";#" src/build-meta.ts
           rm -f src/build-meta.ts.bak
-          grep -E '^export const (VERSION|BUILD_TIME|UPDATE_URL_DEFAULT)' src/build-meta.ts
+          grep -E '^export const (VERSION|BUILD_TIME|BUILD_REPO|OFFICIAL_REPO|UPDATE_URL_DEFAULT)' src/build-meta.ts
           # 注入必须真的生效。BUILD_TIME 一旦留在 "local"，IS_OFFICIAL_BUILD 就是 false，
           # 产物出厂即失去自更新 —— 全量用户永久停在旧版，而客户端不会有**任何**报错：
           # 「已是最新」四个字和正常情况一模一样。这道守只能在 CI 里。
@@ -287,6 +298,20 @@ jobs:
           if ! grep -qF "export const VERSION = \"$VERSION\";" src/build-meta.ts; then
             echo "::error::VERSION 注入失败（期望 $VERSION）"
             exit 1
+          fi
+          # BUILD_REPO 必须等于本仓。注不进去（仍是空串）等同于「不知道谁发布的」，
+          # 会让官方产物被自己判成非官方、全量失去自更新，所以这里同样是硬失败。
+          if ! grep -qF "export const BUILD_REPO = \"${GITHUB_REPOSITORY}\";" src/build-meta.ts; then
+            echo "::error::BUILD_REPO 注入失败（期望 ${GITHUB_REPOSITORY}）"
+            exit 1
+          fi
+          # 官方仓与 fork 仓的区别只提示、不失败：fork 也必须能编出自己的产物，只是默认不自更新。
+          # OFFICIAL_REPO 从源码读，避免这里再抄一份仓库名、日后改名两处不同步。
+          official_repo=$(sed -nE 's/^export const OFFICIAL_REPO(: string)? = "(.*)";/\2/p' src/build-meta.ts)
+          if [ "$GITHUB_REPOSITORY" = "$official_repo" ]; then
+            echo "构建来源 ${GITHUB_REPOSITORY} = 官方仓库：产物将检索官方更新源"
+          else
+            echo "::notice::本仓 ${GITHUB_REPOSITORY} 不是官方仓库（${official_repo}）—— 产物默认关闭自更新；要分发可自更新的构建，见 CONTRIBUTING「Fork 之后要分发自己的构建」"
           fi
       - name: Build onnxruntime bundle（PoC 定案：依赖树单文件 CJS + .node external）
         working-directory: cli

@@ -23,7 +23,14 @@ import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, read
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { VERSION as BUILD_VERSION, UPDATE_PUBKEY, UPDATE_URL_DEFAULT, IS_OFFICIAL_BUILD } from "./build-meta";
+import {
+  VERSION as BUILD_VERSION,
+  UPDATE_PUBKEY,
+  UPDATE_URL_DEFAULT,
+  IS_OFFICIAL_BUILD,
+  BUILD_REPO,
+  OFFICIAL_REPO,
+} from "./build-meta";
 import { buildUpdatePayload, type ManifestFiles } from "./update-payload";
 
 export interface UpdateManifest {
@@ -79,8 +86,9 @@ export function resolveUpdateUrl(): string {
 /**
  * 这个产物有没有资格用「编译期内置的」更新源。
  *
- * 官方发版由 release.yml 把 BUILD_TIME 注入成真实时刻，本地构建与第三方构建保持 "local"
- * —— 所以 IS_OFFICIAL_BUILD 就是「这是不是我们自己发的版」。
+ * 判据是**发布者身份**，不是「有没有被构建过」：官方发版由 release.yml 注入真实时刻
+ * 并把 BUILD_REPO 注成 `sji-xiaobenben/xbb-cli`；fork 仓跑同一份 workflow 也会注入时刻，
+ * 但仓库名不是它，于是被认成非官方；本地直接构建两项都缺，同样非官方。
  *
  * 非官方构建默认**不**自更新。原因不是安全，是身份：[`UPDATE_PUBKEY`] 和
  * [`UPDATE_URL_DEFAULT`] 都是编译期常量，fork 出来的产物把**官方的**公钥和 CDN
@@ -93,6 +101,13 @@ export function resolveUpdateUrl(): string {
  */
 export function usesBuiltinUpdateSource(): boolean {
   return process.env.XBB_UPDATE_URL !== undefined || IS_OFFICIAL_BUILD;
+}
+
+/** 产物是哪儿构建的，只用于说明文案：官方仓库 / 别的仓库 / 不知道（本地直接构建） */
+function buildOriginLabel(): string {
+  if (!BUILD_REPO) return "未标注（本地直接构建）";
+  if (BUILD_REPO === OFFICIAL_REPO) return BUILD_REPO;
+  return `${BUILD_REPO}（非官方仓库）`;
 }
 
 /**
@@ -307,7 +322,7 @@ export class Updater {
       // 刻意不是 "failed"：没有出任何错，是这个产物不该自动更新。
       // 提示要给出「想连官方源」的完整命令，否则用户只会看到一句「关了」而无从下手。
       if (manual) {
-        console.log("[update] 本地构建：自更新默认关闭");
+        console.log(`[update] 非官方构建：自更新默认关闭（构建来源 ${buildOriginLabel()}）`);
         console.log("         本产物内置的是官方更新源与签名公钥，自动更新会把你的构建换成官方 exe。");
         console.log(`         确实要连官方源：XBB_UPDATE_URL=${UPDATE_URL_DEFAULT}`);
       }

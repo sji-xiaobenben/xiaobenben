@@ -53,6 +53,8 @@ bun run build:mac-intel
 
 本地构建出的产物 `xbb version` 会自报 `构建 local`，且**默认不参与自更新**：它编进去的是官方签名公钥与官方 CDN，若照常自动更新，只会把你的构建换成官方 exe。要用官方源（或自己的镜像）就显式指定 `XBB_UPDATE_URL`；要长期分发自己的版本，还需换掉公钥，见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的「Fork 之后要分发自己的构建」。
 
+判据是**发布者身份**，不是「有没有构建过」：产物里编了 `BUILD_REPO`，只有它等于 `OFFICIAL_REPO`（官方仓）时才认内置更新源。所以你 fork 之后跑自己的 Actions 发出来的 exe 也不会去官网查更新——哪怕它注入了真实构建时间。核查方式：`xbb update` 会说 `非官方构建：自更新默认关闭（构建来源 <owner/repo>）`。
+
 > `bun.lock` 记录的是官方源 `registry.npmjs.org`。国内网络如遇安装慢，可临时换镜像：
 > `bun install --registry https://registry.npmmirror.com`
 
