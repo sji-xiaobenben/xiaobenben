@@ -82,10 +82,15 @@ jobs:
           fi
           # 清单前几行是 # 注释，剔掉后每行是 `<sha256>  <文件名>` —— 正好是 sha256sum -c 的输入格式
           grep -v '^#' SHA256SUMS.txt > checks.txt
+          # --retry-all-errors：CDN 在国内，runner 在境外，单个 90MB 文件的连接被中途掐断
+          # 是常态而不是异常。2026-11-08 首发归档连撞两次（curl 28 连接超时，两次卡在不同
+          # 文件），而产物本身完全正常——本地下载同一批文件 31 秒、sha256 全过。
+          # 默认 curl 对「连接失败」不重试，于是这种纯网络抖动会把整条归档判成失败。
           while read -r _sha f; do
             [ -z "$f" ] && continue
             echo "  ↓ $f"
-            curl -fsS --max-time 600 "${base}/${f}" -O
+            curl -fsS --max-time 600 --retry 5 --retry-delay 5 --retry-all-errors \
+              "${base}/${f}" -O
           done < checks.txt
           for f in LICENSE NOTICE; do
             if ! curl -fsSL --max-time 60 "${base}/${f}" -o "$f"; then
