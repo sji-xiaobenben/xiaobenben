@@ -280,7 +280,16 @@ export async function loadOrtFromPkg(pkg: string): Promise<typeof import("onnxru
   }
 }
 
-/** compile exe 旁路加载（PoC ort-embed3.ts 定案路径）；开发模式 fallback import */
+/**
+ * 加载 onnxruntime：编译产物走「exe 同目录 node_modules」旁路，开发模式走常规 import。
+ *
+ * 为什么不是直接 import：`bun build --compile` 会把 JS 打进去，但 onnxruntime-node 的
+ * `.node` 原生模块无法内联进单文件。于是构建时额外产出一个 `ort-bundle.cjs`
+ * （`bun run bundle:ort`，落在 node_modules/onnxruntime-node/dist/ 下，`*.node` 外置），
+ * 运行时从 exe 旁边的 node_modules 里按需加载它。
+ * 旁路不存在（用户只拷了一个 exe）时退回常规 import，任一路径失败都返回 null ——
+ * 调用方据此降级为纯全文检索，不影响可用性。
+ */
 export async function loadOrt(): Promise<typeof import("onnxruntime-node") | null> {
   try {
     const pkg = join(dirname(process.execPath), "node_modules", "onnxruntime-node");

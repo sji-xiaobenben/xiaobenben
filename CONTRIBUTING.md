@@ -12,6 +12,10 @@
 
 我们不接受的方向：UI 整体改版、与产品定位无关的功能、增加新的运行时依赖（除非有不可替代的理由）、任何形式的遥测或数据上报。
 
+## 行为准则
+
+参与本项目即表示你同意遵守 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。技术分歧很正常，对方案狠一点没问题，对人不行——那份文档里写了几条我们这边的具体约定。
+
 ## 贡献者许可协议（CLA）
 
 **首次提交 PR 前必须签署**，否则 CI 的门禁不会通过，PR 无法合并。这一步不可跳过——它保护的是项目能持续以双许可方式运营。
@@ -73,13 +77,25 @@ bun run build:mac-intel
 - 新增行为要有测试。`bun run test:ci` 必须全绿。
 - 不要引入新的运行时依赖，除非在 issue 里先达成一致。
 
+## 两个 CI 闸你会撞到
+
+- **SPDX 许可头**：每个 `.ts` / `.mjs` / `.js` / `.sh` 文件开头都要有两行——`SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial` 和版权行，有 shebang 时放在它之后。新增文件漏了会有一个 `::error::` 逐条列出。`core/` 下的头由 `bun run core:sync` 注入，不用手写。
+- **版本号单调性**：`package.json` 的 `version` 是唯一真源，发版时会校验它**必须高于线上版本**。单文件 exe 的自更新只升不降，版本倒挂不可回滚——已经升上去的用户再也收不到更新。外部贡献者一般碰不到这个闸，因为版本号在「不要碰的文件」里。
+
+## 第三方许可清单
+
+`THIRD-PARTY-LICENSES.md` 是**生成物**：`bun run gen:licenses` 会跑一次构建、从 `bun build --metafile` 反查实际被打进产物的模块，再把各自的许可原文拼起来。
+
+依赖有任何变动（含版本升级）都要重新生成，否则 CI 的 `gen:licenses --check` 会失败。**不要手改这个文件**——里面是别人的许可原文，改一个字就是在误述别人的授权条件。
+
 ## 不要碰的文件
 
 以下路径的改动一律需要维护者本人 review，外部 PR 请勿包含：
 
 - `.github/`（CI、发布流水线、门禁配置）
 - `package.json` / `bun.lock`（依赖清单）
-- `LICENSE` / `NOTICE` / `LICENSE-Commercial.md` / `CLAs/`
+- `LICENSE` / `NOTICE` / `LICENSE-Commercial.md` / `CLAs/` / `CODE_OF_CONDUCT.md`
+- `THIRD-PARTY-LICENSES.md` 与 `tools/third-party/`（许可原文，手改即误述）
 - `src/build-meta.ts`（版本、更新源、署名等构建元数据）
 - `core/`（内置副本，见上）
 
