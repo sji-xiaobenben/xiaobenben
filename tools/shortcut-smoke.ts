@@ -13,7 +13,7 @@
  *  - **幂等要单验**：第二次调用必须是 `exists` 且**不刷新** mtime。每次重写会把「最近添加」
  *    刷成广告位，而这件事从代码上看不出来。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -200,12 +200,32 @@ async function main() {
         `} catch { [Console]::Out.Write("${tag}=FAIL:" + $_.Exception.GetType().Name + ";") }`,
       );
     }
+    // E：与产品调用完全同构 —— 同一个 Programs 目录、同一个中文文件名、同一组字段
+    // （含 WindowStyle）。A–D 全 ASCII 都过了，所以唯一剩下的变量就是中文文件名本身。
+    // CNLEN 用「非 ASCII 码点数」判定路径到底被替换成 ??? 了没：长度判不出来，? 也占一位。
+    lines.push(
+      "try {",
+      `$p = ${psLiteral(join(sm, "conf-小本本.lnk"))}`,
+      `[Console]::Out.Write("CNLEN=" + ($p.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count + ";")`,
+      "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)",
+      "$s.TargetPath = $t",
+      "$s.Arguments = 'start --open'",
+      "$s.WorkingDirectory = $w",
+      "$s.IconLocation = ($d + '\\xbb.ico,0')",
+      `$s.Description = ${psLiteral("小本本 · 面向 AI 的个人记忆库")}`,
+      "$s.WindowStyle = 1",
+      "$s.Save()",
+      `[Console]::Out.Write("E=OK;")`,
+      `} catch { [Console]::Out.Write("E=FAIL:" + $_.Exception.GetType().Name + ";") }`,
+    );
     const diag = spawnSync(
       "powershell",
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePsCommand(lines.join("\n"))],
       { encoding: "utf8", windowsHide: true },
     );
     console.log(`· 诊断（JS 侧路径长度 ${[...lnk].length}）｜${diag.stdout}｜stderr=${(diag.stderr ?? "").slice(0, 200)}`);
+    console.log(`· 诊断：icons 目录内容 = ${existsSync(icoDir) ? (readdirSync(icoDir).join(",") || "空") : "目录不存在"}`);
+    console.log(`· 诊断：SHORTCUT_ARGS=${SHORTCUT_ARGS}`);
   }
   ok(r1.status === "created", `真机 .lnk 已创建（${r1.status}${r1.message ? ` · ${r1.message}` : ""}）`);
   ok(existsSync(lnk), `.lnk 落在注入的 Programs 目录：${lnk}`);
