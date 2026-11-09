@@ -15,7 +15,7 @@ One SQLite file on your own disk. Any MCP client. Memory that outlives sessions,
 <img alt="MCP stdio" src="https://img.shields.io/badge/MCP-stdio-4a4a4a?style=flat-square">
 <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2ea44f?style=flat-square"></a>
 
-[Website](https://xiaobenben.net) &middot; [Docs](https://xiaobenben.net/docs/) &middot; [Leaderboard](#leaderboard) &middot; [Install](#install) &middot; [CLI](#cli-reference) &middot; [FAQ](https://xiaobenben.net/docs/personal-local/faq/)
+[Website](https://xiaobenben.net) &middot; [Docs](https://xiaobenben.net/docs/personal-local/intro/) &middot; [Changelog](https://xiaobenben.net/docs/personal-local/changelog/) &middot; [Leaderboard](#leaderboard) &middot; [Install](#install) &middot; [CLI](#cli-reference) &middot; [FAQ](https://xiaobenben.net/docs/personal-local/faq/)
 
 </div>
 
@@ -189,7 +189,7 @@ Sixteen products, twenty-one capabilities, every cell scored 0–10 (0 means the
 
 ## Install
 
-Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases). No runtime dependency. After that the binary updates itself from the signed official manifest.
+Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases). No runtime dependency. After that the binary updates itself from the signed official manifest; what changed in each version is in the [changelog](https://xiaobenben.net/docs/personal-local/changelog/).
 
 ```bash
 xbb --help          # every command, zero side effects
@@ -451,7 +451,7 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 ## Trademark
 
-"小本本", "xiaobenben", "SJi" and the associated names and marks are trademarks or business identifiers of 世纪之城（广州）信息科技有限公司 (SJI). The copyright licence **does not include a trademark licence**: you may modify and distribute the code, but you may not name or promote a derivative with the same or a confusingly similar mark. See [`NOTICE`](NOTICE).
+"小本本", "xiaobenben", "SJi" and the associated names and marks are trademarks or business identifiers of [世纪之城（广州）信息科技有限公司](https://sji.xin) (SJI). The copyright licence **does not include a trademark licence**: you may modify and distribute the code, but you may not name or promote a derivative with the same or a confusingly similar mark. See [`NOTICE`](NOTICE).
 
 ## Contributing
 
@@ -477,4 +477,4 @@ The initial commit and the release tag are SSH-signed and can be verified with `
 
 ---
 
-Copyright (C) 2026 世纪之城（广州）信息科技有限公司
+Copyright (C) 2026 [世纪之城（广州）信息科技有限公司](https://sji.xin)
