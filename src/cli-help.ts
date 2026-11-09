@@ -228,14 +228,40 @@ const VERSION_HELP = `用法: xbb version（等同 --version / -v）
 打印版本横幅与构建指纹。版本与指纹都来自编译期写入的 build-meta，
 用于版本核对 —— 不要手写。`;
 
+const START_HELP = `用法: xbb start [--open | -o]
+
+确保常驻服务在跑，并把结果说出来。**幂等**：已经在跑就什么都不做。
+
+这是**给图标用的命令** —— 桌面快捷方式、开始菜单、任务栏都指向它即可。
+双击后的行为：
+
+  服务没跑   → 后台拉起（无窗口）→ 等 healthz 真的就绪 → 弹系统通知「小本本 AI 记忆已启动」
+  服务在跑   → 只弹一条「已经在运行」，不重复启动（端口只有一个）
+
+  --open / -o   就绪后打开管理页（http://127.0.0.1:17630/ui）
+
+和另外两条启动方式的分工：
+
+  xbb serve           前台跑，Ctrl+C 结束，会打开管理页 —— 开发/排障时看输出
+  xbb serve --detach  后台跑，起完立刻返回，不等待也不通知 —— 开机自启用的就是它
+  xbb start           后台跑 + **等到真的就绪**才返回 + 通知 —— 所以适合双击
+
+为什么 start 要等就绪而不是起完就说"已启动"：
+  bind 失败、库损坏、端口被占都发生在 spawn 之后。先报"已启动"再让它失败，
+  用户会去找一个永远不出现的托盘图标 —— 那比不报更糟。
+
+⚠️ 托盘图标会不会被折叠进 ^ 溢出区，由 Windows 决定，程序无法强制。
+   第一次如果没直接看到：点开 ^ 把「小本本」拖到任务栏，之后系统会记住。`;
+
 const OVERVIEW = `xbb — 小本本个人客户端
 
 用法: xbb <命令> [参数]
-      xbb                     状态速览（模式 / 库在哪 / 常用命令）
+      xbb                     确保服务在跑（没跑就启动）+ 状态速览
       xbb <命令> --help       看该命令的完整说明（任意位置生效，且**不执行任何动作**）
 
 服务与接入
   xbb serve [--detach|--no-open|--headless]   启动本地服务 + 托盘 + 管理窗口（:17630）
+  xbb start [--open]                          确保服务在跑 + 弹通知；绑桌面图标用这个
   xbb mcp                                     MCP stdio（AI 宿主的接入点，由宿主拉起）
   xbb stop [--keep-mcp]                       停掉本机所有 xbb 进程
   xbb autostart [on|off|status]               开机自启（默认开；三平台）
@@ -266,6 +292,8 @@ export function helpText(cmd: string, sub?: string): string {
   switch (cmd) {
     case "serve":
       return SERVE_HELP;
+    case "start":
+      return START_HELP;
     case "mcp":
       return MCP_HELP;
     case "stop":

@@ -85,6 +85,14 @@ describe("helpText：反馈里点名要出现的选项必须真的在帮助里",
   test("未知命令查帮助 → 给总览而不是报错", () => {
     expect(helpText("nonesuch")).toContain("xbb — 小本本个人客户端");
   });
+
+  test("start 的帮助写明 --open、幂等，以及托盘被折叠时的处理", () => {
+    const t = helpText("start");
+    expect(t).toContain("--open");
+    expect(t).toContain("幂等");
+    // 这句是用户最需要的：图标看不见时他该做什么
+    expect(t).toContain("拖到任务栏");
+  });
 });
 
 describe("真起进程：--help 零副作用", () => {
@@ -102,6 +110,16 @@ describe("真起进程：--help 零副作用", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("--detach");
     expect(r.out).not.toContain("listening on");
+  });
+
+  test("xbb start --help 只打印帮助，绝不去拉服务", async () => {
+    // start 是唯一一条"会把服务真的启动起来"的短命令，
+    // 所以 --help 的拦截对它尤其重要：查帮助不能顺手把 17630 占了。
+    const r = await run(["start", "--help"], 10_000);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("幂等");
+    expect(r.out).not.toContain("已启动并就绪");
+    expect(r.out).not.toContain("已在运行");
   });
 
   test("xbb home move --help 不开始搬家", async () => {

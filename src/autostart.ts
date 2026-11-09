@@ -57,6 +57,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { connect } from "node:net";
 import { isCompiledExe } from "./updater";
 
 /** HKCU 启动项：免管理员，且是"当前用户登录即启"的既有机制。 */
@@ -74,8 +75,14 @@ export const LAUNCH_AGENT_LABEL = "net.xiaobenben.xbb";
 /** Linux 的 XDG 自启文件名。 */
 export const XDG_DESKTOP_FILE = "xbb.desktop";
 
+/**
+ * 本地服务端口。**这是产品级契约**（官网文档、防火墙规则、用户书签都写着它），
+ * 所以做成常量而不是散在各处的字面量：`PORT` 环境变量只在冒烟测试里覆盖。
+ */
+export const SERVE_PORT = 17630;
+
 /** 单实例探测用：服务端 healthz。 */
-const HEALTHZ = "http://127.0.0.1:17630/healthz";
+const HEALTHZ = `http://127.0.0.1:${SERVE_PORT}/healthz`;
 
 interface RunResult {
   code: number;
@@ -687,18 +694,21 @@ export function detachedServeArgs(rawArgs: string[]): string[] {
  * 副作用与对策：看不到窗口 ≠ 没有证据。子进程 stdout/stderr 一律重定向到
  * `XBB_HOME/logs/serve.log`（超 1MB 自动重开），"为什么没起来"随时可查。
  */
-export async function launchDetachedServe(rawArgs: string[]): Promise<never> {
-  // 已在跑就直接说清，不再起第二个（端口只有一个，第二个必然 bind 失败并污染日志）
-  const alive = await isServeAlive();
-  if (alive) {
-    console.log("[xbb] 常驻服务已在运行，无需重复启动（127.0.0.1:17630）");
-    process.exit(0);
-  }
+/** 常驻日志路径。排障时唯一的物证，"为什么没起来"全在这一个文件里。 */
+export function serveLogPath(): string {
+  return join(programDir(), "logs", "serve.log");
+}
 
+/**
+ * 把服务以**分离、无窗口**方式拉起来，返回子进程 PID。**不 exit** —— 后续由调用方决定。
+ *
+ * 为什么不 exit：`--detach` 的语义是"起完就走"，但「双击图标」的语义是"起完还要告诉用户
+ * 一声"（等就绪 → 发通知）。同一个动作两种收尾，所以拆成这一层。
+ */
+export async function spawnDetachedServe(rawArgs: string[]): Promise<number | null> {
   const argv = detachedServeArgs(rawArgs);
 
-  const home = programDir();
-  const log = join(home, "logs", "serve.log");
+  const log = serveLogPath();
   let stdio: "ignore" | ["ignore", number, number] = "ignore";
   try {
     mkdirSync(dirname(log), { recursive: true });
@@ -719,16 +729,135 @@ export async function launchDetachedServe(rawArgs: string[]): Promise<never> {
     windowsHide: true, // CREATE_NO_WINDOW：真正的服务不留任何窗口
   });
   child.unref();
-  console.log(`[xbb] 已在后台启动常驻服务（PID ${child.pid ?? "?"}）`);
-  console.log(`      日志: ${log}`);
+  return child.pid ?? null;
+}
+
+export async function launchDetachedServe(rawArgs: string[]): Promise<never> {
+  // 已在跑就直接说清，不再起第二个（端口只有一个，第二个必然 bind 失败并污染日志）
+  if (await isServeAlive()) {
+    console.log(`[xbb] 常驻服务已在运行，无需重复启动（127.0.0.1:${SERVE_PORT}）`);
+    process.exit(0);
+  }
+  const pid = await spawnDetachedServe(rawArgs);
+  console.log(`[xbb] 已在后台启动常驻服务（PID ${pid ?? "?"}）`);
+  console.log(`      日志: ${serveLogPath()}`);
   process.exit(0);
 }
 
-async function isServeAlive(): Promise<boolean> {
+export async function isServeAlive(): Promise<boolean> {
   try {
     const res = await fetch(HEALTHZ, { signal: AbortSignal.timeout(500) });
     return res.ok;
   } catch {
     return false;
   }
+}
+
+/**
+ * 端口上是否已有进程在监听。
+ *
+ * 存在的理由：healthz 不通有**两种**含义 —— "根本没有服务"和"服务正在启动、还没开始应答"。
+ * 只看 healthz 会把后者当成前者，于是再 spawn 一个 ⇒ bind 失败 ⇒ 日志里多一段 EADDRINUSE，
+ * 而用户看到的仍是"双击没反应"。用户连点两下图标就是这种竞态。
+ */
+export function isPortListening(port: number = SERVE_PORT, timeoutMs = 400): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    try {
+      const sock = connect({ host: "127.0.0.1", port });
+      sock.setTimeout(timeoutMs);
+      sock.once("connect", () => {
+        sock.destroy();
+        done(true);
+      });
+      sock.once("timeout", () => {
+        sock.destroy();
+        done(false);
+      });
+      sock.once("error", () => {
+        sock.destroy();
+        done(false);
+      });
+    } catch {
+      done(false);
+    }
+  });
+}
+
+/** 「确保服务在跑」的依赖注入点。全部可替换，这样启动流程本身能被单测覆盖。 */
+export interface ServeBootDeps {
+  alive: () => Promise<boolean>;
+  portBusy: () => Promise<boolean>;
+  spawnServe: (args: string[]) => Promise<number | null>;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+export interface ServeBootResult {
+  /** 调用时服务就已经健康（什么也没做） */
+  already: boolean;
+  /** 这次真的 spawn 了一个子进程 */
+  started: boolean;
+  /** 最终是否健康 */
+  healthy: boolean;
+  /** 新起的子进程 PID（already 时为 null） */
+  pid: number | null;
+  /** 端口有人在听、但 healthz 一直没通 */
+  portBusy: boolean;
+  /** 从开始到得出结论花了多久 */
+  waitedMs: number;
+}
+
+/** 冷启动预算。留足余量：首次运行要建库、写表、加载向量模型。 */
+export const SERVE_BOOT_TIMEOUT_MS = 20_000;
+
+/**
+ * 确保常驻服务在跑，**并等到它真的健康**才返回。
+ *
+ * 为什么必须等健康，而不是 spawn 完就报告"已启动"：
+ * 用户可见的那句话是有分量的 —— 说「已启动」而实际 bind 失败，比不说更糟（他会以为
+ * 托盘图标该出现了，然后去找一个不存在的图标）。所以这里宁可多等几秒。
+ */
+export async function ensureServeRunning(
+  o: { serveArgs?: string[]; timeoutMs?: number; pollMs?: number; deps?: Partial<ServeBootDeps> } = {},
+): Promise<ServeBootResult> {
+  const deps: ServeBootDeps = {
+    alive: isServeAlive,
+    portBusy: () => isPortListening(),
+    spawnServe: spawnDetachedServe,
+    sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+    now: () => Date.now(),
+    ...o.deps,
+  };
+  const timeoutMs = o.timeoutMs ?? SERVE_BOOT_TIMEOUT_MS;
+  const pollMs = o.pollMs ?? 250;
+  const t0 = deps.now();
+
+  if (await deps.alive()) {
+    return { already: true, started: false, healthy: true, pid: null, portBusy: true, waitedMs: 0 };
+  }
+
+  // 端口已监听却 healthz 不通 ⇒ 另一个实例正在启动（或 17630 被别的程序占了）。
+  // 这时再 spawn 必然 bind 失败，所以只等、不再起。
+  const busy = await deps.portBusy();
+  let pid: number | null = null;
+  let started = false;
+  if (!busy) {
+    pid = await deps.spawnServe(o.serveArgs ?? ["--no-open"]);
+    started = true;
+  }
+
+  // 上限 400 次：即便注入的 now() 不动，也不会在这里空转成死循环。
+  for (let i = 0; i < 400 && deps.now() - t0 < timeoutMs; i++) {
+    if (await deps.alive()) {
+      return { already: false, started, healthy: true, pid, portBusy: busy, waitedMs: deps.now() - t0 };
+    }
+    await deps.sleep(pollMs);
+  }
+  return { already: false, started, healthy: false, pid, portBusy: busy, waitedMs: deps.now() - t0 };
 }

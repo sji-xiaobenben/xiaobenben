@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PersonalStore } from "./store";
 import { startServe } from "./serve";
+import { ensureServeRunning, isPortListening } from "./autostart";
 
 let dir = "";
 let store: PersonalStore;
@@ -127,5 +128,93 @@ describe("本地服务的来源闸：每条路由都要过", () => {
     expect(await rawStatus(PORT(), req("GET", "/ui", LOOP()))).toBe(200);
     expect(await rawStatus(PORT(), req("GET", "/api/list", LOOP()))).toBe(200);
     expect(await rawStatus(PORT(), req("GET", "/api/list", "evil.example"))).toBe(403);
+  });
+});
+
+/**
+ * 「确保服务在跑」（2026-11-10 用户反馈：双击图标后什么也没发生）。
+ *
+ * 这段逻辑的每条分支都对应一种真实误判，所以逐条测：
+ *  - 已在跑却重复 spawn ⇒ 端口 bind 失败、日志被写脏；
+ *  - 正在启动却当成"没起" ⇒ 双击两下起两个（第二个必败）；
+ *  - 起完没就绪就报「已启动」⇒ 用户去找一个永远不会出现的托盘图标。
+ *
+ * 全部走注入的 deps：不起真服务、不碰 17630、不写日志。
+ */
+function makeBootDeps(opts: { aliveSeq: boolean[]; portBusy?: boolean; spawnPid?: number | null }) {
+  let aliveIdx = 0;
+  let portChecks = 0;
+  const spawns: string[][] = [];
+  const deps = {
+    alive: async () => {
+      // 序列用尽后一律返回最后一项：模拟"起来了就一直活着" / "一直没起来"
+      const v = opts.aliveSeq[Math.min(aliveIdx, opts.aliveSeq.length - 1)];
+      aliveIdx++;
+      return v === true;
+    },
+    portBusy: async () => {
+      portChecks++;
+      return opts.portBusy === true;
+    },
+    spawnServe: async (a: string[]) => {
+      spawns.push(a);
+      return opts.spawnPid === undefined ? 4242 : opts.spawnPid;
+    },
+    sleep: async () => {},
+  };
+  return { deps, spawns, portChecks: () => portChecks };
+}
+
+describe("ensureServeRunning：三条不能错的分支", () => {
+  test("已在运行 → 什么都不做（不 spawn、不探端口）", async () => {
+    const { deps, spawns, portChecks } = makeBootDeps({ aliveSeq: [true] });
+    const r = await ensureServeRunning({ deps });
+    expect(r.already).toBe(true);
+    expect(r.started).toBe(false);
+    expect(r.healthy).toBe(true);
+    expect(r.pid).toBeNull();
+    expect(spawns.length).toBe(0);
+    expect(portChecks()).toBe(0); // 已在跑就不要再探端口，一次多余系统调用可能慢 400ms
+  });
+
+  test("确实没起 → spawn 一次，等到健康为止", async () => {
+    const { deps, spawns } = makeBootDeps({ aliveSeq: [false, true], spawnPid: 777 });
+    const r = await ensureServeRunning({ deps });
+    expect(r.already).toBe(false);
+    expect(r.started).toBe(true);
+    expect(r.healthy).toBe(true);
+    expect(r.pid).toBe(777);
+    expect(spawns).toEqual([["--no-open"]]); // 后台拉起绝不自带"开浏览器"
+  });
+
+  test("端口已监听但 healthz 还不通 → 只等，不重复 spawn", async () => {
+    // 这是「用户连点两下图标」的竞态：第二个实例若也 spawn，必然 bind 失败
+    const { deps, spawns } = makeBootDeps({ aliveSeq: [false, false, false, true], portBusy: true, spawnPid: 9 });
+    const r = await ensureServeRunning({ deps });
+    expect(r.started).toBe(false);
+    expect(r.portBusy).toBe(true);
+    expect(r.healthy).toBe(true);
+    expect(r.pid).toBeNull();
+    expect(spawns.length).toBe(0);
+  });
+
+  test("一直起不来 → healthy:false，且只尝试拉起一次", async () => {
+    const { deps, spawns } = makeBootDeps({ aliveSeq: [false] });
+    const r = await ensureServeRunning({ deps, timeoutMs: 30, pollMs: 1 });
+    expect(r.healthy).toBe(false);
+    expect(r.started).toBe(true); // 确实 attempt 过
+    expect(spawns.length).toBe(1); // 但只试一次，不反复拉起
+  });
+});
+
+describe("isPortListening：区分「没起」与「正在起」的唯一依据", () => {
+  test("在监听 → true；关掉之后 → false（同一个端口，不能一直返回 true）", async () => {
+    // 自包含地起一个随机端口：不依赖本文件那个 describe 的 server（它的 afterAll 已经先跑过）
+    const s = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
+    const p = s.port!;
+    expect(await isPortListening(p, 1500)).toBe(true);
+    s.stop(true);
+    // 不该停在 true：否则"正在启动"的判定会把所有没跑的服务都当成在启动，于是永远不 spawn
+    expect(await isPortListening(p, 800)).toBe(false);
   });
 });

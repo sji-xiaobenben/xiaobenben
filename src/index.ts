@@ -178,6 +178,21 @@ if (cmd === "serve") {
     }
 
     /**
+     * 开始菜单里那一格「小本本」。
+     *
+     * 与自启完全同一套纪律（同在这个 `!headless` 分支、只补缺、失败只警告），但**不 await**：
+     * 写它要起一个 PowerShell，冷启动几百毫秒，而 serve 就绪时间直接决定 AI 客户端等多久。
+     * 这一格写不写跟"记忆能不能收发"毫无关系 ⇒ 它连阻塞的资格都没有。
+     *
+     * 首次安装的用户大多一次也不会双击图标（他们直接从客户端里调 MCP），所以 serve 这一侧
+     * 才是这条路的兜底：登录自启跑起来的同时，系统里的登记也就位了。
+     */
+    void (await import("./shortcut")).ensureStartMenuShortcut().then((s) => {
+      if (s.status === "created") console.log(`[xbb] 已加入开始菜单：${s.path}`);
+      else if (s.status === "failed") console.warn(`[xbb] 开始菜单图标没能写入（不影响服务）：${s.message}`);
+    });
+
+    /**
      * 托盘菜单要的运行态 —— **每次现读 cloud.ts / 系统启动项**，托盘自己不维护第二份状态。
      * 自启现状也现读：用户可能在系统设置（GNOME 启动应用程序 / 任务管理器）里改过。
      */
@@ -319,6 +334,52 @@ if (cmd === "serve") {
       }
     }
   }
+} else if (cmd === "start") {
+  // 「双击图标」的入口：确保服务在跑，并且**把结果说出来**。
+  //
+  // 为什么非要说一声：用户判断"它在不在"的唯一依据是右下角那个图标。服务起在后台却
+  // 没有任何可见反馈时，双击的结果就是"什么也没发生" —— 这正是「装了但不知道有没有在用」
+  // 的另一半：不是记忆层无感，是**启动这一步本身无感**。
+  const { ensureServeRunning, serveLogPath, SERVE_PORT } = await import("./autostart");
+  const { showToast } = await import("./notify");
+  const r = await ensureServeRunning();
+  if (!r.healthy) {
+    console.error(`[xbb] 服务没能在 ${Math.round(r.waitedMs / 1000)} 秒内就绪`);
+    console.error(
+      r.portBusy
+        ? `      端口 ${SERVE_PORT} 已被占用 —— 先看是谁：netstat -ano | findstr ${SERVE_PORT}`
+        : `      进程没起来，看日志：${serveLogPath()}`,
+    );
+    process.exit(1);
+  }
+  // AUMID 必须先注册，否则 Windows 上这条通知会被静默丢弃（不是显示不出来，是压根没投递）
+  ensureToastAppId();
+  // 三件事一条通知说完：它起来了 / 去哪看它 / 图标被折叠时怎么办。
+  //   · url 让**点通知＝直接进管理页**，这是不依赖托盘的备用路径；
+  //   · 后半句是给 Windows 那座"隐藏的图标"区的：首次安装的图标默认被折叠，
+  //     用户会以为没启动——这是「无感」在启动环节的翻版。
+  const body = "托盘图标在右下角。看不到就点开 ^ 拖到任务栏。";
+  const uiUrl = `http://127.0.0.1:${SERVE_PORT}/ui`;
+  if (r.already) {
+    showToast({ title: "小本本已经在运行", body, url: uiUrl });
+    console.log(`[xbb] 常驻服务已在运行（127.0.0.1:${SERVE_PORT}）`);
+  } else {
+    showToast({ title: "小本本 AI 记忆已启动", body, url: uiUrl });
+    console.log(`[xbb] 已启动并就绪（${r.waitedMs}ms${r.pid ? ` · PID ${r.pid}` : ""}）`);
+  }
+  if (args.includes("--open") || args.includes("-o")) openInBrowser(uiUrl);
+
+  /**
+   * 服务起来了，顺手把系统里那一格补上（开始菜单快捷方式）。
+   *
+   * 放在这里而不是只放在 serve 里：`start` 的实例可能已经在跑（服务不重启），
+   * 此时 serve 侧那段补写逻辑永远不会再执行 —— 而"双击图标"恰恰是最该发生这件事的时刻。
+   * 幂等且失败静默，绝不影响上面那句"已启动"。
+   */
+  const { ensureStartMenuShortcut } = await import("./shortcut");
+  const sc = await ensureStartMenuShortcut();
+  if (sc.status === "created") console.log(`[xbb] 已加入开始菜单：${sc.path}`);
+  else if (sc.status === "failed") console.warn(`[xbb] 开始菜单图标没能写入（不影响使用）：${sc.message}`);
 } else if (cmd === "mcp") {
   await runMcp();
 } else if (cmd === "bind") {
@@ -872,6 +933,41 @@ if (cmd === "serve") {
     console.error("");
     console.error(overviewHelp());
     process.exit(1);
+  }
+
+  /**
+   * 裸调用（真的一个参数都没有）＝ 多半有人双击了图标。
+   *
+   * 这里做的不是"打印帮助"，而是**让这次双击有个结果**：服务没跑就拉起来，
+   * 拉起来了就弹一条通知。`xbb help` 与 `xbb --help` 仍然是纯打印、零副作用 ——
+   * 想安静地看命令清单，那条路一直都在。
+   *
+   * 已知代价：终端里敲 `xbb` 也会顺手确保服务在跑（会等最多 20 秒）。
+   * 这是有意的取舍 —— 双击与终端无法区分，而"双击后什么都没发生"的伤害更大。
+   */
+  if (args.length === 0) {
+    const { ensureServeRunning, SERVE_PORT } = await import("./autostart");
+    const { showToast } = await import("./notify");
+    const r = await ensureServeRunning();
+    if (!r.healthy) {
+      // 不健康时说"已启动"就是撒谎 —— 用户会去找一个永远不会出现的图标。
+      console.log(`常驻服务: 未就绪${r.portBusy ? ` — 端口 ${SERVE_PORT} 被别的程序占着` : " — 看 logs/serve.log"}`);
+    } else {
+      // 只在**真的把服务拉起来**（或确认它在跑）之后才通知。
+      // 已在运行时也发：双击图标的人要的正是"它在不在"这个回答，静默等于没反应。
+      ensureToastAppId();
+      showToast({
+        title: r.already ? "小本本已经在运行" : "小本本 AI 记忆已启动",
+        body: "托盘图标在右下角。看不到就点开 ^ 拖到任务栏。",
+        url: `http://127.0.0.1:${SERVE_PORT}/ui`,
+      });
+      console.log(
+        r.already
+          ? `常驻服务: 运行中（127.0.0.1:${SERVE_PORT}）`
+          : `常驻服务: 已启动并就绪（${r.waitedMs}ms）`,
+      );
+    }
+    console.log("");
   }
   console.log(cloudLine);
   console.log("");
