@@ -5,6 +5,8 @@
 # master 上出现的每一个作者邮箱，是否都能对应到一条签署记录。
 #
 # 判定标准：作者邮箱以 @sji.xin 结尾（公司自有），或在 signatures/ 的任何记录里出现过。
+# 机器人一律跳过（`*[bot]@users.noreply.github.com`）：它不可能签署协议，而 cla.yml 早已
+# 对 dependabot[bot] 单独放行——两处口径不一致，审计就会永远红着，红灯本身也就废了。
 
 name: 贡献者审计
 
@@ -41,6 +43,7 @@ jobs:
             | tr 'A-Z' 'a-z' \
             | sort -u \
             | grep -v '@sji\.xin$' \
+            | grep -v '\[bot\]@users\.noreply\.github\.com$' \
             | grep -v '^$' \
             | sort -u > "$MISSING_FILE" || true
 
