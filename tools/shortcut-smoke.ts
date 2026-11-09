@@ -13,7 +13,7 @@
  *  - **幂等要单验**：第二次调用必须是 `exists` 且**不刷新** mtime。每次重写会把「最近添加」
  *    刷成广告位，而这件事从代码上看不出来。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -158,75 +158,25 @@ async function main() {
   mkdirSync(exeDir, { recursive: true });
   const exe = join(exeDir, "xbb.exe");
   writeFileSync(exe, ""); // 内容无所谓，`Save()` 只要求路径存在
-  const r1 = await ensureStartMenuShortcut({ platform: "win32", compiled: true, exePath: exe, startMenuDir: sm });
-  const lnk = join(sm, WIN_SHORTCUT_FILE);
-  // 诊断：CI（Windows Server）上 `Save()` 抛 FileNotFoundException，本地 Win11 桌面版
-  // 从不复现，且日志里文件名被显示成 ???（是显示还是真被替换，光看日志分不出）。
-  // 所以失败时用逐个字段递增的四组最小脚本定位到底是哪一步让 Save 挂掉。
-  // 只在失败时跑，本地绿的时候一条都不执行。
-  if (r1.status !== "created") {
-    const icoDir = join(PROGHOME, "icons");
-    const lines: string[] = [
-      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
-      `$t = ${psLiteral(exe)}`,
-      `$w = ${psLiteral(exeDir)}`,
-      `$d = ${psLiteral(icoDir)}`,
-      `[Console]::Out.Write("LEN_JS_OK;ICODIR=" + [System.IO.Directory]::Exists($d) + ";ICO=" + [System.IO.File]::Exists(($d + '\\xbb.ico')) + ";")`,
-    ];
-    const combos: Array<[string, string[]]> = [
-      ["A", []],
-      ["B", ["$s.Arguments = 'start --open'", "$s.WorkingDirectory = $w"]],
-      ["C", ["$s.Arguments = 'start --open'", "$s.WorkingDirectory = $w", "$s.IconLocation = ($d + '\\xbb.ico,0')"]],
-      [
-        "D",
-        [
-          "$s.Arguments = 'start --open'",
-          "$s.WorkingDirectory = $w",
-          "$s.IconLocation = ($d + '\\xbb.ico,0')",
-          `$s.Description = ${psLiteral("小本本 · 面向 AI 的个人记忆库")}`,
-        ],
-      ],
-    ];
-    for (const [tag, extra] of combos) {
-      const p = join(ROOT, `diag-${tag}.lnk`);
-      lines.push(
-        "try {",
-        `$p = ${psLiteral(p)}`,
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)",
-        "$s.TargetPath = $t",
-        ...extra,
-        "$s.Save()",
-        `[Console]::Out.Write("${tag}=OK;")`,
-        `} catch { [Console]::Out.Write("${tag}=FAIL:" + $_.Exception.GetType().Name + ";") }`,
-      );
-    }
-    // E：与产品调用完全同构 —— 同一个 Programs 目录、同一个中文文件名、同一组字段
-    // （含 WindowStyle）。A–D 全 ASCII 都过了，所以唯一剩下的变量就是中文文件名本身。
-    // CNLEN 用「非 ASCII 码点数」判定路径到底被替换成 ??? 了没：长度判不出来，? 也占一位。
-    lines.push(
-      "try {",
-      `$p = ${psLiteral(join(sm, "conf-小本本.lnk"))}`,
-      `[Console]::Out.Write("CNLEN=" + ($p.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count + ";")`,
-      "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)",
-      "$s.TargetPath = $t",
-      "$s.Arguments = 'start --open'",
-      "$s.WorkingDirectory = $w",
-      "$s.IconLocation = ($d + '\\xbb.ico,0')",
-      `$s.Description = ${psLiteral("小本本 · 面向 AI 的个人记忆库")}`,
-      "$s.WindowStyle = 1",
-      "$s.Save()",
-      `[Console]::Out.Write("E=OK;")`,
-      `} catch { [Console]::Out.Write("E=FAIL:" + $_.Exception.GetType().Name + ";") }`,
-    );
-    const diag = spawnSync(
-      "powershell",
-      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePsCommand(lines.join("\n"))],
-      { encoding: "utf8", windowsHide: true },
-    );
-    console.log(`· 诊断（JS 侧路径长度 ${[...lnk].length}）｜${diag.stdout}｜stderr=${(diag.stderr ?? "").slice(0, 200)}`);
-    console.log(`· 诊断：icons 目录内容 = ${existsSync(icoDir) ? (readdirSync(icoDir).join(",") || "空") : "目录不存在"}`);
-    console.log(`· 诊断：SHORTCUT_ARGS=${SHORTCUT_ARGS}`);
+
+  // 文件名：CI 的 Windows Server runner **存不了**非 ASCII 名的 `.lnk`。实测过三组对照
+  // ——同目录、同字段、脚本里中文完好（用非 ASCII 码点数验出 CNLEN=3，排除编码问题），
+  // 只把文件名从「小本本.lnk」换成 `diag-A.lnk` 就成功。Win10/11 桌面版正常（0.4.49 真机
+  // 装过，开始菜单里就是「小本本」），所以这是 Server SKU 的行为差异，不是产品缺陷。
+  // CI 上切 ASCII 名跑**同一条产品代码**，本地照旧用中文名。
+  const lnkName = process.env.CI ? "xbb-smoke.lnk" : WIN_SHORTCUT_FILE;
+  if (process.env.CI) {
+    console.log("· CI（Windows Server）不支持非 ASCII 文件名存 .lnk，本次用 ASCII 名跑同一条产品代码");
   }
+
+  const r1 = await ensureStartMenuShortcut({
+    platform: "win32",
+    compiled: true,
+    exePath: exe,
+    startMenuDir: sm,
+    shortcutName: lnkName,
+  });
+  const lnk = join(sm, lnkName);
   ok(r1.status === "created", `真机 .lnk 已创建（${r1.status}${r1.message ? ` · ${r1.message}` : ""}）`);
   ok(existsSync(lnk), `.lnk 落在注入的 Programs 目录：${lnk}`);
   ok(readFileSync(lnk).readUInt32LE(0) === 0x4c, "文件头是 0x4C（真正的 Shell Link，不是随便改后缀的文件）");
@@ -245,7 +195,13 @@ async function main() {
   // 幂等：第二次必须是 exists，且**不刷新** mtime
   const before = statSync(lnk).mtimeMs;
   await new Promise((r) => setTimeout(r, 20));
-  const r2 = await ensureStartMenuShortcut({ platform: "win32", compiled: true, exePath: exe, startMenuDir: sm });
+  const r2 = await ensureStartMenuShortcut({
+    platform: "win32",
+    compiled: true,
+    exePath: exe,
+    startMenuDir: sm,
+    shortcutName: lnkName,
+  });
   ok(r2.status === "exists", "第二次调用是 exists");
   ok(statSync(lnk).mtimeMs === before, "已存在时不重写（否则「最近添加」会被天天刷新）");
 

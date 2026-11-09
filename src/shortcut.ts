@@ -145,12 +145,19 @@ export function linuxApplicationsDir(o: { env?: NodeJS.ProcessEnv; home?: string
  */
 export function shortcutPath(
   platform: NodeJS.Platform = process.platform,
-  o: { env?: NodeJS.ProcessEnv; home?: string; startMenuDir?: string; xdgDataHome?: string } = {},
+  o: {
+    env?: NodeJS.ProcessEnv;
+    home?: string;
+    startMenuDir?: string;
+    xdgDataHome?: string;
+    /** 覆盖文件名，**只给测试用**（见 `EnsureShortcutOpts.shortcutName`）。 */
+    shortcutName?: string;
+  } = {},
 ): string | null {
-  if (platform === "win32") return join(o.startMenuDir ?? startMenuProgramsDir(o), WIN_SHORTCUT_FILE);
+  if (platform === "win32") return join(o.startMenuDir ?? startMenuProgramsDir(o), o.shortcutName ?? WIN_SHORTCUT_FILE);
   if (platform === "linux") {
     const dir = o.xdgDataHome ? join(o.xdgDataHome, "applications") : linuxApplicationsDir(o);
-    return join(dir, LINUX_DESKTOP_FILE);
+    return join(dir, o.shortcutName ?? LINUX_DESKTOP_FILE);
   }
   return null;
 }
@@ -265,6 +272,15 @@ export interface EnsureShortcutOpts {
   compiled?: boolean;
   /** 覆盖 PowerShell 运行器（测试用）。 */
   run?: ScriptRunner;
+  /**
+   * 覆盖落盘文件名，**只给测试用**。
+   *
+   * 起因：CI 的 Windows Server runner 上 `Save()` 存不了文件名含非 ASCII 的 `.lnk`
+   * （同目录同字段，文件名换成 ASCII 就成功；脚本里拿到的中文完好——用非 ASCII 码点
+   * 数验过），而 Win10/11 桌面版正常。这是 Shell API 在 Server SKU 上的行为差异，
+   * 不是产品缺陷，但会让真机往返测试永远红。测试因此可切到 ASCII 名跑同一条产品代码。
+   */
+  shortcutName?: string;
 }
 
 /**

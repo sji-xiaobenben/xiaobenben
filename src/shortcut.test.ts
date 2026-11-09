@@ -91,6 +91,17 @@ describe("路径解析", () => {
     expect(WIN_SHORTCUT_FILE).toBe("小本本.lnk");
     expect(LINUX_DESKTOP_FILE).toBe("xbb.desktop");
   });
+
+  test("shortcutName 可覆盖文件名（测试开关：CI 的 Server runner 存不了非 ASCII 名）", () => {
+    expect(shortcutPath("win32", { startMenuDir: "/sm", shortcutName: "xbb-smoke.lnk" })).toBe(
+      join("/sm", "xbb-smoke.lnk"),
+    );
+    expect(shortcutPath("linux", { xdgDataHome: "/xdg", shortcutName: "xbb-smoke.desktop" })).toBe(
+      join("/xdg", "applications", "xbb-smoke.desktop"),
+    );
+    // 不传时仍走产品默认名，这个开关不可能被产品路径误用
+    expect(shortcutPath("win32", { startMenuDir: "/sm" })).toBe(join("/sm", WIN_SHORTCUT_FILE));
+  });
 });
 
 describe("PowerShell 正文", () => {
