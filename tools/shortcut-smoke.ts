@@ -159,8 +159,55 @@ async function main() {
   const exe = join(exeDir, "xbb.exe");
   writeFileSync(exe, ""); // 内容无所谓，`Save()` 只要求路径存在
   const r1 = await ensureStartMenuShortcut({ platform: "win32", compiled: true, exePath: exe, startMenuDir: sm });
-  ok(r1.status === "created", `真机 .lnk 已创建（${r1.status}${r1.message ? ` · ${r1.message}` : ""}）`);
   const lnk = join(sm, WIN_SHORTCUT_FILE);
+  // 诊断：CI（Windows Server）上 `Save()` 抛 FileNotFoundException，本地 Win11 桌面版
+  // 从不复现，且日志里文件名被显示成 ???（是显示还是真被替换，光看日志分不出）。
+  // 所以失败时用逐个字段递增的四组最小脚本定位到底是哪一步让 Save 挂掉。
+  // 只在失败时跑，本地绿的时候一条都不执行。
+  if (r1.status !== "created") {
+    const icoDir = join(PROGHOME, "icons");
+    const lines: string[] = [
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+      `$t = ${psLiteral(exe)}`,
+      `$w = ${psLiteral(exeDir)}`,
+      `$d = ${psLiteral(icoDir)}`,
+      `[Console]::Out.Write("LEN_JS_OK;ICODIR=" + [System.IO.Directory]::Exists($d) + ";ICO=" + [System.IO.File]::Exists(($d + '\\xbb.ico')) + ";")`,
+    ];
+    const combos: Array<[string, string[]]> = [
+      ["A", []],
+      ["B", ["$s.Arguments = 'start --open'", "$s.WorkingDirectory = $w"]],
+      ["C", ["$s.Arguments = 'start --open'", "$s.WorkingDirectory = $w", "$s.IconLocation = ($d + '\\xbb.ico,0')"]],
+      [
+        "D",
+        [
+          "$s.Arguments = 'start --open'",
+          "$s.WorkingDirectory = $w",
+          "$s.IconLocation = ($d + '\\xbb.ico,0')",
+          `$s.Description = ${psLiteral("小本本 · 面向 AI 的个人记忆库")}`,
+        ],
+      ],
+    ];
+    for (const [tag, extra] of combos) {
+      const p = join(ROOT, `diag-${tag}.lnk`);
+      lines.push(
+        "try {",
+        `$p = ${psLiteral(p)}`,
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)",
+        "$s.TargetPath = $t",
+        ...extra,
+        "$s.Save()",
+        `[Console]::Out.Write("${tag}=OK;")`,
+        `} catch { [Console]::Out.Write("${tag}=FAIL:" + $_.Exception.GetType().Name + ";") }`,
+      );
+    }
+    const diag = spawnSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePsCommand(lines.join("\n"))],
+      { encoding: "utf8", windowsHide: true },
+    );
+    console.log(`· 诊断（JS 侧路径长度 ${[...lnk].length}）｜${diag.stdout}｜stderr=${(diag.stderr ?? "").slice(0, 200)}`);
+  }
+  ok(r1.status === "created", `真机 .lnk 已创建（${r1.status}${r1.message ? ` · ${r1.message}` : ""}）`);
   ok(existsSync(lnk), `.lnk 落在注入的 Programs 目录：${lnk}`);
   ok(readFileSync(lnk).readUInt32LE(0) === 0x4c, "文件头是 0x4C（真正的 Shell Link，不是随便改后缀的文件）");
 
