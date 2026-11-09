@@ -9,7 +9,7 @@ import { programDir, DbMissingError } from "./home";
 import { runMcp } from "./mcp";
 import { PersonalStore } from "./store";
 import { ORG_PERSONAL } from "./schema";
-import { startServe } from "./serve";
+import { startServe, lastRequestAtMs } from "./serve";
 import { startTray, type TrayHandle, type TrayState } from "./tray";
 import { ensureToastAppId } from "./notify";
 import { startNotifyWatch, desktopNotifyEnabled } from "./notify-watch";
@@ -40,6 +40,17 @@ if (isHelpRequest(args)) {
   const t = helpTopic(args);
   console.log(helpText(t.cmd, t.sub));
   process.exit(0);
+}
+
+/**
+ * 隐藏子命令：采集子进程（`ingest-job.ts` 的内部实现，不出现在帮助里）。
+ * 为什么要单独一个进程入口：`collectClientSessions` 一轮要 6.8 秒且全同步，
+ * 跑在服务进程里就是把 HTTP 冻住 6.8 秒。父进程只负责起停与回报状态。
+ * 必须先于 `serve` 分支：子进程不该走任何服务装配、也不该去动更新回滚标记。
+ */
+if (cmd === "__ingest") {
+  const { runIngestChild } = await import("./ingest-job");
+  process.exit(await runIngestChild());
 }
 
 if (cmd === "serve") {
@@ -84,7 +95,24 @@ if (cmd === "serve") {
     }
     throw e;
   }
-  startServe(store, port);
+  // 会话采集（V8）：AI 不一定每轮老实上报，所以引擎自己去读本机客户端库。
+  // 5 分钟一轮、首轮延迟 20s —— **跑在独立子进程里**：一轮实测 6.8 秒且全同步，
+  // 留在主线程就是把整个 HTTP 服务冻住（管理页点一下卡一下）。详见 ingest-job.ts 文件头。
+  // XBB_INGEST=0 或页面上的「不要自动整理」都能关掉。
+  const { startIngestScheduler } = await import("./ingest-job");
+  const ingest = startIngestScheduler({
+    // 有人正在用页面就往后让，不跟用户操作抢 SQLite 写锁
+    idleFor: () => Date.now() - lastRequestAtMs(),
+    onResult: (r) => {
+      if (!r.ok) console.warn(`[xbb] 会话采集失败：${r.error ?? "未知错误"}`);
+      else if (r.inserted > 0) {
+        const hit = r.sources.filter((x) => x.inserted > 0);
+        console.log(`[xbb] 会话采集 +${r.inserted} 条：${hit.map((x) => `${x.label} ${x.inserted}`).join(" / ")}`);
+      }
+    },
+  });
+
+  startServe(store, port, { ingest });
   console.log(`xbb serve listening on http://127.0.0.1:${port}`);
 
   // 更新确认点：**真实 healthz 通过**才算本次更新成功（删 pending 标记；不删则下次启动回退）。
@@ -108,23 +136,6 @@ if (cmd === "serve") {
     }
     console.warn("[xbb] healthz 10s 内未就绪 —— 暂不确认本次更新（下次启动将回退）");
   })();
-
-  // 客户端会话采集（V8）：AI 不一定每轮老实上报，所以引擎自己去读本机客户端库。
-  // 5 分钟一轮、首轮延迟 15s（先让端口与托盘安顿好）；XBB_INGEST=0 可整块关掉。
-  if (process.env.XBB_INGEST !== "0") {
-    const { collectClientSessions } = await import("./ingest");
-    const runIngest = () => {
-      try {
-        const r = collectClientSessions(store.db);
-        const hit = r.results.filter((x) => x.inserted > 0);
-        if (hit.length) console.log(`[xbb] 会话采集 +${r.inserted} 条：${hit.map((x) => `${x.label} ${x.inserted}`).join(" / ")}`);
-      } catch (e) {
-        console.warn("[xbb] 会话采集失败:", e instanceof Error ? e.message : e);
-      }
-    };
-    setTimeout(runIngest, 15_000).unref?.();
-    setInterval(runIngest, 5 * 60_000).unref?.();
-  }
 
   // 自更新：源地址 = env XBB_UPDATE_URL ?? build-meta.UPDATE_URL_DEFAULT
   // （显式设空串即关闭，供企业分发/离线场景）。
@@ -487,6 +498,20 @@ if (cmd === "serve") {
   // 而各家客户端本来就把完整会话落在本机盘上，引擎自己去读才是完整性的唯一保证。
   const { collectClientSessions, ingestStatus, layerBalance, probeSources, ALL_SOURCES } = await import("./ingest");
   const store = PersonalStore.open();
+
+  // `xbb ingest on|off`：与页面上的「不要自动整理」写同一份落盘开关。
+  // 常驻服务每轮开跑前都会重读它（见 ingest-job.ts 的 tick），所以这里关掉后最迟下一轮生效。
+  const toggle = args[1];
+  if (toggle === "on" || toggle === "off") {
+    const { writeIngestEnabled } = await import("./ingest-job");
+    writeIngestEnabled(toggle === "on");
+    console.log(
+      toggle === "on"
+        ? "已打开自动采集：常驻服务 30 秒内开始读本机会话"
+        : "已关闭自动采集：30 秒内停手，不再读取本机会话原文；已入库的原话保留，可用 xbb ingest --status 查看",
+    );
+    process.exit(0);
+  }
 
   if (args.includes("--status")) {
     const probe = probeSources();

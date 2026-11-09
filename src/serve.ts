@@ -14,8 +14,21 @@ import { ORG_PERSONAL } from "./schema";
 import { handleServe as handleAdmin, localGuard } from "./web/admin";
 import { tokenize } from "./tokenize";
 import { VERSION as BUILD_VERSION } from "./build-meta";
+import type { IngestScheduler } from "./ingest-job";
+import { INACTIVE_SNAPSHOT } from "./ingest-job";
 
 const STARTED_AT = Date.now();
+
+/**
+ * 最后一次收到请求的时刻。
+ * 唯一用途：会话采集挑**没人用页面的时候**开跑（采集子进程会写库，
+ * 在用户点「删除」的同一瞬间去抢写锁，换来的是"点了没反应"）。
+ * 记在这里而不是 sessionStorage：服务端才是唯一知道全局有没有人在用的地方。
+ */
+let lastRequestAt = 0;
+export function lastRequestAtMs(): number {
+  return lastRequestAt || Number.NEGATIVE_INFINITY;
+}
 
 /** 行规范化：tags JSON → 数组（查询端点共用） */
 function this_rows(rows: unknown[]): unknown[] {
@@ -70,8 +83,10 @@ async function buildReport(store: PersonalStore, port: number) {
   };
 }
 
-export async function startServe(store: PersonalStore, port = 17630) {
+export async function startServe(store: PersonalStore, port = 17630, opts: { ingest?: IngestScheduler } = {}) {
   const db = () => store.db;
+  // 采集器由 index.ts 装配（测试里不传 ⇒ 页面不显示采集相关提示，也不会有子进程）
+  const ingest = opts.ingest;
   // 默认约束幂等播种（补遗；XBB_SEED=0 关闭）
   if (process.env.XBB_SEED !== "0") {
     const { seedDefaultConstraints } = await import("./seed");
@@ -88,6 +103,8 @@ export async function startServe(store: PersonalStore, port = 17630) {
       const guard = localGuard(req);
       if (guard) return guard;
       const url = new URL(req.url);
+      // 页面每 5 秒轮询一次采集状态：那不算「有人在用」，否则空闲闸永远等不到窗口
+      if (url.pathname !== "/api/ingest") lastRequestAt = Date.now();
       if (url.pathname === "/healthz") {
         return Response.json({ ok: true, service: "xiaobenben", ts: new Date().toISOString() });
       }
@@ -130,6 +147,19 @@ export async function startServe(store: PersonalStore, port = 17630) {
         const { dismissUpdate } = await import("./update-notice");
         dismissUpdate(body.version);
         return Response.json({ ok: true });
+      }
+      // ---------- 会话采集的开关与状态（页面「温馨提示」的数据源） ----------
+      // 采集跑在独立子进程里，父进程只知道"在跑/跑完了/上次进了几条"。
+      if (url.pathname === "/api/ingest" && req.method === "GET") {
+        return Response.json({ ok: true, ...(ingest ? ingest.snapshot() : INACTIVE_SNAPSHOT) });
+      }
+      if (url.pathname === "/api/ingest" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { enabled?: unknown } | null;
+        if (!ingest) return Response.json({ ok: false, error: "ingest_unavailable" }, { status: 409 });
+        if (typeof body?.enabled !== "boolean") {
+          return Response.json({ ok: false, error: "invalid_enabled" }, { status: 400 });
+        }
+        return Response.json({ ok: true, ...ingest.setEnabled(body.enabled) });
       }
       if (url.pathname === "/report") {
         return Response.json(await buildReport(store, port));

@@ -1076,9 +1076,15 @@ export function collectClientSessions(db: Database, opts: CollectOptions = {}): 
       if (opts.dryRun) {
         inserted = rows.length;
       } else {
-        const r = appendEpisodes(db, rows);
-        inserted = r.inserted;
-        skipped = r.skipped;
+        // 分块提交。整源一个事务（opencode 一轮 6 千行）会把写锁按住一两秒：这期间用户点
+        // 「删除记忆」只能干等 busy_timeout，到期还直接失败。500 行一块后锁持有时间降到几十
+        // 毫秒量级，落在用户一次点击的容忍范围内。总量不变，只是提交次数多了几倍。
+        const CHUNK = 500;
+        for (let i = 0; i < rows.length; i += CHUNK) {
+          const r = appendEpisodes(db, rows.slice(i, i + CHUNK));
+          inserted += r.inserted;
+          skipped += r.skipped;
+        }
       }
     }
 

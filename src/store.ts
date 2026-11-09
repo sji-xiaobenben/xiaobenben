@@ -99,6 +99,11 @@ export class PersonalStore {
     const db = new Database(file, { create: true });
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA foreign_keys = ON");
+    // 写冲突让路而不是立刻报错：会话采集跑在独立子进程里（ingest-job.ts），
+    // 它成批插入原话时用户可能正在删记忆/改标签。SQLite 默认 busy_timeout=0 ⇒ 撞上就
+    // 抛 SQLITE_BUSY，用户看到的是"删除失败"，而真实原因只是"晚了几毫秒"。
+    // 3 秒足够等到一个插入批次提交完；再长就该报错而不是继续卡着。
+    db.exec("PRAGMA busy_timeout = 3000");
     // 页缓存：SQLite 默认仅 2MB，1 万条库（约 49MB）读向量时页会被反复淘汰重读。
     // 64MB 是连接级上限、按需分配；不改数据格式也不参与 SQL 语义，删掉即回到默认。
     db.exec("PRAGMA cache_size = -65536");

@@ -654,7 +654,21 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
 .warn{color:var(--wrn)}.dng{color:var(--dng)}.mt{margin-top:8px}.cl{color:var(--link);font-weight:500}
 .card.static{cursor:default}.acts.l{justify-content:flex-start}
 .linkrow [data-open],.linkrow [data-sid]{color:var(--link);cursor:pointer}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+.tipbar{display:none;align-items:flex-start;gap:9px;margin-bottom:10px;padding:11px 14px;border:1px solid var(--line2);border-left:3px solid var(--acc);border-radius:var(--radl);background:var(--card);box-shadow:var(--sh);font-size:13px;color:var(--tx2)}
+.tipbar.on{display:flex}
+.tipbar.off{border-left-color:var(--tx3)}
+.tipbar.warn{border-left-color:var(--wrn)}
+.tipbar .ti{flex:none;color:var(--link);margin-top:3px;display:block}
+.tipbar .tb{flex:1;min-width:0}
+.tipbar .tb b{color:var(--tx);font-weight:500}
+.tipbar .tb i{display:block;font-style:normal;font-size:12.5px;color:var(--tx3);line-height:1.6;margin-top:1px}
+.tipbar .lk{height:26px;padding:0 8px;border:0;background:transparent;color:var(--link);font-size:12.5px;flex:none}
+.tipbar .lk:hover{background:var(--chip)}
+.tipbar .lk.mute{color:var(--tx3)}
+.pulse{width:6px;height:6px;border-radius:99px;background:var(--acc);flex:none;margin-top:8px;animation:pl 1.3s ease-in-out infinite}
+@keyframes pl{0%,100%{opacity:.22}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}.pulse{animation:none;opacity:.8}}
+
 </style>
 </head>
 <body>
@@ -697,6 +711,7 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
   <div class="homebar" id="homebar"></div>
   <div class="cloudbar" id="cloudbar"></div>
   <div class="updatebar" id="updatebar"></div>
+  <div class="tipbar" id="tipbar"></div>
   <div class="stats" id="stats"></div>
   <div id="list"></div>
   <div class="pager" id="pager"></div>
@@ -748,6 +763,9 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
 <script>
 var curId = null, curSystem = false, curKind = "all", curSession = null;
 var page = 0, pageSize = 20, total = 0;
+var ingSeenAt = null;
+var ingDismissed = false;
+try { ingDismissed = localStorage.getItem("xbb.tip.ingest") === "1"; } catch(e){}
 function esc(s){ var d=document.createElement("div"); d.textContent=s==null?"":String(s); return d.innerHTML; }
 function toast(m){ var t=document.getElementById("toast"); t.textContent=m; t.style.display="block"; setTimeout(function(){t.style.display="none";},1800); }
 function badge(t){ var map={decision:"决策",preference:"偏好",fact:"事实",event:"事件",procedure:"步骤"}; return esc(map[t]||t); }
@@ -1405,7 +1423,53 @@ function dismissUpdate(v){
   fetch("/update-dismiss", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({version:v})})
     .then(function(){ document.getElementById("updatebar").style.display = "none"; });
 }
-loadHome(); loadCloud(); loadStats(); loadList(); loadUpdate();
+var ING_ICON = '<svg class="ti" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.3C6.8 2.2 5 1.9 3 2.1v10.2c2-.2 3.8.1 5 1.1 1.2-1 3-1.3 5-1.1V2.1c-2-.2-3.8.1-5 1.2Z"/><path d="M8 3.3v10.1"/></svg>';
+function loadIngest(){ fetch("/api/ingest").then(function(r){return r.json();}).then(ingestRender).catch(function(){}); }
+function ingestHide(el){ el.className = "tipbar"; el.innerHTML = ""; delete el.dataset.m; }
+function ingestRender(d){
+  var el = document.getElementById("tipbar"); if(!el) return;
+  if(!d || !d.active) return ingestHide(el);
+  // 新一批原话进来了：只在「上次观察到的时刻」变了时提一次，别每次轮询都弹
+  if(ingSeenAt && d.lastRunAt && d.lastRunAt !== ingSeenAt && d.lastInserted > 0 && !d.running){
+    toast("又整理了 " + d.lastInserted + " 条原话");
+    if(curKind === "episodes") loadEpisodes();
+  }
+  if(d.lastRunAt) ingSeenAt = d.lastRunAt;
+  // 跑得快就别弹（见 docs/admin-ui.md §3.4）
+  var busy = d.running && (d.runningMs || 0) > 2000;
+  var mode = !d.enabled ? "off" : busy ? "busy" : (d.failStreak >= 2 ? "warn" : (ingDismissed ? "" : "tip"));
+  if(!mode) return ingestHide(el);
+  if(el.dataset.m === mode){ el.className = "tipbar on " + mode; return; } // 同态不重绘，避免轮询闪烁
+  el.className = "tipbar on " + mode; el.dataset.m = mode;
+  var body = "", acts = "";
+  if(mode === "busy"){
+    body = '<b>正在后台整理本机会话原文…</b><i>只读本机的对话记录，只写这台电脑上的库，你现在的操作不受影响。</i>';
+  } else if(mode === "off"){
+    body = '<b>自动整理已关闭</b><i>小本本不会再读本机会话原文；已入库的原话仍在，可在「原话」里查看或清理。</i>';
+    acts = '<button class="lk" onclick="ingestToggle(true)">重新开启</button>';
+  } else if(mode === "warn"){
+    body = '<b>自动整理连续 ' + d.failStreak + ' 次没成功</b><i>' + esc(d.lastError || "原因未知") + '</i>';
+    acts = '<button class="lk" onclick="ingestToggle(true)">再试一次</button>';
+  } else {
+    body = '<b>温馨提示：小本本在后台整理你的 AI 会话</b><i>为了让回忆接得上前因后果，它会定期读本机 AI 客户端（opencode / Cursor / Claude Code / Codex）的对话原文存进本地库 —— 只在这台电脑上，不上传云端。整理在后台跑，不占你操作。</i>';
+    acts = '<button class="lk" onclick="ingestDismiss()">知道啦</button><button class="lk mute" onclick="ingestToggle(false)">不要自动整理</button>';
+  }
+  el.innerHTML = (mode === "busy" ? '<span class="pulse"></span>' : ING_ICON) + '<div class="tb">' + body + '</div>' + acts;
+}
+function ingestDismiss(){ ingDismissed = true; try { localStorage.setItem("xbb.tip.ingest","1"); } catch(e){} loadIngest(); }
+function ingestToggle(on){
+  var keep = function(){ ingDismissed = true; try { localStorage.setItem("xbb.tip.ingest","1"); } catch(e){} };
+  fetch("/api/ingest", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled:on})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d || !d.ok){ toast(d && d.error === "ingest_unavailable" ? "这个版本不支持自动整理" : "操作没生效"); return loadIngest(); }
+      keep(); toast(on ? "已打开，稍后自动整理" : "已关闭自动整理"); ingestRender(d);
+    }).catch(function(){ toast("请求失败"); });
+}
+loadHome(); loadCloud(); loadStats(); loadList(); loadUpdate(); loadIngest();
+// 5 秒一轮很够用：采集是分钟级的节奏，轮询再密只是白白占用服务端的空闲判定
+setInterval(function(){ if(!document.hidden) loadIngest(); }, 5000);
+
 </script>
 </body>
 </html>`;

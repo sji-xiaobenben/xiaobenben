@@ -186,10 +186,11 @@ const AUTOSTART_HELP = `用法: xbb autostart [on|off|status]
 
 想立刻体验：xbb serve --detach`;
 
-const INGEST_HELP = `用法: xbb ingest [--status] [--dry-run] [--source=a,b] [--limit=N]
+const INGEST_HELP = `用法: xbb ingest [on|off] [--status] [--dry-run] [--source=a,b] [--limit=N]
 
 采集本机各 AI 客户端的会话原文（原话层）。幂等，重跑不重复。
 
+  on / off           打开或关闭**自动**采集（常驻服务每 5 分钟一轮；关掉后不再读本机会话）
   --status           各来源可用性、已入档条数、解析率、分层配比
   --dry-run          只统计不写库（先看会灌多少）
   --source=opencode,cursor   只采指定来源
@@ -250,7 +251,7 @@ ${DATA_LOCATION}
   xbb register-protocol       注册 xubb:// 协议处理器（三平台）
 
 采集与维护
-  xbb ingest [--status|--dry-run|--source=…|--limit=N]   采集本机 AI 客户端会话原文
+  xbb ingest [on|off|--status|--dry-run|--source=…]   采集本机 AI 客户端会话原文
   xbb verify                  审计自检：个人库哈希链完整性
   xbb version                 版本横幅 + 构建指纹
 
