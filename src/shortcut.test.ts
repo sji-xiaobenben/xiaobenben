@@ -20,6 +20,7 @@ import {
   ensureStartMenuShortcut,
   linuxApplicationsDir,
   linuxDesktopEntry,
+  readablePsError,
   shortcutPath,
   startMenuProgramsDir,
   windowsShortcutScript,
@@ -130,6 +131,44 @@ describe("Desktop Entry", () => {
     expect(d).toContain("Icon=/home/u/.xiaobenben/icons/xbb.png");
     expect(d).toContain("Terminal=true");
     expect(d).toContain("Type=Application");
+  });
+});
+
+/**
+ * CLI 冷机器上第一次跑 PowerShell，stderr 必然有一段模块预热（progress 记录），
+ * 它长得和真异常一样都是 CLIXML。这段噪声曾经在 CI 日志里冒充失败原因，
+ * 真错误被挤到 300 字之外 —— 所以清洗函数本身要锁住。
+ */
+const CLIXML_PROGRESS = `#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>`;
+
+const CLIXML_ERROR = `#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="error" RefId="0"><MS><S N="Error">Cannot create shortcut._x000D__x000A_At line:1 char:1</S></MS></Obj></Objs>`;
+
+describe("PowerShell 错误清洗", () => {
+  test("不是 CLIXML 的 stderr 原样返回（只去首尾空白）", () => {
+    expect(readablePsError("  boom  \n")).toBe("boom");
+  });
+
+  test("只有 progress 记录的 CLIXML 洗成空串", () => {
+    expect(readablePsError(CLIXML_PROGRESS)).toBe("");
+  });
+
+  test("抽出错误文本，并还原被转义的换行", () => {
+    const s = readablePsError(CLIXML_ERROR);
+    expect(s).toContain("Cannot create shortcut.");
+    expect(s).toContain("At line:1 char:1");
+    expect(s).not.toContain("_x000D_");
+    expect(s).not.toContain("_x000A_");
+  });
+
+  test("属性名 N / S 两种写法都能抽（不同 PowerShell 版本不一致）", () => {
+    expect(readablePsError(`#< CLIXML\n<Objs><S N="Error">甲</S></Objs>`)).toBe("甲");
+    expect(readablePsError(`#< CLIXML\n<Objs><S S="Error">乙</S></Objs>`)).toBe("乙");
+  });
+
+  test("空的 stderr 返回空串（宁可说「退出码非 0」，也不编一个原因）", () => {
+    expect(readablePsError("")).toBe("");
   });
 });
 

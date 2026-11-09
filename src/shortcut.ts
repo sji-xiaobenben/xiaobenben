@@ -109,6 +109,8 @@ export interface ShortcutResult {
 interface RunResult {
   code: number;
   out: string;
+  /** stderr 单收一份：混进 out 会被 CLIXML 噪声淹没，失败原因变得不可读。 */
+  err?: string;
 }
 
 /** PowerShell 运行器（可注入：单测不许真往用户的开始菜单里写东西）。 */
@@ -214,6 +216,7 @@ export function linuxDesktopEntry(o: { exec: string; icon?: string; name?: strin
 function runPowershell(script: string): Promise<RunResult> {
   return new Promise((resolve) => {
     let out = "";
+    let err = "";
     try {
       const p = spawn(
         "powershell",
@@ -221,13 +224,33 @@ function runPowershell(script: string): Promise<RunResult> {
         { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
       );
       p.stdout?.on("data", (d: Buffer) => (out += d.toString("utf8")));
-      p.stderr?.on("data", (d: Buffer) => (out += d.toString("utf8")));
-      p.on("error", (e) => resolve({ code: -1, out: out + String(e) }));
-      p.on("close", (code) => resolve({ code: code ?? -1, out }));
+      p.stderr?.on("data", (d: Buffer) => (err += d.toString("utf8")));
+      p.on("error", (e) => resolve({ code: -1, out: out + String(e), err }));
+      p.on("close", (code) => resolve({ code: code ?? -1, out, err }));
     } catch (e) {
-      resolve({ code: -1, out: out + (e instanceof Error ? e.message : String(e)) });
+      resolve({ code: -1, out: out + (e instanceof Error ? e.message : String(e)), err });
     }
   });
+}
+
+/**
+ * 把 stderr 还原成人话。
+ *
+ * 非交互的 PowerShell 在 stderr 被管道接走时，会把整条错误流序列化成 XML 并以
+ * `#< CLIXML` 开头。里面既有 progress 记录（CI 的干净机器上必然出现一次
+ * "Preparing modules for first use."），也有真正的异常，两者长得一样。
+ *
+ * 直接把这坨 XML 当失败原因塞给用户，等于什么都没说 —— 真机排障时我就在 CI 日志里
+ * 盯着一段 `<Obj S="progress">` 猜了半天。异常文本在 `<S S="Error">` 里，且换行被
+ * 转义成 `_x000D__x000A_`，抽出来还原即可。
+ */
+export function readablePsError(stderr: string): string {
+  if (!stderr.includes("#< CLIXML")) return stderr.trim();
+  // 错误文本挂在 `<S N="Error">`（属性名是 N），个别版本写成 `S="Error"`，两种都认。
+  const texts = [...stderr.matchAll(/<S [NS]="Error">([\s\S]*?)<\/S>/g)].map((m) =>
+    m[1].replace(/_x000D_/g, "").replace(/_x000A_/g, "\n").trim(),
+  );
+  return texts.filter(Boolean).join("\n").trim();
 }
 
 export interface EnsureShortcutOpts {
@@ -285,7 +308,10 @@ export async function ensureStartMenuShortcut(o: EnsureShortcutOpts = {}): Promi
       });
       const r = await (o.run ?? runPowershell)(script);
       if (r.code !== 0) {
-        return { status: "failed", path, message: (r.out.trim() || `PowerShell 退出码 ${r.code}`).slice(0, 300) };
+        // 失败原因优先取 stderr 洗完的那一份：out 里正常情况下什么都没有，
+        // 而 CI 上第一次跑 PowerShell 时 stderr 一定有一段模块预热噪声。
+        const why = readablePsError(r.err ?? "") || r.out.trim() || `PowerShell 退出码 ${r.code}`;
+        return { status: "failed", path, message: why.slice(0, 600) };
       }
       // ② 复核：COM 被策略拦下时 Save() 也可能不报错
       return existsSync(path)
