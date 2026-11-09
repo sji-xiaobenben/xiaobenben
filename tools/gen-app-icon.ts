@@ -22,6 +22,23 @@
  * 与 iOS/macOS 应用图标的圆角占位一致（Apple 的 squircle 取 22.37%），在 Windows 上略圆但
  * 不显得像胶囊；比 25% 稳，比 15% 更像「应用」而不是「方块」。
  *
+ * ## 为什么书签的边要对齐像素
+ *
+ * 书签的两条竖边是**直线**，直线落在半像素上就等于凭空糊了两列：32px 下书签宽 10.996px、
+ * 居中偏移 10.502，于是左右各有一列是红白各半的 `#ff919`——六分之一的书签成了过渡色，
+ * 在浅色底上看着像书签在发光。宽高和偏移都取整，这两列归零，只剩 V 形缺口那两条斜边需要
+ * 抗锯齿（那是形状本身，躲不掉）。以 0.54 为基准实测：32px 的过渡像素 58 → 11。
+ *
+ * 这条纪律 `gen-tray-icon.ts` 早就写过了，这里当初漏了。补的时候**没有**照抄托盘的写法：
+ * 它让 `(size - w)` 恒为偶数来保证左右完全对称，代价是宽高比会失真（40px 下偏 9%，书签
+ * 被压胖）。这里宁可留 1px 的留白不对称——1px 看不见，比例失真看得见。
+ *
+ * 修完对齐还暴露了第二层问题：书签在 16px 下只有 4×7 个纯白像素，那点面积撑不起 V 形
+ * 缺口，于是"糊"的观感只去了一半。这才是把 `GLYPH_H_RATIO` 提到 0.62 的原因（见常量注释）。
+ *
+ * SVG 走浮点（`snap = false`）：像素对齐是给栅格化服务的，矢量图不需要，512 画布上强行
+ * 取整只会引入量化误差。
+ *
  * ## 为什么用代码生成
  *
  * 与托盘同理：七档尺寸 + 品牌色 + 圆角，任何一项微调都得重出七张图并重新拼 ICO，
@@ -53,8 +70,26 @@ const GLYPH = { r: 0xff, g: 0xff, b: 0xff } as const;
 
 /** 圆角半径 / 边长（见文件头「为什么圆角 22.37%」）。 */
 const RADIUS_RATIO = 0.2237;
-/** 书签高度 / 边长。0.54 是「四周留白够、16px 下书签仍有 8px 高」的折中。 */
-const GLYPH_H_RATIO = 0.54;
+/**
+ * 书签高度 / 边长。
+ *
+ * ## 为什么是 0.62 而不是更常见的 0.54
+ *
+ * 先修的是对齐（见文件头）：0.54 下 32px 书签宽 10.996px，两侧各一列红白各半的 `#ff919`。
+ * 对齐之后那两列归零，于是暴露出真正的问题——**书签本身太小，不是糊，是不够像素**。
+ * 0.54 对齐后 16px 只剩 4×7 个纯白像素，V 形缺口吃掉 2 行就没有起伏可看；之前那点"胖"
+ * 是粉边撑出来的假象，把假象去掉就更瘦。
+ *
+ * 0.62 把 16px 抬到 6×9（纯白 +85%），缺口还能分出两行；48px 四周仍留 9px 不显挤。
+ * 没有取 0.68：那个值在 48px 只剩 7.5px 留白，资源管理器大图标视图里书签顶满，
+ * 原本"套底板给对比背景"的用意就反过来了。
+ *
+ * ## 代价（已知并接受）
+ *
+ * `logo.svg` 与 `app.ico` 共用这份常量，README 抬头会跟着略变饱满。没有拆成两份常量：
+ * 拆开就是"两个 logo 慢慢长得不一样"的起点，而不一致比略胖更糟。形状与品牌红一字未改。
+ */
+const GLYPH_H_RATIO = 0.62;
 /** 超采样倍数：每像素 8×8 样本点，覆盖率即 alpha（16px 下缺口全靠它才不糊）。 */
 const SS = 8;
 
@@ -63,12 +98,24 @@ const ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256] as const;
 /** logo.svg 的画布边长（只影响 viewBox 精度，不改变比例）。 */
 const SVG_SIZE = 512;
 
-/** 书签在多边形坐标系 → 目标边长下的设备坐标。 */
-function glyphPoints(size: number): Array<readonly [number, number]> {
-  const h = size * GLYPH_H_RATIO;
-  const w = (h * (VIEW_W - PATH_LEFT * 2)) / VIEW_H; // 路径宽 14 / 高 22
-  const offX = (size - w) / 2;
-  const offY = (size - h) / 2;
+/**
+ * 书签在多边形坐标系 → 目标边长下的设备坐标。
+ *
+ * `snap` 为真时宽高与偏移都取整到像素（见文件头「为什么书签的边要对齐像素」）。
+ * 栅格路径（ICO）必须开，矢量路径（SVG）必须关。
+ */
+function glyphPoints(size: number, snap = true): Array<readonly [number, number]> {
+  let h = size * GLYPH_H_RATIO;
+  let w = (h * (VIEW_W - PATH_LEFT * 2)) / VIEW_H; // 路径宽 14 / 高 22
+  let offX = (size - w) / 2;
+  let offY = (size - h) / 2;
+  if (snap) {
+    h = Math.round(h);
+    w = Math.round(w);
+    // 偏移也取整 ⇒ 书签四条边都落在像素边界上（V 形缺口的斜边除外）。
+    offX = Math.round((size - w) / 2);
+    offY = Math.round((size - h) / 2);
+  }
   const sx = w / (VIEW_W - PATH_LEFT * 2);
   const sy = h / VIEW_H;
   return PATH.map(([x, y]) => [offX + (x - PATH_LEFT) * sx, offY + y * sy] as const);
@@ -122,7 +169,8 @@ function renderRgba(size: number): Uint8Array {
 /** 同一份几何常量 → SVG（README 用；无字体依赖、无外部引用）。 */
 function renderSvg(): string {
   const r = SVG_SIZE * RADIUS_RATIO;
-  const pts = glyphPoints(SVG_SIZE).map(([x, y]) => `${+x.toFixed(2)} ${+y.toFixed(2)}`);
+  // snap = false：矢量图不需要像素对齐，512 画布上取整只会引入量化误差。
+  const pts = glyphPoints(SVG_SIZE, false).map(([x, y]) => `${+x.toFixed(2)} ${+y.toFixed(2)}`);
   const d = `M${pts[0]}L${pts[1]}L${pts[2]}L${pts[3]}L${pts[4]}Z`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SVG_SIZE} ${SVG_SIZE}" width="${SVG_SIZE}" height="${SVG_SIZE}" role="img" aria-label="XiaoBenBen">
   <title>XiaoBenBen</title>
