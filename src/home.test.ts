@@ -10,6 +10,7 @@
 import { mkdtempSync, mkdirSync, existsSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import * as H from "./home";
 import { PersonalStore } from "./store";
@@ -198,6 +199,86 @@ describe("锚点：配置跟着程序走，不跟着库走", () => {
     useHome(home);
     H.writeHomeConfig({ dataDir: "data" }, "test");
     expect(H.resolveDataDir()).toBe(join(home, "data"));
+  });
+});
+
+describe("页面计数口径：readRowCounts 跳过完整性校验", () => {
+  test("计数与 readDbCounts 完全一致，但不返回 integrity（不走全库逐页校验）", async () => {
+    const home = tmp("xbb-home-rows-");
+    useHome(home);
+    await makeDb(join(home, "memory.db"), ["第一条", "第二条", "第三条"]);
+
+    const full = H.readDbCounts(join(home, "memory.db"));
+    const light = H.readRowCounts(join(home, "memory.db"));
+
+    expect(light.memories).toBe(full.memories);
+    expect(light.episodes).toBe(full.episodes);
+    expect(light.events).toBe(full.events);
+    // 结构上没有 integrity 字段 —— 页面路径不该付 integrity_check 的代价（110MB 库实测 1.5~7 秒）
+    expect("integrity" in light).toBe(false);
+  });
+});
+
+describe("账本口径：被用过的才叫资产", () => {
+  test("memories / used / hits / links 是四个不同的数，不能互为解释", async () => {
+    const home = tmp("xbb-home-ledger-");
+    useHome(home);
+    const p = join(home, "memory.db");
+    await makeDb(p, ["甲", "乙", "丙"]);
+    const store = PersonalStore.open(p);
+    // 直接改计数列：这里测的是**口径**，不是召回链路（链路有 links.test.ts 守着）
+    store.db.prepare("UPDATE memories SET hit_count = 3 WHERE content = ?").run("甲");
+    store.db.prepare("UPDATE memories SET hit_count = 1 WHERE content = ?").run("乙");
+    store.db.close();
+
+    const u = H.readUsageCounts(p);
+    expect(u.memories).toBe(3); // 分母
+    expect(u.used).toBe(2); // 丙 从未被召回
+    expect(u.hits).toBe(4); // 3+1：一次召回命中多条会各 +1，所以它不是"召回次数"
+    expect(u.links).toBe(0); // 没有 AI 显式声明的边
+    expect(u.episodes).toBe(0); // 这个库没写过原话
+    expect(u.sessions).toBe(0);
+  });
+
+  test("原话按行数、会话按 distinct —— 两者不能互相替代", async () => {
+    const home = tmp("xbb-home-ledger-ep-");
+    useHome(home);
+    const p = join(home, "memory.db");
+    await makeDb(p, ["甲"]);
+    const store = PersonalStore.open(p);
+    const ins = store.db.prepare(
+      "INSERT INTO episodes(session_id, role, content, recorded_at) VALUES (?,?,?,?)",
+    );
+    const at = new Date().toISOString();
+    ins.run("s1", "user", "一", at);
+    ins.run("s1", "assistant", "二", at);
+    ins.run("s2", "user", "三", at);
+    ins.run("", "user", "没有会话号的孤儿行", at); // 空 id 不能算作一个会话
+    store.db.close();
+
+    const u = H.readUsageCounts(p);
+    expect(u.episodes).toBe(4); // 原话是**行数**
+    expect(u.sessions).toBe(2); // 会话是 distinct(session_id)，且空 id 被排除
+  });
+
+  test("空库给 0；缺表给 -1 —— 0 是结论（一条没用过），-1 只是读不到", async () => {
+    const home = tmp("xbb-home-ledger-empty-");
+    useHome(home);
+    const p = join(home, "memory.db");
+    await makeDb(p, []);
+    expect(H.readUsageCounts(p)).toEqual({
+      memories: 0, used: 0, hits: 0, links: 0, episodes: 0, sessions: 0,
+    });
+
+    // 裸库（只有一张无关的表）：六个数都必须 -1。
+    // 若这里返回 0，管理页就会对老库用户说"你一条都没用上"——那是在编结论。
+    const bare = join(tmp("xbb-ledger-bare-"), "bare.db");
+    const raw = new Database(bare);
+    raw.exec("CREATE TABLE unrelated(x)");
+    raw.close();
+    expect(H.readUsageCounts(bare)).toEqual({
+      memories: -1, used: -1, hits: -1, links: -1, episodes: -1, sessions: -1,
+    });
   });
 });
 

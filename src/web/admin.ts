@@ -308,8 +308,10 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     const modelPath = H.modelsDir();
     let counts: { memories: number; episodes: number; events: number } | null = null;
     try {
-      const c = H.readDbCounts(presence.dbPath); // 只读、只数 3 张表：不给管理页开第二条写路径
-      counts = { memories: c.memories, episodes: c.episodes, events: c.events };
+      // 只读、只数 3 张表：不给管理页开第二条写路径。
+      // 用 readRowCounts 而不是 readDbCounts —— 后者带 integrity_check，会逐页校验整库
+      // （110MB 实测冷 7.0 秒 / 热 1.5 秒），这正是「打开页面列表先空白几秒」的真凶。
+      counts = H.readRowCounts(presence.dbPath);
     } catch {
       /* 打不开就不报数，页面仍要能渲染 */
     }
@@ -328,6 +330,21 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
       modelsExists: existsSync(modelPath),
       counts,
     });
+  }
+
+  // GET /api/ledger —— 账本：这些记忆到底有没有被用上。
+  // 刻意与 /api/home 分成两个接口：home 的口径是「库有多大」，这里的口径是「有多少真的动过」。
+  // 混在一个响应里，早晚会被拿去互相比较（`记忆 550 / 被召回 342` 会被读成矛盾）。
+  // 也不复用 /api/home 那条已经修过的快路径：这里要的是聚合，不是行数，本来就不同源。
+  if (p === "/api/ledger") {
+    const H = await import("../home");
+    const presence = H.dbPresence();
+    if (!presence.exists) return json({ ok: true, dbExists: false, usage: null });
+    try {
+      return json({ ok: true, dbExists: true, usage: H.readUsageCounts(presence.dbPath) });
+    } catch {
+      return json({ ok: true, dbExists: true, usage: null }); // 打不开就显示「—」，页面照常渲染
+    }
   }
 
   // POST /api/home/reveal —— 在文件管理器里打开**当前数据目录**。
@@ -528,7 +545,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='22' viewBox='0 0 18 22'%3E%3Cpath d='M2 0h14v22l-7-5-7 5z' fill='%23F22'/%3E%3C/svg%3E">
 <title>小本本 · 记忆管理</title>
 <style>
-:root{color-scheme:light dark;--r1:#FFF;--r2:#EEEEFF;--r3:#9999DD;--r4:#2255BB;--r5:#222255;--r6:#222;--r7:#111;--bg:var(--r1);--card:var(--r1);--chip:var(--r2);--tx:var(--r6);--tx2:rgba(34,34,34,.72);--tx3:rgba(34,34,34,.62);--line:rgba(34,34,34,.14);--line2:rgba(34,34,34,.07);--acc:var(--r4);--link:var(--r4);--ring:rgba(34,85,187,.18);--dng:#A32D2D;--dngb:rgba(163,45,45,.07);--wrn:#8A5A00;--sh:0 5px 30px rgba(0,0,0,.05);--sh2:0 14px 44px rgba(0,0,0,.13);--mono:ui-monospace,Menlo,Consolas,monospace;--rad:8px;--radl:12px;--kd:var(--r4);--kc:var(--dng)}
+:root{color-scheme:light dark;--r1:#FFF;--r2:#EEEEFF;--r3:#9999DD;--r4:#2255BB;--r5:#222255;--r6:#222;--r7:#111;--bg:var(--r1);--card:var(--r1);--chip:var(--r2);--tx:var(--r6);--tx2:rgba(34,34,34,.72);--tx3:rgba(34,34,34,.62);--line:rgba(34,34,34,.14);--line2:rgba(34,34,34,.07);--brand:#F22222;--acc:var(--r4);--link:var(--r4);--ring:rgba(34,85,187,.18);--dng:#A32D2D;--dngb:rgba(163,45,45,.07);--wrn:#8A5A00;--sh:0 5px 30px rgba(0,0,0,.05);--sh2:0 14px 44px rgba(0,0,0,.13);--mono:ui-monospace,Menlo,Consolas,monospace;--rad:8px;--radl:12px;--kd:var(--r4);--kc:var(--dng)}
 @media(prefers-color-scheme:dark){:root{--bg:var(--r7);--card:var(--r6);--chip:#2A2A38;--tx:#F2F2F2;--tx2:rgba(242,242,242,.72);--tx3:rgba(242,242,242,.58);--line:rgba(255,255,255,.13);--line2:rgba(255,255,255,.07);--link:var(--r3);--ring:rgba(153,153,221,.22);--dng:#E89292;--dngb:rgba(232,146,146,.1);--wrn:#D9A85C;--sh:0 5px 30px rgba(0,0,0,.35);--sh2:0 14px 44px rgba(0,0,0,.5);--kd:#5B8DEF;--kc:#DE6B6B}}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--tx);font-size:14px;line-height:1.7;padding-bottom:56px;-webkit-font-smoothing:antialiased}
@@ -539,7 +556,7 @@ code{font-family:var(--mono);font-size:11.5px;color:var(--tx);background:var(--c
 .appbar{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line2)}
 .appbar .wrap{display:flex;align-items:center;gap:10px;height:55px}
 .brand{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;letter-spacing:.01em}
-.brand svg{display:block;flex:none}
+.brand svg{display:block;flex:none;color:var(--brand)}
 .bn{font-weight:400;color:var(--tx3);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
 .stat{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--tx2);white-space:nowrap}
 .led{width:7px;height:7px;border-radius:99px;background:var(--tx3);flex:none}
@@ -569,6 +586,17 @@ button.dgr:hover{background:var(--dngb);border-color:var(--dng);color:var(--dng)
 .homebar code{background:var(--chip)}
 .sp{flex:1 1 auto}
 .homebar button{height:26px;font-size:12px;padding:0 9px}
+.ledger{margin-top:18px;padding:13px 16px 12px;border:1px solid var(--line2);border-radius:var(--radl);background:var(--card);box-shadow:var(--sh)}
+.lgrow{display:flex;align-items:baseline;gap:26px;flex-wrap:wrap}
+.lcell{display:flex;align-items:baseline;gap:6px;min-width:0}
+.lcell b{font-size:21px;font-weight:500;color:var(--tx);font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.2}
+.lcell i{font-style:normal;font-size:12px;color:var(--tx3);white-space:nowrap}
+.lcell.hot b{color:var(--link)}
+/* 分组线：左边是原料（原话/会话），右边是提炼物（记忆/召回/关联）。
+   6 个数平铺时靠它一眼看出「3 万条原话 → 551 条记忆」不是同一个量级的东西。 */
+.lcell.bd{border-left:1px solid var(--line);padding-left:24px}
+@media(max-width:760px){.lgrow{gap:18px 20px}.lcell b{font-size:19px}.lcell.bd{padding-left:16px}}
+.lgnote{margin-top:9px;font-size:12.5px;color:var(--tx2);line-height:1.65}
 .crow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .csub{color:var(--tx2);font-size:12px}
 .cmode{display:inline-flex;align-items:center;gap:6px;color:var(--tx);font-weight:500}
@@ -620,7 +648,12 @@ details summary::marker{color:var(--tx3)}
 .epbar{display:none;gap:8px;flex-wrap:wrap;align-items:center;padding-bottom:14px}
 .epbar select,.epbar input[type=date]{height:34px;padding:0 10px;border:1px solid var(--line);border-radius:var(--rad);background:var(--card);color:var(--tx);font:inherit;font-size:13px}
 .empty{text-align:center;color:var(--tx3);padding:64px 0;font-size:13.5px}
-.pager{display:flex;gap:12px;align-items:center;justify-content:center;padding:18px 0 6px;color:var(--tx2);font-size:12.5px;font-variant-numeric:tabular-nums}
+.pager{display:flex;gap:12px;align-items:center;justify-content:center;padding:18px 0 6px;color:var(--tx2);font-size:12.5px;font-variant-numeric:tabular-nums;flex-wrap:wrap;row-gap:10px}
+.pager button{height:30px;padding:0 12px;font-size:12.5px}
+.pager .jump{display:flex;align-items:center;gap:6px;margin-left:2px;padding-left:14px;border-left:1px solid var(--line)}
+.pager .jump input{width:62px;height:30px;padding:0 8px;text-align:center;border:1px solid var(--line);border-radius:var(--rad);background:var(--card);color:var(--tx);font:inherit;font-size:12.5px;font-variant-numeric:tabular-nums}
+.pager .jump input::placeholder{color:var(--tx3)}
+.pager .jump input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--ring)}
 .overlay{display:none;position:fixed;inset:0;background:rgba(17,17,17,.42);align-items:center;justify-content:center;padding:24px;z-index:50}
 .overlay.on{display:flex}
 .modal{background:var(--card);border:1px solid var(--line2);border-radius:14px;box-shadow:var(--sh2);width:100%;max-width:680px;max-height:86vh;overflow:auto;padding:22px}
@@ -676,13 +709,24 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
 <header class="appbar">
   <div class="wrap">
     <div class="brand">
-      <svg width="15" height="19" viewBox="0 0 18 22" aria-hidden="true"><path d="M2 0h14v22l-7-5-7 5z" fill="#2255BB"/></svg>
+      <svg width="15" height="19" viewBox="0 0 18 22" aria-hidden="true"><path d="M2 0h14v22l-7-5-7 5z" fill="currentColor"/></svg>
       小本本<span class="bn">memory</span>
     </div>
     <div class="stat"><span class="led" id="led"></span><span id="ledTxt">本地模式</span></div>
   </div>
 </header>
 <main class="wrap">
+  <section class="ledger" id="ledger" aria-label="记忆账本">
+    <div class="lgrow">
+      <div class="lcell"><b id="lgEp">—</b><i>条原话</i></div>
+      <div class="lcell"><b id="lgSess">—</b><i>个会话</i></div>
+      <div class="lcell bd"><b id="lgMem">—</b><i>条记忆</i></div>
+      <div class="lcell" id="lgUsedCell"><b id="lgUsed">—</b><i>被召回过</i></div>
+      <div class="lcell"><b id="lgHits">—</b><i>次命中</i></div>
+      <div class="lcell"><b id="lgLinks">—</b><i>条关联</i></div>
+    </div>
+    <div class="lgnote" id="lgNote">正在读账本…</div>
+  </section>
   <div class="search">
     <input type="text" class="q" id="q" placeholder="搜索记忆，或粘贴会话编号" autocomplete="off" spellcheck="false">
     <button class="pri" onclick="doSearch()">搜索</button>
@@ -831,19 +875,59 @@ function renderList(items){
   el.innerHTML = h;
 }
 
+// 千分位：共 26565 条与共 26,565 条差一个量级的可读性。账本卡里另有一份局部实现，
+// 这里刻意独立命名，避免两处补丁改到同一行。
+function fmtNum(n){
+  return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",");
+}
 function renderPager(){
   var el = document.getElementById("pager");
   var pages = Math.max(1, Math.ceil(total/pageSize));
   if(total === 0){ el.innerHTML = ""; return; }
   var unit = (curKind === "episodes") ? " 条原话" : " 条";
+  // 只有一页时跳页没有意义，不显示——多一个控件就多一次疑问。
+  var jump = pages > 1
+    ? '<span class="jump">跳至'
+      + '<input id="pagerJump" type="text" inputmode="numeric" autocomplete="off" maxlength="7"'
+      + ' aria-label="跳至第几页" title="输入 1 - ' + pages + ' 之间的页码，回车跳转"'
+      + ' oninput="pagerJumpClean(this)" onkeydown="pagerJumpKey(event)">页'
+      + '<button onclick="pagerJump()">跳转</button></span>'
+    : "";
   el.innerHTML = '<button onclick="pageTurn(-1)"' + (page===0?' disabled':'') + '>上一页</button>'
-    + '<span>第 ' + (page+1) + ' / ' + pages + ' 页 · 共 ' + total + unit + '</span>'
-    + '<button onclick="pageTurn(1)"' + (page>=pages-1?' disabled':'') + '>下一页</button>';
+    + '<span>第 ' + (page+1) + ' / ' + pages + ' 页 · 共 ' + fmtNum(total) + unit + '</span>'
+    + '<button onclick="pageTurn(1)"' + (page>=pages-1?' disabled':'') + '>下一页</button>'
+    + jump;
 }
 function pageTurn(d){
   var p = page + d;
   if(p < 0 || p*pageSize >= total) return;
   page = p;
+  if(curKind === "episodes") loadEpisodes(); else loadList();
+  window.scrollTo(0, 0);
+}
+// 只留数字：粘贴 "第 3 页" 或含空格时也能用。
+function pagerJumpClean(el){
+  var v = String(el.value || "").replace(/[^0-9]/g, "");
+  if(v !== el.value) el.value = v;
+}
+function pagerJumpKey(e){
+  if(e && e.key === "Enter"){ e.preventDefault(); pagerJump(); }
+}
+function pagerJump(){
+  var el = document.getElementById("pagerJump");
+  if(!el) return;
+  var digits = String(el.value || "").replace(/[^0-9]/g, "");
+  el.value = "";
+  if(!digits) return;
+  var pages = Math.max(1, Math.ceil(total/pageSize));
+  var p = parseInt(digits, 10);
+  if(!(p > 0)) return;
+  // 越界钳到边界而不是静默失败：输 999 的意图是「最后一页」，
+  // 跳过去用户看到「第 500 / 500 页」自然就懂了。
+  if(p > pages) p = pages;
+  el.blur();
+  if(p - 1 === page) return;
+  page = p - 1;
   if(curKind === "episodes") loadEpisodes(); else loadList();
   window.scrollTo(0, 0);
 }
@@ -885,6 +969,61 @@ function homeReveal(){
   fetch("/api/home/reveal", {method:"POST"}).then(function(r){return r.json();})
     .then(function(d){ if(!d || !d.ok) toast((d && d.error) || "打开失败"); })
     .catch(function(){ toast("打开失败"); });
+}
+
+function loadLedger(){
+  fetch("/api/ledger").then(function(r){return r.json();}).then(function(d){ ledgerRender(d); }).catch(function(){});
+}
+
+// 账本文案的三条纪律：
+//  1. -1（读不到）与 0（真的一条没用过）分开说 —— 否则平白告诉用户"你一条都没用上"。
+//  2. 「没被召回」不是用户的错，也不该说得像故障：新记忆本来就要等话题撞上。
+//  3. 只用 textContent 拼文案，不引 innerHTML —— 这里的数字全部来自本地库，
+//     但"本地"不等于"可信输入"（库可以被任何进程改）。
+function ledgerRender(d){
+  // 千分位：26565 在 21px 下很难一眼读出量级，26,565 才行。
+  // 注意：这段 JS 长在模板字面量里，正则的反斜杠必须双写，否则会被模板吃掉；
+  // 另外**注释里也不能出现反引号**，否则会把 ADMIN_HTML 提前闭合（整段报 Invalid character）。
+  var nf = function(n){ return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ","); };
+  var put = function(id, v){
+    var el = document.getElementById(id);
+    if(!el) return;
+    el.textContent = (v == null || v < 0) ? "—" : nf(v);
+  };
+  var note = document.getElementById("lgNote");
+  var u = d && d.usage;
+  if(!u){
+    put("lgEp"); put("lgSess"); put("lgMem"); put("lgUsed"); put("lgHits"); put("lgLinks");
+    if(note) note.textContent = (d && d.dbExists === false)
+      ? "还没有库 —— 第一次写入时才会创建，这不是故障。"
+      : "账本读不到（老库或缺字段），不影响正常使用。";
+    return;
+  }
+  put("lgEp", u.episodes); put("lgSess", u.sessions);
+  put("lgMem", u.memories); put("lgUsed", u.used); put("lgHits", u.hits); put("lgLinks", u.links);
+  // 强调色只在「真的用过」时出现：给 0 上色等于把"还没开始"喊成结论。
+  var usedCell = document.getElementById("lgUsedCell");
+  if(usedCell) usedCell.classList.toggle("hot", u.used > 0);
+  if(!note) return;
+  if(u.memories <= 0){
+    note.textContent = "还没有记忆 —— AI 写下第一条之后，这里就开始计数。";
+    return;
+  }
+  var unused = u.memories - u.used;
+  var tail = unused <= 0
+    ? "，每一条都被召回过。这很少见。"
+    : "；其中 " + nf(unused) + " 条还没被召回过 —— 正常，新记忆要等下次聊到相关话题才被想起来。";
+  if(u.episodes < 0){
+    // 老库没有 episodes 表：说清"读不到"而不是"零条"，否则像在指责用户没攒到东西。
+    note.textContent = "这个库没有原话表（早期版本建的），账本只统计记忆" + tail;
+    return;
+  }
+  if(u.episodes === 0){
+    note.textContent = "还没读过 AI 对话原文 —— 记忆目前是 AI 直接写下的" + tail;
+    return;
+  }
+  note.textContent = nf(u.episodes) + " 条原话（" + nf(u.sessions) + " 个会话）提炼出这 "
+    + nf(u.memories) + " 条记忆" + tail;
 }
 
 function loadCloud(){
@@ -1466,7 +1605,7 @@ function ingestToggle(on){
       keep(); toast(on ? "已打开，稍后自动整理" : "已关闭自动整理"); ingestRender(d);
     }).catch(function(){ toast("请求失败"); });
 }
-loadHome(); loadCloud(); loadStats(); loadList(); loadUpdate(); loadIngest();
+loadHome(); loadLedger(); loadCloud(); loadStats(); loadList(); loadUpdate(); loadIngest();
 // 5 秒一轮很够用：采集是分钟级的节奏，轮询再密只是白白占用服务端的空闲判定
 setInterval(function(){ if(!document.hidden) loadIngest(); }, 5000);
 

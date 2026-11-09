@@ -718,7 +718,36 @@ export interface DbCounts {
   events: number;
 }
 
-/** 只读打开库数三张表 + integrity_check。排障/迁移校验/管理页共用同一份口径。 */
+/**
+ * 只数行，**不做完整性校验** —— 这是给「页面展示」用的口径。
+ *
+ * 为什么单独拆一个：`integrity_check` 会逐页校验整个库，110 MB / 2.6 万条原话实测
+ * **冷 7.0 秒、热 1.5 秒**，而三个 count(*) 加起来 **0.9 ms**，差三个数量级。
+ * 它是复制/迁移后的验收手段，不能挂在「每次打开页面」的路径上 —— 而且它是同步执行，
+ * Bun 单线程下会把同时发出的 /api/list 一起堵住，于是页面先空几秒、再突然出数据。
+ * 需要完整性结论的场合（verifyCopy / `xbb home show`）继续用 readDbCounts。
+ */
+export function readRowCounts(p: string): { memories: number; episodes: number; events: number } {
+  const db = new Database(p, { readonly: true });
+  try {
+    const one = (q: string) => {
+      try {
+        return (db.query(q).get() as { n: number }).n;
+      } catch {
+        return -1; // 表不存在（老库/空库）—— 与 readDbCounts 同规则
+      }
+    };
+    return {
+      memories: one("SELECT count(*) n FROM memories"),
+      episodes: one("SELECT count(*) n FROM episodes"),
+      events: one("SELECT count(*) n FROM events"),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/** 只读打开库数三张表 + integrity_check。**用于复制后验收与排障**，不要在页面路径上调用（见 readRowCounts）。 */
 export function readDbCounts(p: string): DbCounts {
   const db = new Database(p, { readonly: true });
   try {
@@ -750,6 +779,63 @@ export function verifyCopy(srcDb: string, dstDb: string): MoveReport["verify"] {
     if (a[k] !== b[k]) throw new Error(`复制后行数不一致（${k}: 源 ${a[k]} / 目标 ${b[k]}）——未切换配置，原库完好：${srcDb}`);
   }
   return b;
+}
+
+export interface UsageCounts {
+  /** 记忆行数（分母）。与 readDbCounts 同口径：raw count，含已删除行 */
+  memories: number;
+  /** 被召回过至少一次的行数 —— 用户唯一能感知「它替我干过活」的数字 */
+  used: number;
+  /** 累计命中次数。**一次召回命中 8 条就是 +8**，所以它不是"召回次数" */
+  hits: number;
+  /** memory_links 的边数：AI 写入时显式声明的关系，不是共现推测出来的 */
+  links: number;
+  /** AI 对话原文行数 —— 记忆的原料。用来解释「551 条记忆」背后的量级 */
+  episodes: number;
+  /** 有原文留存的会话数（distinct session_id）。不是"读过几次"，是"来自多少个对话" */
+  sessions: number;
+}
+
+/**
+ * 账本口径：回答「这些记忆到底有没有被用上」。
+ *
+ * 与 `readDbCounts` 分工不同，**不要合并**：那个口径是「库里有多少行」（迁移校验要逐项比对
+ * 行数，必须 raw count、必须带 integrity）；这个口径只问「有多少行真的动过」，代价是一次
+ * 索引外的全表聚合 —— 所以它绝不能进迁移校验路径，也不能进管理页首屏那个已经修过的快路径。
+ *
+ * 三个数各自的坑：
+ *  - `used` 与 `hits` 的差不是"浪费"，是"用得密不密"。一条记忆被召回 11 次很常见（见真实库）。
+ *  - `links` 只统计 AI 显式声明的边。共现只调强度、不新建边（`recall-feedback.ts` 的纪律），
+ *    所以这个数字**远小于**"相关记忆的对数"，文案不能写成"关联了 N 对记忆"。
+ *
+ * 缺列/缺表（老库、空库、gen1 库）返回 **-1**，不是 0：0 是"一条都没用过"这个结论，
+ * -1 只是"读不到"。两者在文案上必须分开，否则会平白告诉用户"你一条都没用上"。
+ * 库文件本身打不开时照常抛错，由调用方决定怎么兜（与 `readDbCounts` 同规矩）。
+ */
+export function readUsageCounts(p: string): UsageCounts {
+  const db = new Database(p, { readonly: true });
+  try {
+    const one = (q: string) => {
+      try {
+        const v = (db.query(q).get() as { n: number | null }).n;
+        return v == null ? 0 : Number(v);
+      } catch {
+        return -1; // 缺列/缺表：读不到 ≠ 零
+      }
+    };
+    return {
+      memories: one("SELECT count(*) n FROM memories"),
+      used: one("SELECT count(*) n FROM memories WHERE COALESCE(hit_count, 0) > 0"),
+      hits: one("SELECT COALESCE(sum(hit_count), 0) n FROM memories"),
+      links: one("SELECT count(*) n FROM memory_links"),
+      episodes: one("SELECT count(*) n FROM episodes"),
+      // DISTINCT 要显式排除空/ null：老库里可能存在没有 session_id 的孤儿行，
+      // 否则会把"一个空会话"算进会话数。
+      sessions: one("SELECT count(DISTINCT session_id) n FROM episodes WHERE session_id IS NOT NULL AND session_id <> ''"),
+    };
+  } finally {
+    db.close();
+  }
 }
 
 // ─────────────────────────── 找库：忘了放哪时的救命绳 ───────────────────────────
