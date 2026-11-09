@@ -92,7 +92,7 @@ jobs:
             curl -fsS --max-time 600 --retry 5 --retry-delay 5 --retry-all-errors \
               "${base}/${f}" -O
           done < checks.txt
-          for f in LICENSE NOTICE; do
+          for f in LICENSE NOTICE THIRD-PARTY-LICENSES.md; do
             if ! curl -fsSL --max-time 60 "${base}/${f}" -o "$f"; then
               rm -f "$f"
               echo "::warning::CDN 上缺 ${f}——不影响归档，但 AGPL 要求的许可副本会不全"

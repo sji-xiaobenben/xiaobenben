@@ -547,6 +547,13 @@ jobs:
           "$OSSBIN" cp -f --region "$OSS_REGION" \
             --cache-control "public,max-age=31536000,immutable" \
             "${GITHUB_WORKSPACE}/cli/NOTICE" "${PREFIX}/NOTICE"
+          # 第三方依赖的许可全文（13 个组件）。单文件 exe 里这些文本不在文件系统里，
+          # 只能靠这份文档承载；它跟着二进制走，才谈得上"随分发一并提供"。
+          # 0.4.48 实测：只发了 LICENSE+NOTICE，`latest/NOTICE` 与这份都缺，
+          # 官网下载页给的 /latest/ 路径下许可副本因此是不全的（已手工补齐并在此固化）。
+          "$OSSBIN" cp -f --region "$OSS_REGION" \
+            --cache-control "public,max-age=31536000,immutable" \
+            "${GITHUB_WORKSPACE}/cli/THIRD-PARTY-LICENSES.md" "${PREFIX}/THIRD-PARTY-LICENSES.md"
 
           echo "── 2) 固定入口清单（必须不缓存，否则整条更新通道会被 CDN 冻住）──"
           "$OSSBIN" cp -f --region "$OSS_REGION" \
@@ -613,7 +620,12 @@ jobs:
 
           # 许可副本同步到稳定别名目录，官网下载页可直接指向 latest/LICENSE。
           # 不进 SHA256SUMS.txt：那份清单由已签名清单生成，只描述二进制。
-          "$OSSBIN" cp -f --region "$OSS_REGION" "${VDIR}/LICENSE" "${LDIR}/LICENSE"
+          # ⚠️ 三份都要搬：0.4.48 之前只搬了 LICENSE，`latest/NOTICE` 与
+          #    `latest/THIRD-PARTY-LICENSES.md` 都是 404 —— 官网给用户的下载路径
+          #    （/latest/）下许可副本不全，等于只发二进制不发声明。
+          for f in LICENSE NOTICE THIRD-PARTY-LICENSES.md; do
+            "$OSSBIN" cp -f --region "$OSS_REGION" "${VDIR}/${f}" "${LDIR}/${f}"
+          done
 
           # 回读：latest/ 必须与本次版本**同源**。用两个探针，**都不依赖 `ossutil stat`**。
           #
