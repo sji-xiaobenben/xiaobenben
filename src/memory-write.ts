@@ -407,11 +407,15 @@ export async function writeMemory(
   void (async () => {
     try {
       const { embedder, VEC_MODEL } = await import("./embedder");
+      const { invalidateVecCache } = await import("./memory-search");
       if ((await embedder.load()) !== true) return;
       const vec = await embedder.embed(content);
       if (!vec) return;
       db.prepare("UPDATE memories SET embedding = ?, vec_model = ? WHERE id = ?")
         .run(Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength), VEC_MODEL, id);
+      // 向量检索的进程内缓存在这里必须作废：本连接自己更新已有行，
+      // data_version 与 MAX(rowid) 都不会变，缓存无从察觉（见 memory-search.ts）。
+      invalidateVecCache();
     } catch { /* 双降级红线：永不因模型故障影响写入 */ }
   })();
 

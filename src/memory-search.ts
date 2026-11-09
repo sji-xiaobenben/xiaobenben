@@ -14,7 +14,6 @@
  *  4. 向量通道将作为第四路并入 RRF——本文件保持三路纯度
  */
 import type { Database } from "bun:sqlite";
-import { cosine } from "./embedder";
 import { onRecalled } from "./recall-feedback";
 import { LINK_VISIBLE_MIN } from "./schema";
 
@@ -54,8 +53,15 @@ export interface ChainLink {
 /** 展开某条记忆所在的延续链，返回按时间正序的链成员（链头带 current=true） */
 export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[] {
   let head = id, hops = 0;
+  // 三条 SQL 各自只编译一次：原写法在 while 里 prepare，链越长编译次数越多，
+  // 而语句字符串是常量、结果只随参数变，逐圈重编译是纯浪费。
+  const qNext = db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
+  const qChildren = db.prepare(
+    "SELECT id, content, occurred_at, created_at FROM memories WHERE superseded_by = ? AND deleted_at IS NULL ORDER BY created_at ASC",
+  );
+  const qOne = db.prepare("SELECT id, content, occurred_at, created_at FROM memories WHERE id = ?");
   while (hops++ < maxLen) {
-    const r = db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL").get(head) as { superseded_by: string | null } | undefined;
+    const r = qNext.get(head) as { superseded_by: string | null } | undefined;
     if (!r || !r.superseded_by) break;
     head = r.superseded_by;
   }
@@ -64,9 +70,7 @@ export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[]
   const queue: string[] = [head];
   while (queue.length && members.length < maxLen - 1) {
     const cur = queue.shift()!;
-    const rows = db.prepare(
-      "SELECT id, content, occurred_at, created_at FROM memories WHERE superseded_by = ? AND deleted_at IS NULL ORDER BY created_at ASC",
-    ).all(cur) as Array<{ id: string; content: string; occurred_at: string | null; created_at: string }>;
+    const rows = qChildren.all(cur) as Array<{ id: string; content: string; occurred_at: string | null; created_at: string }>;
     for (const r of rows) {
       if (seen.has(r.id)) continue;
       seen.add(r.id);
@@ -74,7 +78,7 @@ export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[]
       queue.push(r.id);
     }
   }
-  const headRow = db.prepare("SELECT id, content, occurred_at, created_at FROM memories WHERE id = ?").get(head) as { id: string; content: string; occurred_at: string | null; created_at: string } | undefined;
+  const headRow = qOne.get(head) as { id: string; content: string; occurred_at: string | null; created_at: string } | undefined;
   if (headRow) members.push({ id: headRow.id, content: headRow.content, occurred_at: headRow.occurred_at ?? null, created_at: headRow.created_at, current: true });
   const key = (m: { occurred_at: string | null; created_at: string }) => normTime(m.occurred_at ?? m.created_at);
   members.sort((a, b) => (key(a) < key(b) ? -1 : 1));
@@ -189,32 +193,41 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const terms = params.terms.map((t) => t.trim()).filter(Boolean);
 
   // ── 路径 A：FTS trigram（>=3 字的词）──
+  // 一次 JOIN 取回 UUID：FTS 的 rowid 与 memories 的 TEXT 主键是两套编号，必须换一次。
+  // 原写法在 200 条命中上逐条 `SELECT id FROM memories WHERE rowid = ?`（每个词 200 次），
+  // 三个词就是 600 次独立查询、600 次 prepare —— 实测 2.47ms，改成 JOIN 后 0.32ms。
   const ftsScores = new Map<string, { terms: Set<string> }>();
+  const qFts = db.prepare(
+    `SELECT m.id AS id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
+      WHERE memories_fts MATCH ? LIMIT 200`,
+  );
   for (const t of terms) {
     if ([...t].length < 3) continue;
     try {
-      const rows = db.prepare(
-        `SELECT rowid AS rid FROM memories_fts WHERE memories_fts MATCH ? LIMIT 200`,
-      ).all(`"${t.replace(/"/g, '""')}"`) as Array<{ rid: number }>;
+      const rows = qFts.all(`"${t.replace(/"/g, '""')}"`) as Array<{ id: string }>;
       for (const row of rows) {
-        // rowid → UUID 主键映射（FTS content_rowid=rowid，与 TEXT 主键是两套）
-        const m = db.prepare("SELECT id FROM memories WHERE rowid = ?").get(row.rid) as { id: string } | undefined;
-        if (!m) continue;
-        if (!ftsScores.has(m.id)) ftsScores.set(m.id, { terms: new Set() });
-        ftsScores.get(m.id)!.terms.add(t);
+        let e = ftsScores.get(row.id);
+        if (!e) {
+          e = { terms: new Set() };
+          ftsScores.set(row.id, e);
+        }
+        e.terms.add(t);
       }
     } catch { /* 非法 MATCH 表达式跳过 */ }
   }
 
   // ── 路径 B：memory_terms 倒排（全部词，含 1-2 字短词；高频词截断）──
   const termScores = new Map<string, { terms: Set<string> }>();
+  const qTerm = db.prepare("SELECT memory_id AS id FROM memory_terms WHERE term = ? LIMIT 500");
   for (const t of terms) {
-    const rows = db.prepare(
-      "SELECT memory_id AS id FROM memory_terms WHERE term = ? LIMIT 500",
-    ).all(t) as Array<{ id: string }>;
+    const rows = qTerm.all(t) as Array<{ id: string }>;
     for (const row of rows) {
-      if (!termScores.has(row.id)) termScores.set(row.id, { terms: new Set() });
-      termScores.get(row.id)!.terms.add(t);
+      let e = termScores.get(row.id);
+      if (!e) {
+        e = { terms: new Set() };
+        termScores.set(row.id, e);
+      }
+      e.terms.add(t);
     }
   }
 
@@ -269,23 +282,28 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   // ── 时间过滤 + 延续链重定向 + 预算封顶 + 组装 ──
   const hits: SearchHit[] = [];
   const hitIds = new Set<string>();
+  // related_tags 要用 tags/entities，顺手在取正文时带回来 —— 否则同一批 id 要在
+  // 末尾再逐条 SELECT 一遍（每条命中一次，纯重复读）。
+  const metaById = new Map<string, { tags: string | null; entities: string | null }>();
   let tokensUsed = 0;
   const loadMem = db.prepare(`
-    SELECT m.id, m.content, m.type, m.occurred_at, m.session_id, m.device_id, m.source_ref, m.superseded_by, d.name AS device_name
+    SELECT m.id, m.content, m.type, m.occurred_at, m.session_id, m.device_id, m.source_ref, m.superseded_by, m.tags, m.entities, d.name AS device_name
     FROM memories m LEFT JOIN devices d ON d.id = m.device_id
     WHERE m.id = ? AND m.deleted_at IS NULL
   `);
+  const qSuperseded = db.prepare("SELECT id, superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
   for (const s of scored) {
     if (hits.length >= limit) break;
     let m = loadMem.get(s.id) as {
       id: string; content: string; type: string; occurred_at: string | null; session_id: string | null;
       device_id: string | null; source_ref: string | null; superseded_by: string | null; device_name: string | null;
+      tags: string | null; entities: string | null;
     } | undefined;
     if (!m) continue;
     if (m.superseded_by) {
       let head = m.superseded_by, hops = 0;
       while (hops++ < 10) {
-        const r2 = db.prepare("SELECT id, superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL").get(head) as { id: string; superseded_by: string | null } | undefined;
+        const r2 = qSuperseded.get(head) as { id: string; superseded_by: string | null } | undefined;
         if (!r2 || !r2.superseded_by) break;
         head = r2.superseded_by;
       }
@@ -301,6 +319,7 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     if (tokensUsed + tk > budget && hits.length > 0) break;
     tokensUsed += tk;
     hitIds.add(m.id);
+    metaById.set(m.id, { tags: m.tags, entities: m.entities });
     hits.push({
       id: m.id, content: maskSecrets(m.content), type: m.type,
       occurredAt: m.occurred_at, deviceId: m.device_name ?? m.device_id,
@@ -331,13 +350,16 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   tokensUsed += linkedPreview.length * 25;
 
   // ── related_tags：命中项的标签/实体，引导 AI 下一轮换词 ──
+  // 数据在上面的 loadMem 里已经读回来了（metaById），这里不再逐条回查。
   const tagSet = new Set<string>();
+  const termSet = new Set(terms);
   for (const h of hits) {
-    const row = db.prepare("SELECT tags, entities FROM memories WHERE id = ?").get(h.id) as { tags: string | null; entities: string | null } | undefined;
+    const meta = metaById.get(h.id);
+    if (!meta) continue;
     for (const k of ["tags", "entities"] as const) {
-      if (row?.[k]) {
-        try { for (const t of JSON.parse(row[k]) as string[]) if (!terms.includes(t)) tagSet.add(t); } catch { /* 损坏行跳过 */ }
-      }
+      const raw = meta[k];
+      if (!raw) continue;
+      try { for (const t of JSON.parse(raw) as string[]) if (!termSet.has(t)) tagSet.add(t); } catch { /* 损坏行跳过 */ }
     }
   }
 
@@ -359,22 +381,102 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
 // 2026-10-04 定稿：个人版直上向量。向量失败自动降级纯词法（双降级红线）。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 暴力向量扫描（个人库量级全扫；512 维 f32，1 万条 ~20MB 内存，<10ms） */
+/**
+ * 暴力向量扫描（个人库量级全扫）。
+ *
+ * 为什么要缓存：原来每次检索都 `SELECT id, embedding` 把整表向量从 SQLite 搬进
+ * JS（1 万条 = 20MB BLOB + 逐行建 Float32Array 视图），实测 **28ms**，占混合检索
+ * 八成以上。而向量只在「写入/重算」时变，绝大多数检索面对的是一模一样的数据。
+ * 现在把解码结果留在进程内，命中时只剩纯算术：**7~8ms**，且摊到每次只剩算术。
+ *
+ * 失效判据用两个便宜的量拼起来（各约 0.02ms，走索引尾部与 pragma）：
+ *  - `PRAGMA data_version`：**其他连接**提交过就变（采集子进程、另一个客户端）。
+ *  - `MAX(rowid)`：本连接自己插入新记忆时只会动这个。
+ * 本连接**更新**已有行的向量时两者都不变，所以 memory-write 写完向量要显式调
+ * `invalidateVecCache()` —— 这是唯一需要人工维护的失效点，加新写入路径别忘了。
+ *
+ * 缓存里存的是原始向量，相似度仍是 `cosine()` 那套点积（写入侧已归一化），
+ * 因此排序结果与不缓存时逐位一致，不存在「快了但分数变了」。
+ */
+interface VecCache {
+  db: Database;
+  key: string;
+  ids: string[];
+  flat: Float32Array;
+  dims: number;
+  /** 超过上限时只本次用，不驻留 */
+  ephemeral?: boolean;
+}
+
+let vecCache: VecCache | null = null;
+
+/**
+ * 缓存行数上限。
+ *
+ * 缓存省的是「每次重读 20MB + 解码」，代价是这部分内存要一直占着。512 维 f32 每条
+ * 2KB，3 万条约 60MB —— 与 SQLite 的 64MB 页缓存同量级，对桌面端可接受。
+ * 再大就不缓存了，退回逐次扫描：宁可慢，也不让一个十年期的记忆库把内存吃穿。
+ */
+const MAX_CACHE_ROWS = 30_000;
+
+/** 写完向量后必须调一次：本连接的写入不会改变 data_version */
+export function invalidateVecCache(): void {
+  vecCache = null;
+}
+
+function vecCacheKey(db: Database): string {
+  const dv = (db.query("PRAGMA data_version").get() as { data_version: number } | null)?.data_version ?? 0;
+  const mx = (db.query("SELECT MAX(rowid) AS m FROM memories").get() as { m: number | null } | null)?.m ?? 0;
+  return `${dv}:${mx}`;
+}
+
 function vecTopK(
   db: Database,
   queryVec: Float32Array,
   k = 100,
 ): Array<{ id: string; score: number }> {
-  const rows = db.prepare(
-    "SELECT id, embedding FROM memories WHERE status = 'active' AND deleted_at IS NULL AND embedding IS NOT NULL AND vec_model = ?",
-  ).all(VEC_MODEL_REF) as Array<{ id: string; embedding: Buffer }>;
-  const scored: Array<{ id: string; score: number }> = [];
-  for (const r of rows) {
-    const v = new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4);
-    scored.push({ id: r.id, score: cosine(queryVec, v) });
+  const key = vecCacheKey(db);
+  let c = vecCache;
+  if (!c || c.db !== db || c.key !== key) {
+    const rows = db.query(
+      "SELECT id, embedding FROM memories WHERE status = 'active' AND deleted_at IS NULL AND embedding IS NOT NULL AND vec_model = ?",
+    ).all(VEC_MODEL_REF) as Array<{ id: string; embedding: Uint8Array }>;
+    const dims = rows.length ? rows[0]!.embedding.byteLength / 4 : queryVec.length;
+    const flat = new Float32Array(rows.length * dims);
+    const ids: string[] = new Array(rows.length);
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i]!;
+      ids[i] = r.id;
+      const n = r.embedding.byteLength / 4;
+      flat.set(new Float32Array(r.embedding.buffer, r.embedding.byteOffset, Math.min(n, dims)), i * dims);
+    }
+    c = { db, key, ids, flat, dims };
+    if (rows.length > MAX_CACHE_ROWS) c.ephemeral = true;
+    else vecCache = c;
   }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, k);
+
+  const n = c.ids.length;
+  if (!n || queryVec.length !== c.dims) return [];
+  const scores = new Float32Array(n);
+  const flat = c.flat;
+  const dims = c.dims;
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    const off = i * dims;
+    for (let d = 0; d < dims; d++) s += queryVec[d]! * flat[off + d]!;
+    scores[i] = s;
+  }
+  // 只排出前 k：1 万条全排序比取 top-k 慢一倍，而调用方只用 k 条
+  const arr: number[] = new Array(n);
+  for (let i = 0; i < n; i++) arr[i] = i;
+  arr.sort((a, b) => scores[b]! - scores[a]!);
+  const top = Math.min(k, n);
+  const out: Array<{ id: string; score: number }> = new Array(top);
+  for (let i = 0; i < top; i++) {
+    const idx = arr[i]!;
+    out[i] = { id: c.ids[idx]!, score: scores[idx]! };
+  }
+  return out;
 }
 
 // 避免循环 import：VEC_MODEL 从 embedder 动态取

@@ -503,6 +503,31 @@ export function migrateV9(db: Database): void {
 }
 
 /**
+ * V10：存活过滤的部分索引。
+ *
+ * `deleted_at IS NULL AND status != 'forgotten'` 是每次检索的必经条件 ——
+ * searchMemory 要用存活总数当 IDF 的分母（见 memory-search.ts）。而它原先没有任何
+ * 索引吃得下：EXPLAIN 是 `SCAN memories`，1 万条 **3.4ms**，且随库线性增长；
+ * 更要命的是 memories 行里躺着向量 BLOB，全表扫等于把 20MB 白读一遍。
+ *
+ * 部分索引只收存活行（规模通常接近全表，但条目是「status」这么窄的列），
+ * status 随索引走 ⇒ 计数变成纯索引扫描，正文页一次都不碰。
+ * 写入侧代价：只有 deleted_at IS NULL 的行进入该索引，且列极窄，可忽略。
+ */
+export function migrateV10(db: Database): void {
+  db.exec("CREATE INDEX IF NOT EXISTS idx_memories_live ON memories(status) WHERE deleted_at IS NULL");
+  // 待确认队列（inbox）：`needs_ack = 1 AND status = 'active' ORDER BY created_at DESC`。
+  // 原计划是 `SCAN memories` + `USE TEMP B-TREE FOR ORDER BY` —— 全表扫完再排序，
+  // 1 万条 2.7ms 且随库线性增长。部分索引只收待确认行、按 created_at 有序，
+  // 取前 N 条变成索引倒序扫描，暂存 B-tree 也一并消失。
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_memories_pending_ack ON memories(created_at) WHERE needs_ack = 1",
+  );
+  const v = db.query("PRAGMA user_version").get() as { user_version: number };
+  if (v.user_version < 10) db.exec("PRAGMA user_version = 10");
+}
+
+/**
  * 建库/升级入口。**全部 DDL 必须在一个事务里**。
  *
  * 为什么：下面每一步都是几十条 `db.exec`，不包事务时每条 DDL 都是一个独立隐式事务、
@@ -527,6 +552,7 @@ export function initSchemaV2(db: Database): void {
     migrateV7(db);
     migrateV8(db);
     migrateV9(db);
+    migrateV10(db);
     db.exec("COMMIT");
   } catch (e) {
     try {

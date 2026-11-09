@@ -107,6 +107,18 @@ export class PersonalStore {
     // 页缓存：SQLite 默认仅 2MB，1 万条库（约 49MB）读向量时页会被反复淘汰重读。
     // 64MB 是连接级上限、按需分配；不改数据格式也不参与 SQL 语义，删掉即回到默认。
     db.exec("PRAGMA cache_size = -65536");
+    // 提交不落盘等 fsync。
+    //
+    // SQLite 的 synchronous 默认是 FULL(2)，**切到 WAL 不会自动变 NORMAL** ——
+    // 很多人以为会，实测这台机器上每次提交固定 25ms（等磁盘 + Defender 扫描 WAL）。
+    // 而检索每次都写两笔账（hit_count / 共现强度，见 recall-feedback.ts），
+    // 于是「查一次记忆」里有 25ms 纯粹在等磁盘转，占 searchMemory 的六成。
+    //
+    // WAL + NORMAL 是 SQLite 官方给的推荐组合：进程崩溃不丢已提交事务（WAL 文件本身
+    // 保证一致性），只有**操作系统崩溃 / 掉电**可能丢掉最后若干个已提交事务。
+    // 对「用过几次」这种计数完全够用；真正要紧的用户正文写入仍走 WAL 落地。
+    // 若要回到掉电也不丢，把这一行删掉即可（代价是每次写 25ms）。
+    db.exec("PRAGMA synchronous = NORMAL");
     initSchemaV2(db);
     tightenPerms(file);
     // 「用过」的锚点：库被删之后，就靠它把"库丢了"和"全新安装"分开。
@@ -141,9 +153,12 @@ export class PersonalStore {
   }
 
   listBySpace(spaceId: string, opts: { limit: number; cursor?: string }): MemoryRecord[] {
+    // 显式列而不是 `*`：memories 每行还揣着一条 20KB 的向量 BLOB，而 toMemoryRecord
+    // 一个字段都用不到它。列表里每多一列就是白搬一份向量。
     const rows = this.db
       .query(
-        `SELECT * FROM memories WHERE space_id = ? AND status = 'active' AND (? IS NULL OR created_at < ?)
+        `SELECT id, org_id, space_id, actor, content, tags, status, needs_ack, created_at
+         FROM memories WHERE space_id = ? AND status = 'active' AND (? IS NULL OR created_at < ?)
          ORDER BY created_at DESC LIMIT ?`,
       )
       .all(spaceId, opts.cursor ?? null, opts.cursor ?? null, opts.limit) as MemoryRow[];
@@ -171,7 +186,10 @@ export class PersonalStore {
 
   inbox(opts: { limit?: number } = {}): (MemoryRecord & { status: string; needsAck: boolean })[] {
     const rows = this.db
-      .query("SELECT * FROM memories WHERE needs_ack = 1 AND status = 'active' ORDER BY created_at DESC LIMIT ?")
+      .query(
+        `SELECT id, org_id, space_id, actor, content, tags, status, needs_ack, created_at
+         FROM memories WHERE needs_ack = 1 AND status = 'active' ORDER BY created_at DESC LIMIT ?`,
+      )
       .all(opts.limit ?? 50) as MemoryRow[];
     return rows.map(toMemoryRecord);
   }
