@@ -56,7 +56,7 @@ async function buildReport(store: PersonalStore, port: number) {
   }
   return {
     ok: true,
-    service: "xbb-cli",
+    service: "xiaobenben",
     version: process.env.XBB_VERSION ?? BUILD_VERSION,
     platform: `${process.platform}/${process.arch}`,
     runtime: `bun-${Bun.version}`,
@@ -89,7 +89,7 @@ export async function startServe(store: PersonalStore, port = 17630) {
       if (guard) return guard;
       const url = new URL(req.url);
       if (url.pathname === "/healthz") {
-        return Response.json({ ok: true, service: "xbb-cli", ts: new Date().toISOString() });
+        return Response.json({ ok: true, service: "xiaobenben", ts: new Date().toISOString() });
       }
       if (url.pathname === "/stats") {
         return Response.json({ ok: true, db: defaultDbPath(), port, ...store.stats() });

@@ -8,9 +8,9 @@
 
 One SQLite file on your own disk. Any MCP client. Memory that outlives sessions, models and reinstalls.
 
-<a href="https://github.com/sji-xiaobenben/xbb-cli/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/sji-xiaobenben/xbb-cli?style=flat-square&label=release&color=F22222"></a>
+<a href="https://github.com/sji-xiaobenben/xiaobenben/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/sji-xiaobenben/xiaobenben?style=flat-square&label=release&color=F22222"></a>
 <a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-F22222?style=flat-square"></a>
-<a href="https://github.com/sji-xiaobenben/xbb-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sji-xiaobenben/xbb-cli/ci.yml?branch=master&style=flat-square&label=CI"></a>
+<a href="https://github.com/sji-xiaobenben/xiaobenben/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sji-xiaobenben/xiaobenben/ci.yml?branch=master&style=flat-square&label=CI"></a>
 <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4a4a4a?style=flat-square">
 <img alt="MCP stdio" src="https://img.shields.io/badge/MCP-stdio-4a4a4a?style=flat-square">
 <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2ea44f?style=flat-square"></a>
@@ -20,7 +20,7 @@ One SQLite file on your own disk. Any MCP client. Memory that outlives sessions,
 </div>
 
 > [!IMPORTANT]
-> **Download only from [xiaobenben.net](https://xiaobenben.net) or this repository's [Releases](https://github.com/sji-xiaobenben/xbb-cli/releases).**
+> **Download only from [xiaobenben.net](https://xiaobenben.net) or this repository's [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases).**
 > The self-updater only trusts manifests signed by the official key, and only official builds
 > (compiled from this repository) look for updates at all. A mirrored binary or a copy of this
 > README does not make anything official.
@@ -189,7 +189,7 @@ Sixteen products, twenty-one capabilities, every cell scored 0–10 (0 means the
 
 ## Install
 
-Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xbb-cli/releases). No runtime dependency. After that the binary updates itself from the signed official manifest.
+Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases). No runtime dependency. After that the binary updates itself from the signed official manifest.
 
 ```bash
 xbb --help          # every command, zero side effects
@@ -439,7 +439,7 @@ Do not open a public issue for a vulnerability. Report it as described in [`SECU
 
 | Topic | Where |
 |---|---|
-| Usage questions, bugs, feature requests | Prefer an [issue](https://github.com/sji-xiaobenben/xbb-cli/issues) (public and searchable, so others benefit); `support@sji.xin` if it cannot be public |
+| Usage questions, bugs, feature requests | Prefer an [issue](https://github.com/sji-xiaobenben/xiaobenben/issues) (public and searchable, so others benefit); `support@sji.xin` if it cannot be public |
 | Commercial licence / OEM | [`LICENSE-Commercial.md`](LICENSE-Commercial.md), `admin@sji.xin` |
 | Security vulnerabilities | [`SECURITY.md`](SECURITY.md) — never a public issue |
 

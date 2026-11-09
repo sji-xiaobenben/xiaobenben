@@ -26,7 +26,7 @@ export const BUILD_TIME = "local";
  * fork 者若要分发自己的版本并让它自更新，把这一行连同 UPDATE_PUBKEY / UPDATE_URL_DEFAULT
  * 一起换成自己的，三者齐了才自洽（见 CONTRIBUTING「Fork 之后要分发自己的构建」）。
  */
-export const OFFICIAL_REPO: string = "sji-xiaobenben/xbb-cli";
+export const OFFICIAL_REPO: string = "sji-xiaobenben/xiaobenben";
 // 构建来源仓库，由 release.yml 用 sed 注入成 $GITHUB_REPOSITORY；本地直接构建留空（不知道）。
 // 这行刻意**不加类型标注**：release.yml 靠 `export const BUILD_REPO = "..."` 这个字面形状做
 // sed 替换，写成 `export const BUILD_REPO: string = ...` 就会静默失配。VERSION / BUILD_TIME 同理。

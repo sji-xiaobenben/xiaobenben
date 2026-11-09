@@ -1,5 +1,5 @@
 {
-  "name": "xbb-cli",
+  "name": "xiaobenben",
   "version": "0.4.47",
   "description": "面向 AI 的个人记忆库客户端 · local-first · Bun 单文件可执行 · MCP stdio",
   "license": "AGPL-3.0-only",
@@ -10,10 +10,10 @@
   "homepage": "https://xiaobenben.net",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sji-xiaobenben/xbb-cli.git"
+    "url": "git+https://github.com/sji-xiaobenben/xiaobenben.git"
   },
   "bugs": {
-    "url": "https://github.com/sji-xiaobenben/xbb-cli/issues"
+    "url": "https://github.com/sji-xiaobenben/xiaobenben/issues"
   },
   "author": "世纪之城（广州）信息科技有限公司",
   "scripts": {

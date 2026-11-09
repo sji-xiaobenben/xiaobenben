@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "xbb-cli",
+      "name": "xiaobenben",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1",
         "onnxruntime-node": "^1.31.1",

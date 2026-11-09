@@ -87,7 +87,7 @@ export function resolveUpdateUrl(): string {
  * 这个产物有没有资格用「编译期内置的」更新源。
  *
  * 判据是**发布者身份**，不是「有没有被构建过」：官方发版由 release.yml 注入真实时刻
- * 并把 BUILD_REPO 注成 `sji-xiaobenben/xbb-cli`；fork 仓跑同一份 workflow 也会注入时刻，
+ * 并把 BUILD_REPO 注成 `sji-xiaobenben/xiaobenben`；fork 仓跑同一份 workflow 也会注入时刻，
  * 但仓库名不是它，于是被认成非官方；本地直接构建两项都缺，同样非官方。
  *
  * 非官方构建默认**不**自更新。原因不是安全，是身份：[`UPDATE_PUBKEY`] 和

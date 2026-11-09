@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: 安全漏洞（请勿公开）
-    url: https://github.com/sji-xiaobenben/xbb-cli/security/advisories/new
+    url: https://github.com/sji-xiaobenben/xiaobenben/security/advisories/new
     about: 通过私密渠道报告安全问题，不要开公开 issue。详见 SECURITY.md
   - name: 商业许可 / OEM 咨询
-    url: https://github.com/sji-xiaobenben/xbb-cli/blob/master/LICENSE-Commercial.md
+    url: https://github.com/sji-xiaobenben/xiaobenben/blob/master/LICENSE-Commercial.md
     about: 闭源分发、闭源对外服务、OEM 预装需要另行取得商业许可
   - name: 贡献代码前请先读
-    url: https://github.com/sji-xiaobenben/xbb-cli/blob/master/CONTRIBUTING.md
+    url: https://github.com/sji-xiaobenben/xiaobenben/blob/master/CONTRIBUTING.md
     about: 所有外部贡献都需要先签 CLA，未签的 PR 无法合并

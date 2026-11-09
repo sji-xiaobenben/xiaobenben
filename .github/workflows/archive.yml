@@ -129,6 +129,6 @@ jobs:
             许可全文见本 Release 附带的 `LICENSE`，商标与第三方依赖声明见 `NOTICE`。
 
             **对应源码（Corresponding Source）**：
-            https://github.com/sji-xiaobenben/xbb-cli/tree/${{ steps.t.outputs.tag }}
+            https://github.com/sji-xiaobenben/xiaobenben/tree/${{ steps.t.outputs.tag }}
 
             如需闭源分发、闭源对外服务或 OEM 预装，请另行取得商业许可（见 `LICENSE-Commercial.md`）。

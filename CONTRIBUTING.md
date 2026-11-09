@@ -77,7 +77,7 @@ bun run gen:tray-icon    # -> assets/tray.ico / assets/tray.png（托盘）
 
 自己用无所谓；但要把改过的版本打包给别人，有三件事必须做，否则你的用户会被自动更新换成官方版：
 
-1. **自更新默认已经是关的，别再打开**。产物里编了构建来源 `BUILD_REPO`，只有它等于 `OFFICIAL_REPO` 时才认内置更新源——本地 `bun run build:*` 编出的是 `未标注（本地直接构建）`，在你 fork 里跑 Actions 编出的是 `<你的账号>/xbb-cli`，两者都判非官方，`xbb update` 直接返回 `disabled`。不要为了让「能更新」顺手把 `XBB_UPDATE_URL` 指向官方源，那等于把用户交还给官方。
+1. **自更新默认已经是关的，别再打开**。产物里编了构建来源 `BUILD_REPO`，只有它等于 `OFFICIAL_REPO` 时才认内置更新源——本地 `bun run build:*` 编出的是 `未标注（本地直接构建）`，在你 fork 里跑 Actions 编出的是 `<你的账号>/xiaobenben`，两者都判非官方，`xbb update` 直接返回 `disabled`。不要为了让「能更新」顺手把 `XBB_UPDATE_URL` 指向官方源，那等于把用户交还给官方。
 2. **换掉清单地址**。改 `src/build-meta.ts` 的 `UPDATE_URL_DEFAULT`，或分发时设 `XBB_UPDATE_URL=<你的清单地址>`。
 3. **换掉签名密钥对**。`UPDATE_PUBKEY` 是编译期常量，你的产物验的是**我们**签的清单。不换公钥，你连自己的更新都推不了——客户端只认我们的签名。生成与校验的脚本可参照 `tools/sign-manifest.ts` / `tools/check-signing-key.ts`。
 

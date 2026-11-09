@@ -23,7 +23,7 @@ jobs:
         # 所以它从「每次 push 都跑」降级为「按需开启」。
         #
         # 要验 macOS 真机行为时，把 repo 变量 CI_MACOS 设为 true 即恢复：
-        #   gh variable set CI_MACOS --body true --repo sji-xiaobenben/xbb-cli
+        #   gh variable set CI_MACOS --body true --repo sji-xiaobenben/xiaobenben
         # 设回 false（或在 Actions 变量页删掉它）即回到默认的不跑。
         # 未设置该变量时走 `||` 分支 = 空数组 = 不产生 macos job（跳过的 job 不计费）。
         #
@@ -105,7 +105,7 @@ jobs:
             echo "✓ BUILD_REPO=$repo → official=$got"
           }
           probe "$official_repo" true
-          probe "someone-else/xbb-cli" false
+          probe "someone-else/xiaobenben" false
           probe "${official_repo}-fork" false   # 仓库名长得像官方也不行
           # 未注入的本地构建同样必须是非官方
           cp src/build-meta.ts "$tmp/build-meta.ts"

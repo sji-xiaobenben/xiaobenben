@@ -59,7 +59,7 @@ async function main() {
   if (!up) fail("serve 未在 10s 内就绪");
 
   const h = await (await fetch(`${base}/healthz`)).json();
-  if (h.service !== "xbb-cli") fail(`healthz 异常: ${JSON.stringify(h)}`);
+  if (h.service !== "xiaobenben") fail(`healthz 异常: ${JSON.stringify(h)}`);
   console.log("✓ healthz");
 
   const s = await (await fetch(`${base}/stats`)).json();
