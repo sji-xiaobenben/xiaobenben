@@ -158,9 +158,16 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          online=$(curl -fsS --max-time 30 "${DIST_BASE}/channels/stable.json?v=guard" 2>/dev/null \
+          # ⚠️ 末尾的 `|| true` 不是防御性编程，是修一个真实故障（2026-11-09 发 0.4.48 时踩到）：
+          #    runner 拉 stable.json 偶发超时（同一条 URL 本机 0.96s 拿到），而 shell 模板自带
+          #    `-e`——`online=$(...)` 的退出码就是 curl 的退出码，于是**脚本在走到下面那个
+          #    「读不到就只警告」的分支之前就退出了**，日志里连一句版本信息都没有，只剩
+          #    `Process completed with exit code 1`。重跑一次即过，典型的把网络抖动报成配置错误。
+          #    先重试三次，仍失败才走兜底分支——兜底本来就写着「CDN 抖动不该挡住发版」。
+          online=$(curl -fsS --max-time 30 --retry 3 --retry-delay 3 --retry-all-errors \
+            "${DIST_BASE}/channels/stable.json?v=guard" 2>/dev/null \
             | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
-            | sed 's/.*"\([^"]*\)"$/\1/')
+            | sed 's/.*"\([^"]*\)"$/\1/') || true
           if [ -z "$online" ]; then
             echo "::warning::读不到线上版本（首次发版或 CDN 不可达），跳过单调性检查"
             exit 0
