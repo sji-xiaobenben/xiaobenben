@@ -150,8 +150,11 @@ describe("ensureStartMenuShortcut · Windows", () => {
     expect(existsSync(join(dir, WIN_SHORTCUT_FILE))).toBe(true);
     // 脚本里写的就是我们复核的那个路径
     expect(f.paths[0]).toBe(join(dir, WIN_SHORTCUT_FILE));
-    // 图标取自释放的托盘 ico（裸书签），不是 exe 内嵌的那枚红底板
-    expect(f.scripts[0]).toContain(join(TMP, "proghome", "icons", "xbb.ico"));
+    // 图标取自释放的托盘图标（裸书签），不是 exe 内嵌的那枚红底板。
+    // **扩展名不能绑死**：`tray-assets.ts` 按**宿主**平台嵌入资产（Windows 取 .ico、
+    // 其它取 .png），而这里是在任意宿主上模拟 win32 分支。绑死 .ico 的结果是
+    // 本地 Windows 跑绿、CI 的 ubuntu 必红 —— 第一版就是这么挂的。
+    expect(f.scripts[0]).toMatch(/icons[\\/]xbb\.(ico|png),0/);
   });
 
   test("已存在就什么都不做（不许刷新创建时间）", async () => {
