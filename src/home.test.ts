@@ -20,9 +20,18 @@ function tmp(prefix: string): string {
   cleanups.push(d);
   return d;
 }
-afterAll(() => {
-  for (const d of cleanups) rmSync(d, { recursive: true, force: true });
-});
+afterAll(
+  () => {
+    for (const d of cleanups) rmSync(d, { recursive: true, force: true });
+  },
+  // 显式放宽。这个文件是唯一会累积**几十个**临时目录的（`tmp()` 被调 41 次，每个里都有
+  // 一个 SQLite 库），而 Windows 删刚写完的库要等 WAL/SHM 句柄释放、还要过一遍 Defender，
+  // 单目录几十毫秒 × 41 就压在 bun hook 默认的 5s 线上。干净环境实测 5.7s，失败信息是
+  // 「a beforeEach/afterEach hook timed out」，看起来像测试坏了，实际是清理慢。
+  //   耗时由机器（磁盘、Defender 策略、句柄释放延迟）决定，不由本仓代码决定 —— 和上面
+  //   `runningProcs` 那条同样的理由：给它单独的预算，而不是让默认值去猜。
+  30_000,
+);
 
 /** 把进程环境切到某个 XBB_HOME（home.ts 全是调用时读 env，所以切了立刻生效） */
 function useHome(dir: string): void {

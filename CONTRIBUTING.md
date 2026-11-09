@@ -44,15 +44,19 @@ bun run test:ci      # 单测 + 冒烟，2 分钟左右
 ### 构建
 
 ```bash
+bun run build          # -> dist/xbb-<平台>-<架构>（按当前机器自动定名）
 bun run build:win      # -> dist/xbb-windows-x64.exe
 bun run build:linux    # -> dist/xbb-linux-x64
 bun run build:mac-arm  # -> dist/xbb-darwin-arm64
 bun run build:mac-intel
 ```
 
+`bun run build` 是给外部贡献者用的那一条：按当前平台编译、按当前平台定名，你不需要知道
+bun 的 target 三元组。`build:*` 那四条是交叉编译用的显式形式，发布流水线走的也是它们。
+
 构建产物是 Bun 单文件可执行，不需要额外运行时。
 
-四个 `build:*` 都只是 `tools/build.ts` 的薄壳，**不要绕开它直接调 `bun build --compile`**：
+这几条都只是 `tools/build.ts` 的薄壳，**不要绕开它直接调 `bun build --compile`**：
 Windows 产物的图标、产品名、发行者、文件版本都写在 PE 资源段里，参数漏一项不会报错，
 只会让用户装到一个「属性里写着 Bun 1.4.2」、资源管理器里没有图标的 exe。脚本编完会读回
 资源段，把图标字节和 `assets/app.ico` 逐字节比一遍，对不上直接失败。

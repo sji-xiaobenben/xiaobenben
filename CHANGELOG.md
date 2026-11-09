@@ -25,6 +25,13 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
   的八列表格写进 `README.md`，并注明权重口径、三个我们没拿第一的列（语义检索 / 时间维度 /
   跨平台）与官网全表入口。
 - **README 改为全英文**，并按主流开源项目的版式重排：居中标 + 徽章 + 快捷入口 + 官方下载提示。
+- **一句话构建**：新增 `bun run build`，按当前平台编译并按当前平台定名，外部贡献者不需要
+  知道 bun 的 target 三元组。此前要从 `build:win / build:linux / build:mac-arm / build:mac-intel`
+  里自己挑一个，而挑错的后果是**静默产出一个别的平台的产物**——`bun run build:win` 在任何系统上
+  都能跑通，只是产物跑不起来。现在完整路径是：
+  `git clone … && cd xiaobenben && bun install && bun run build`。
+  同时把 `darwin-x64` 需要 `--external onnxruntime-node` 这条平台事实内置进脚本，不再指望
+  调用方记得。
 
 ### 变更
 
@@ -32,6 +39,15 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
   的编解码（抽取后重出的 `tray.{png,ico}` 与改动前逐字节一致）。
 - 新增 `tools/check-exe-icon.ts`：产物侧断言"图标真的在 exe 里"，可对存量产物复核。
 - CI 的 Windows job 增加产物闸：编一次 `build:win` 后独立跑该断言，让「图标没进产物」在 PR 阶段就红，而不是等发版。
+
+### 修复
+
+- **`home.test.ts` 的清理钩子在新机器上会超时**：它累积 41 个临时目录、每个里都有一个
+  SQLite 库，Windows 删刚写完的库要等 WAL/SHM 句柄释放、还要过一遍 Defender，单目录几十
+  毫秒 × 41 就压在 bun hook 默认的 5s 上。干净环境实测 5.7s，报错是「a beforeEach/afterEach
+  hook timed out」——看着像测试坏了，实际是清理慢。给它单独的 30s 预算（和同文件里
+  `runningProcs` 那条 30s 同样的理由：耗时由机器决定，不由代码决定）。
+  对开源的影响很直接：**外部贡献者第一次跑 `bun run test:ci` 就会看到一条红**。
 
 ## [0.4.47] - 2026-11-08
 

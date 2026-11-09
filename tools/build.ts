@@ -52,12 +52,31 @@ for (let i = 0; i < argv.length; i++) {
   else flags[key] = val;
 }
 
-const outfile = flags.outfile;
-if (!outfile) fail("缺少 --outfile（产物输出路径）");
 const target = flags.target; // 省略 = 编当前平台
+
+// 不给 --outfile 就按目标平台自动定名 —— `bun run build` 因此就是「一句话构建」。
+//
+// 为什么值得内置：外部贡献者不知道 bun 的 target 三元组怎么写，也不该知道。让他从
+// `build:win / build:linux / build:mac-arm / build:mac-intel` 里挑一个，等于要求他先
+// 弄明白自己机器的 arch 和 bun 的命名，而挑错的后果是**静默产出一个别的平台的产物**
+// ——`bun run build:win` 在任何系统上都能跑通，只是产物跑不起来。
+const host = process.platform === "win32" ? "windows" : process.platform;
+const spec = target ? target.replace(/^bun-/, "") : `${host}-${process.arch}`;
+const plat = spec.split("-")[0] as string;
+const arch = (spec.split("-")[1] ?? process.arch) as string;
+const ext = plat === "windows" ? ".exe" : "";
+const outfile = flags.outfile ?? join(root, "dist", `xbb-${plat}-${arch}${ext}`);
+
 const iconPath = flags.icon ?? join(root, "assets", "app.ico");
 
-const isWindows = target ? target.includes("windows") : process.platform === "win32";
+// darwin-x64 没有 onnxruntime 的原生绑定，不外部化则 bun 在解析 binding.js 的 arch
+// 路径段时直接编译失败（release.yml 的矩阵里同样只在那一格加 --external）。这是平台
+// 事实而不是构建选项，所以放这里自动补，不指望调用方记得。
+if (plat === "darwin" && arch === "x64" && !externals.includes("onnxruntime-node")) {
+  externals.push("onnxruntime-node");
+}
+
+const isWindows = plat === "windows";
 
 // 版本号真源是 package.json：Windows 版本资源要求四段数字，0.4.47 → 0.4.47.0。
 // 预发布后缀（-beta.1）在 PE 里没有位置，去掉；缺位补 0。

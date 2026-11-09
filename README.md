@@ -376,19 +376,45 @@ Every third-party component that actually ships inside the binary (including tra
 ## Build from source
 
 Requires [Bun](https://bun.sh) ≥ 1.4.2 (matching `package.json`'s `engines`; CI pins 1.4.2).
+Nothing else — no private registry, no token, no clone of a second repository.
+
+**One line, from nothing to a working binary for the machine you are on:**
 
 ```bash
-bun install
-bun run typecheck
-bun run test:ci
+git clone https://github.com/sji-xiaobenben/xiaobenben && cd xiaobenben && bun install && bun run build
+```
 
+`bun run build` compiles for the host platform and names the artifact accordingly, so the next
+command works without you renaming anything:
+
+| Host | Artifact |
+|---|---|
+| Windows x64 | `dist/xbb-windows-x64.exe` |
+| Linux x64 | `dist/xbb-linux-x64` |
+| macOS Apple Silicon | `dist/xbb-darwin-arm64` |
+| macOS Intel | `dist/xbb-darwin-x64` |
+
+Cross-compiling uses the explicit variants (a Bun target triple each):
+
+```bash
 bun run build:win      # dist/xbb-windows-x64.exe
 bun run build:linux    # dist/xbb-linux-x64
 bun run build:mac-arm  # dist/xbb-darwin-arm64
 bun run build:mac-intel
 ```
 
-`build:*` all go through `tools/build.ts`, which is the single definition of "how an artifact is compiled": it stamps the icon, product name, publisher and file version into the Windows resource section (from `assets/app.ico` and `package.json`), then reads the resource section back to prove the icon landed. Regenerate the icons with `bun run gen:app-icon` (exe / logo) or `bun run gen:tray-icon` (tray).
+Verify the toolchain before building, if you want:
+
+```bash
+bun run typecheck
+bun run test:ci
+```
+
+All of these go through `tools/build.ts`, which is the single definition of "how an artifact is
+compiled": it stamps the icon, product name, publisher and file version into the Windows resource
+section (from `assets/app.ico` and `package.json`), then reads the resource section back to prove
+the icon landed. Regenerate the icons with `bun run gen:app-icon` (exe / logo) or
+`bun run gen:tray-icon` (tray).
 
 A locally built artifact reports `build local` in `xbb version` and **does not take part in self-update by default**: it embeds the official public key and CDN, so updating normally would only replace your build with the official exe. Point `XBB_UPDATE_URL` at the official source (or your own mirror) to opt in; to distribute your own version long term you also need your own key — see "Distributing your own build after forking" in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
