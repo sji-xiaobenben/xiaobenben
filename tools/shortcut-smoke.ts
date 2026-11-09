@@ -13,7 +13,7 @@
  *  - **幂等要单验**：第二次调用必须是 `exists` 且**不刷新** mtime。每次重写会把「最近添加」
  *    刷成广告位，而这件事从代码上看不出来。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -42,7 +42,9 @@ function ok(cond: boolean, label: string): void {
   console.log(`✓ ${label}`);
 }
 
-const ROOT = mkdtempSync(join(tmpdir(), "xbb-shortcut-smoke-"));
+// `tmpdir()` 在 Windows 上常给 8.3 短名（`C:\Users\RUNNER~1\…`），而 COM 读回 `.lnk`
+// 时会给长名 —— 同一路径两种写法，逐字符比较必然不等。这里先展开成规范长名。
+const ROOT = realpathSync.native(mkdtempSync(join(tmpdir(), "xbb-shortcut-smoke-")));
 
 // 图标释放会写 `XBB_HOME/icons`：整个冒烟都把 XBB_HOME 指向临时目录，收尾恢复。
 const PROGHOME = join(ROOT, "proghome");
@@ -147,7 +149,15 @@ async function main() {
   }
 
   const sm = join(ROOT, "Start Menu", "Programs");
-  const exe = "C:\\Users\\O'Brien\\.xiaobenben\\bin\\xbb.exe"; // 带单引号：顺带验注入面
+  // target 必须是**真实存在**的文件。原来写死 `C:\Users\O'Brien\...`（只为一个单引号，
+  // 验注入面），在 Win11 桌面版上 `Save()` 容忍 target 不存在，在 Windows Server（CI）
+  // 上直接抛 FileNotFoundException —— `Unable to save shortcut`，且错误里路径的中文被
+  // 控制台代码页显示成 ???，一度被误导去查编码。这是未定义行为，不能当契约测：
+  // 目录建在临时区里，单引号照样保留。
+  const exeDir = join(ROOT, "O'Brien", ".xiaobenben", "bin");
+  mkdirSync(exeDir, { recursive: true });
+  const exe = join(exeDir, "xbb.exe");
+  writeFileSync(exe, ""); // 内容无所谓，`Save()` 只要求路径存在
   const r1 = await ensureStartMenuShortcut({ platform: "win32", compiled: true, exePath: exe, startMenuDir: sm });
   ok(r1.status === "created", `真机 .lnk 已创建（${r1.status}${r1.message ? ` · ${r1.message}` : ""}）`);
   const lnk = join(sm, WIN_SHORTCUT_FILE);
@@ -163,7 +173,7 @@ async function main() {
   ok(back.ICON === `${icoPath},0`, `图标取自已释放的托盘 ico：${back.ICON}`);
   ok(readFileSync(icoPath).equals(readFileSync(join("assets", "tray.ico"))), "释放的字节 == assets/tray.ico（裸书签）");
   ok(!readFileSync(icoPath).equals(readFileSync(join("assets", "app.ico"))), "确实不是 exe 内嵌的那一枚（红底板）");
-  ok(back.WORKDIR === "C:\\Users\\O'Brien\\.xiaobenben\\bin", `工作目录＝程序目录：${back.WORKDIR}`);
+  ok(back.WORKDIR === exeDir, `工作目录＝程序目录：${back.WORKDIR}`);
 
   // 幂等：第二次必须是 exists，且**不刷新** mtime
   const before = statSync(lnk).mtimeMs;
