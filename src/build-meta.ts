@@ -15,7 +15,7 @@ export const PRODUCT_NAME = "小本本";
 export const PRODUCT_EN = "xiaobenben";
 // 本地开发的占位值：CI 发版时会被 sed 替换成 package.json 里的 version（真源在那里）。
 // 这里跟着改成当前版本，只是为了让本地直接构建出的产物不至于声称自己是个旧版本。
-export const VERSION = "0.4.47";
+export const VERSION = "0.4.48";
 // 发版时同样被 sed 注入成 `2026-11-08 17:40` 这样的实际时刻；本地直接构建保持 "local"。
 // **刻意不写一个具体日期**：那会让 fork 者今天构建出的产物自称是某个历史时间构建的，
 // 排查「这个 exe 到底哪来的」时会把人带偏——宁可说"不知道"，也不要说一个错的。
