@@ -1,0 +1,53 @@
+# 临时探针 —— 验完即删，不要留在仓库里。
+#
+# 目的：仓库改名（xbb-cli → xiaobenben）后，GitHub 签发的 OIDC `sub` 声明里
+# 的仓名部分会跟着变。阿里云 RAM 角色的信任策略如果按精确 sub 匹配，
+# 改名就会让 `AssumeRole` 被拒 —— 而这只在**发版时**才会暴露。
+#
+# 这个 workflow 只做两件事：把 token 的声明打出来、试一次换 STS。
+# 不上传、不碰 OSS、不发版。
+name: OIDC Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 打印 OIDC token 的声明（不验签，只看内容）
+        shell: bash
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.aliyuncs.com")
+          tok=$(printf '%s' "$resp" | sed -E 's/.*"value":"([^"]+)".*/\1/')
+          [ -n "$tok" ] || { echo "::error::拿不到 OIDC token"; exit 1; }
+          payload=$(printf '%s' "$tok" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in 2) payload="$payload==" ;; 3) payload="$payload=" ;; esac
+          echo "$payload" | base64 -d 2>/dev/null | python3 -m json.tool || echo "::error::payload 解不出来"
+
+      - name: 试换阿里云 STS（真正的判据）
+        id: sts
+        continue-on-error: true
+        uses: aliyun/configure-aliyun-credentials-action@v1.1.0
+        with:
+          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-expiration: 900
+
+      - name: 结论
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.sts.outcome }}" = "success" ]; then
+            echo "✓ 信任策略已接受新仓名的 sub —— 发版链路不会被改名阻断"
+          else
+            echo "::error::信任策略仍按旧仓名匹配，需要在 RAM 角色里追加新的 oidc:sub"
+            exit 1
+          fi
