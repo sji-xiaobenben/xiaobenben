@@ -391,11 +391,20 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
         // 向量路喂**原句**（与写入侧 embed(content) 同分布）；词法三路仍吃 terms。
         // 这就是四路唯一的错配点：入参只有 terms 时，向量被迫编码一串关键词，语义通道退化成第四路词法。
         const semantic = a.query?.trim() || a.terms.join(" ");
-        const r = (await searchHybrid(db(), () => embedder.embed(semantic), a)) as { hits?: Array<{ id: string; payloads?: unknown }> };
+        const r = (await searchHybrid(db(), () => embedder.embed(semantic), a)) as {
+          hits?: Array<{ id: string; payloads?: unknown }>;
+          vecNote?: string;
+        };
         // 载荷提货单（只给引用与描述、不给字节）。无载荷的命中**不出现 payloads 键**。
         if (r?.hits?.length) {
           const { attachPayloads } = await import("./payloads");
           attachPayloads(db(), r.hits);
+        }
+        // 向量降级说明必须送到 AI 眼前。少了这一句，「语义通道没跑」和「库里真没这段记忆」
+        // 对它来说完全一样 —— 它会直接用肯定的语气告诉用户「没有相关记录」。
+        if (r.vecNote) {
+          const { vecNote, ...rest } = r;
+          return { ...rest, note: vecNote };
         }
         return r as object;
       }),

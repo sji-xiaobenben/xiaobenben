@@ -319,3 +319,71 @@ describe("混合检索：纯向量命中也带出邻居", () => {
     expect(r.linkedPreview.some((p) => p.id === neighbor)).toBe(true);
   });
 });
+
+describe("混合检索：limit 是硬上限", () => {
+  function setEmbedding(id: string, v: Float32Array) {
+    db.prepare("UPDATE memories SET embedding = ?, vec_model = ? WHERE id = ?")
+      .run(Buffer.from(v.buffer.slice(0)), "bge-small-zh-v1.5/int8", id);
+  }
+
+  test("词法与向量都命中时，返回条数不超过 limit（曾经 limit 2 返回 3、5 返回 6）", async () => {
+    // 5 条词法命中：给向量条目制造「插到中间」的机会
+    for (let i = 0; i < 5; i++) await mem(`燧石巡检-第${i}次记录`);
+    // 1 条只有向量命中（正文与查询词零重叠）
+    const vecOnly = await mem("那台老设备的保养周期该重算了");
+    setEmbedding(vecOnly, new Float32Array(512).fill(0.05));
+
+    const v = new Float32Array(512).fill(0.05);
+    for (const limit of [2, 3, 5]) {
+      const r = await searchHybrid(db, async () => v, { terms: ["燧石巡检"], limit });
+      expect(r.hits.length).toBeLessThanOrEqual(limit);
+    }
+  });
+});
+
+describe("混合检索：预算闸覆盖预览，tokensUsed 不越界", () => {
+  function setEmbedding(id: string, v: Float32Array) {
+    db.prepare("UPDATE memories SET embedding = ?, vec_model = ? WHERE id = ?")
+      .run(Buffer.from(v.buffer.slice(0)), "bge-small-zh-v1.5/int8", id);
+  }
+
+  test("命中项和 1-hop 预览加起来不超过 budget（曾经报出 2295/2575 对着 2000）", async () => {
+    // 每条都带一个邻居，逼预览也吃掉预算
+    for (let i = 0; i < 12; i++) {
+      const neighbor = await mem(`硼砂工序-附属说明-${i}-` + "占位内容".repeat(10));
+      await mem(`硼砂工序-主记录-${i}-` + "占位内容".repeat(10), [{ toId: neighbor }]);
+    }
+    const vecOnly = await mem("那台老设备的保养周期该重算了");
+    setEmbedding(vecOnly, new Float32Array(512).fill(0.05));
+
+    const v = new Float32Array(512).fill(0.05);
+    for (const budget of [300, 800]) {
+      const r = await searchHybrid(db, async () => v, { terms: ["硼砂工序"], limit: 10, budget });
+      expect(r.tokensUsed).toBeLessThanOrEqual(budget);
+    }
+  });
+});
+
+describe("混合检索：向量降级必须有信号", () => {
+  test("模型未就绪时结果带 vecStatus=not-ready，不是一份看起来正常的词法结果", async () => {
+    await mem("砚台维护-未就绪场景");
+    const r = await searchHybrid(db, async () => null, { terms: ["砚台维护"], limit: 5 });
+    expect(r.vecStatus).toBe("not-ready");
+    expect(r.vecNote).toBeTruthy();
+    expect(r.hits.length).toBeGreaterThan(0); // 降级不等于没结果
+  });
+
+  test("向量通道抛错时带 vecStatus=error，且错误原因不丢", async () => {
+    await mem("砚台维护-异常场景");
+    const r = await searchHybrid(
+      db,
+      async () => {
+        throw new Error("ort session broken");
+      },
+      { terms: ["砚台维护"], limit: 5 },
+    );
+    expect(r.vecStatus).toBe("error");
+    expect(r.vecNote).toContain("ort session broken");
+    expect(r.hits.length).toBeGreaterThan(0);
+  });
+});

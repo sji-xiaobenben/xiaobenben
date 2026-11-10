@@ -115,12 +115,26 @@ export interface SearchResult {
   linkedPreview: { id: string; relation: string; preview: string }[];
   relatedTags: string[];
   tokensUsed: number;
+  /**
+   * 向量通道状态。`undefined` = 根本没走混合检索（纯词法 `searchMemory`）；
+   * `"ok"` = 参与了并有命中；其余都是**降级**，本次结果只有词法一路。
+   *
+   * 为什么必须显式带出来：降级时返回的是一份看起来完全正常的词法结果，AI 分不清
+   * 「库里没有这段记忆」和「语义通道没跑、用词不同的那条漏了」—— 它会直接对用户
+   * 说「没有相关记录」。这条沉默比任何性能问题都伤。
+   */
+  vecStatus?: "ok" | "empty-index" | "not-ready" | "error";
+  /** 降级原因的人话说明，直接透传给 AI（非降级时不带）。 */
+  vecNote?: string;
 }
 
 /** 估算一条记忆的 token 占用（中文 ~1 字 ≈ 1 token，保守 + 头部开销） */
 function estTokens(s: string): number {
   return Math.ceil(s.length * 0.8) + 24;
 }
+
+/** 一条 1-hop 链接预览的固定记账成本（折叠成单行，实际 20~25 token）。 */
+const PREVIEW_TOKEN_COST = 25;
 
 /**
  * 时间归一化（移植适配）：occurred_at=本地格式 "YYYY-MM-DD HH:MM:SS"，
@@ -344,10 +358,17 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   }
 
   // ── 1-hop 链接扩展（折叠为单行预览，~25 token）──
+  // 预览也吃预算：以前是「先算满预算的 hits，再无条件追加预览」，tokensUsed 必然超支
+  // （实测 2295 / 2575 对着 2000 的默认预算）。预算是对上层的硬承诺，不能只对 hits 生效。
   const linkedPreview = hits.length
-    ? linkedPreviewFor(db, hits.map((h) => h.id), new Set(hits.map((h) => h.id)))
+    ? linkedPreviewFor(
+        db,
+        hits.map((h) => h.id),
+        new Set(hits.map((h) => h.id)),
+        Math.max(0, Math.floor((budget - tokensUsed) / PREVIEW_TOKEN_COST)),
+      )
     : [];
-  tokensUsed += linkedPreview.length * 25;
+  tokensUsed += linkedPreview.length * PREVIEW_TOKEN_COST;
 
   // ── related_tags：命中项的标签/实体，引导 AI 下一轮换词 ──
   // 数据在上面的 loadMem 里已经读回来了（metaById），这里不再逐条回查。
@@ -495,9 +516,22 @@ export async function searchHybrid(
   const lexical = searchMemory(db, params);
   try {
     const qv = await embedQuery();
-    if (!qv) return lexical;
+    if (!qv) {
+      return {
+        ...lexical,
+        vecStatus: "not-ready",
+        vecNote:
+          "语义通道未就绪（向量模型还没加载完/加载失败），本次只有词法检索结果 —— 用词不同但意思相近的记忆可能漏掉，稍后重试一次能补上",
+      };
+    }
     const vecHits = vecTopK(db, qv, 100);
-    if (vecHits.length === 0) return lexical;
+    if (vecHits.length === 0) {
+      return {
+        ...lexical,
+        vecStatus: "empty-index",
+        vecNote: "语义索引还是空的（本地还没有可检索的向量），本次只有词法检索结果",
+      };
+    }
 
     // RRF k=60：词法榜与向量榜各按名次贡献 1/(60+rank)
     const K = 60;
@@ -508,18 +542,23 @@ export async function searchHybrid(
     // 词法命中的元数据保留；纯向量命中的补取内容（过链重定向+预算闸）
     const byId = new Map(lexical.hits.map((h) => [h.id, h]));
     const merged: SearchHit[] = [];
+    const budget = params.budget ?? 2000;
+    const limit = params.limit ?? 5;
     const usedTokens = lexical.tokensUsed;
     let tokens = usedTokens;
     for (const id of [...rrf.keys()].sort((a, b) => (rrf.get(b) ?? 0) - (rrf.get(a) ?? 0))) {
+      // 上限必须放在最前面：以前只在「向量补取」那条分支里查，而词法已命中的走
+      // `exist` 分支直接 push —— RRF 排序下向量榜第 1 名会插到词法第 2 名之前，
+      // 于是「词法#1 → 向量#1 → 词法#2」把 limit 顶穿（实测 limit 2 返回 3、5 返回 6）。
+      if (merged.length >= limit) break;
       const exist = byId.get(id);
       if (exist) { merged.push(exist); continue; }
-      if (merged.length >= (params.limit ?? 5)) break;
       const m = db.prepare(
         "SELECT id, content, type, occurred_at, session_id, device_id, source_ref FROM memories WHERE id = ? AND deleted_at IS NULL AND status = 'active'",
       ).get(id) as { id: string; content: string; type: string; occurred_at: string | null; session_id: string | null; device_id: string | null; source_ref: string | null } | undefined;
       if (!m) continue;
       const tk = estTokens(m.content);
-      if (tokens + tk > (params.budget ?? 2000)) break;
+      if (tokens + tk > budget) break;
       tokens += tk;
       merged.push({
         id: m.id, content: maskSecrets(m.content), type: m.type,
@@ -537,12 +576,29 @@ export async function searchHybrid(
     if (extraIds.length) {
       const seen = new Set(merged.map((h) => h.id));
       for (const p of linkedPreview) seen.add(p.id);
-      const extra = linkedPreviewFor(db, extraIds, seen, Math.max(0, 10 - linkedPreview.length));
+      // 预览同样吃预算：以前 `tokens += extra.length * 25` 写在闸门之后，等于先花再记，
+      // 报出去的 tokensUsed 可以超出预算 15%~30%，而调用方以为它守住了。
+      const room = Math.max(0, Math.floor((budget - tokens) / PREVIEW_TOKEN_COST));
+      const extra = linkedPreviewFor(db, extraIds, seen, Math.min(room, Math.max(0, 10 - linkedPreview.length)));
       linkedPreview = linkedPreview.concat(extra);
-      tokens += extra.length * 25;
+      tokens += extra.length * PREVIEW_TOKEN_COST;
     }
-    return { hits: merged, linkedPreview, relatedTags: lexical.relatedTags, tokensUsed: tokens, vecHits: vecHits.length };
-  } catch {
-    return lexical; // 永不因向量故障挂
+    return {
+      hits: merged,
+      linkedPreview,
+      relatedTags: lexical.relatedTags,
+      tokensUsed: tokens,
+      vecHits: vecHits.length,
+      vecStatus: "ok",
+    };
+  } catch (e) {
+    // 永不因向量故障挂 —— 但**必须说出来**。以前这里是裸 catch，返回一份和正常结果
+    // 长得一模一样的词法结果，于是「语义通道崩了」和「真没这段记忆」在 AI 眼里没区别。
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ...lexical,
+      vecStatus: "error",
+      vecNote: `语义通道出错（${msg.slice(0, 80)}），本次已退回词法检索 —— 结果可能不全`,
+    };
   }
 }
