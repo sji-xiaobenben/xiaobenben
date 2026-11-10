@@ -401,6 +401,272 @@ function parseCursorPair(c: string | null): [number, string] {
   return [Number(c.slice(0, i)) || 0, c.slice(i + 1)];
 }
 
+/**
+ * opencode 跨版本游标：v1（`part` join `message`）与 v2（`session_message`）各自推进。
+ *
+ * `ingest_sources` 只有 cursor 一列，而两套 id 命名空间（`prt_xxx` / `msg_xxx`）不可比 ——
+ * 挤进同一个 `<ts>|<id>` 里，同毫秒续切会退化成按 id 字典序乱跳。所以用 `>>>` 拼成两段：
+ * 前半段始终是 v1，后半段（可缺省）是 v2。
+ */
+interface OpenCursor {
+  v1: [number, string];
+  v2: [number, string] | null;
+}
+
+function parseOpenCursor(c: string | null): OpenCursor {
+  if (!c) return { v1: [0, ""], v2: null };
+  const [a, b] = c.split(">>>");
+  return { v1: parseCursorPair(a ?? null), v2: b ? parseCursorPair(b) : null };
+}
+
+function fmtOpenCursor(o: OpenCursor): string {
+  const v1 = `${o.v1[0]}|${o.v1[1]}`;
+  return o.v2 ? `${v1}>>>${o.v2[0]}|${o.v2[1]}` : v1;
+}
+
+/** 流式稳定水位：v2 的 `time_created` 是消息**开始**时刻，正文在之后几十秒里还在长
+ *  （本地 685MB 真库实测：正文消息 91% 在 2 分钟内写完，均值 25 秒）。
+ *  不等稳定就采，存进去的是半截，而游标一过就永远不再回补。 */
+const OPEN_SETTLE_MS = 120_000;
+
+/** 长尾回补窗口：仍有 3% 的正文在 2 分钟后才被改写（会话续接、compaction 重排，实测最长 88 分钟）。
+ *  主扫靠水位挡中间态，这部分只能靠「按 time_updated 回扫」捞回来。 */
+const OPEN_BACKFILL_MS = 6 * 3600_000;
+const OPEN_BACKFILL_LIMIT = 500;
+
+/** 断流判据：v2 里最新的正文比游标新出这么多，而本轮零产出 —— 解析规则已失效。 */
+const OPEN_STALL_MS = 6 * 3600_000;
+
+/** 起始游标的 id 哨兵，见 `collectOpencodeV2` 里的说明。 */
+const OPEN_CURSOR_TAIL = "\uffff";
+
+/**
+ * 从 v2 的 `session_message.data` 取正文。
+ *
+ * v2.2.7 起 opencode 把 part 内联进了消息行 —— `session_part` 建了但**一行都不写**（本地实测 0 行）。
+ * 口径与 v1 严格对齐：user/system 是 `data.text`，assistant 是 `data.content[]` 里 `type=text`
+ * 的元素按序拼接；reasoning（模型独白）、tool（调用参数）、step-*（元信息）一律不收。
+ *
+ * 返回三态，别把「本来就没有正文」算成「解析失败」：assistant 只有工具调用没有一句话是常态，
+ * 计成 unparsed 会把解析率打到 85%，假告警比不告警更费人。
+ */
+type V2Body = { kind: "text"; text: string } | { kind: "none" } | { kind: "bad" };
+
+function openV2Body(type: string, raw: string): V2Body {
+  let d: { text?: unknown; content?: unknown } | null;
+  try {
+    d = JSON.parse(raw);
+  } catch {
+    return { kind: "bad" };
+  }
+  if (!d) return { kind: "bad" };
+  if (type === "user" || type === "system") {
+    if (typeof d.text !== "string") return { kind: "bad" };
+    return d.text.trim() ? { kind: "text", text: d.text } : { kind: "bad" };
+  }
+  if (type === "assistant") {
+    if (!Array.isArray(d.content)) return { kind: "bad" };
+    const parts: string[] = [];
+    for (const c of d.content as Array<{ type?: string; text?: unknown }>) {
+      if (c?.type === "text" && typeof c.text === "string" && c.text.trim()) parts.push(c.text);
+    }
+    // content 里只有 tool / reasoning：这一轮模型没说话，不是解析坏了
+    return parts.length ? { kind: "text", text: parts.join("\n\n") } : { kind: "none" };
+  }
+  // synthetic（宿主注入）、idle、compaction、agent-switched 都不是人说的话
+  return { kind: "none" };
+}
+
+/** v2 表在不在 —— 老版本 opencode 根本没有这几张表，探测失败要当「无此源」而不是报错。 */
+function hasV2(src: Database): boolean {
+  try {
+    const r = src
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_message','session_v2')")
+      .all() as Array<{ name: string }>;
+    return r.length >= 2;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * v2 采集。三件事必须一起做对，少一件就是静默丢数据：
+ *
+ *  ① **起点锚在 v1 冻结点**。v2 迁移时把 12,842 条历史消息整体搬进了新表 —— 游标从 0 开始
+ *     会把用户已经入档的内容再采一遍。而 v1 冻结之后不再写，`MAX(part.time_created)` 就是
+ *     天然的切分线，新旧两侧正好衔接，不重不漏。
+ *  ② **水位挡中间态**。见 `OPEN_SETTLE_MS`。
+ *  ③ **time_updated 回扫**。见 `OPEN_BACKFILL_MS`。
+ *
+ * externalId 带正文短指纹（`m2:<id>:<hash>`）：同一消息在流式期间存过半截、之后被改写成完整版时，
+ * 两条都会在库里 —— 后者时间更晚，检索天然偏向它，也不会被 `ux_episodes_dedupe` 误吞。
+ */
+function collectOpencodeV2(
+  src: Database,
+  cur: OpenCursor,
+  maxTurns: number,
+): {
+  turns: RawTurn[];
+  cursor: [number, string] | null;
+  scanned: number;
+  suspects: number;
+  unparsed: number;
+  keySets: string[][];
+  pending: number;
+  note: string;
+} {
+  const empty = { turns: [], cursor: null, scanned: 0, suspects: 0, unparsed: 0, keySets: [], pending: 0, note: "" };
+  if (!hasV2(src)) {
+    // 上一轮还能读到 v2、这一轮读不到 —— 上游又改表了。不说一声就等于第二次静默断流。
+    return { ...empty, note: cur.v2 ? "⚠ 之前能读到 session_message，现在读不到了 —— 上游表结构又变了一次" : "" };
+  }
+
+  // ① 切分线：v1 最后一条写入时刻。part 表缺失（纯 v2 环境）时退回 0。
+  let floor = 0;
+  try {
+    const r = src.query("SELECT MAX(time_created) AS t FROM part").get() as { t: number | null } | null;
+    floor = Number(r?.t ?? 0) || 0;
+  } catch {
+    floor = 0;
+  }
+  const startTs = Math.max(cur.v2?.[0] ?? 0, floor);
+  // 起始游标的 id 用哨兵而不是空串：续切条件是 `id > ?`，而 `id > ''` 恒真 ——
+  // 会把「和冻结点同毫秒」的那条迁移边界行再采一遍。U+FFFF 在 BINARY 序下大于任何
+  // 真实 id（opencode 的 msg_xxx 是 ASCII），等价于「同毫秒的一律不要」。
+  let lastTs = cur.v2?.[0] ?? startTs;
+  let lastId = cur.v2?.[1] ?? OPEN_CURSOR_TAIL;
+  let advanced = false;
+
+  const now = Date.now();
+  const cutoff = now - OPEN_SETTLE_MS; // 只采这之前创建的（已经写完了）
+  const turns: RawTurn[] = [];
+  let scanned = 0;
+  let suspects = 0;
+  let unparsed = 0;
+
+  const take = (row: { id: string; sid: string; type: string; ts: number; data: string }, backfill: boolean): void => {
+    scanned++;
+    const body = openV2Body(row.type, row.data);
+    if (body.kind === "none") return; // 这一轮本来就没正文，不算失败
+    if (body.kind === "bad") {
+      // 回补批已经过一遍主扫，重复计会把 unparsed 翻倍，只在主扫里记
+      if (!backfill) unparsed++;
+      return;
+    }
+    suspects++;
+    const role = roleOf(row.type);
+    if (!role) {
+      unparsed++;
+      return;
+    }
+    const u = cleanTurn({
+      sessionId: row.sid,
+      externalId: `m2:${row.id}:${shortHash(body.text)}`,
+      role,
+      content: trimTurn(body.text, "opencode"),
+      atMs: row.ts,
+    });
+    if (!u) return; // 整条是宿主注入的系统通知
+    turns.push(u);
+  };
+
+  // A. 主扫：游标之后、水位之前
+  const stmt = src.query(
+    `SELECT id, session_id AS sid, type, time_created AS ts, data
+       FROM session_message
+      WHERE type IN ('user','assistant','system')
+        AND time_created <= ?
+        AND (time_created > ? OR (time_created = ? AND id > ?))
+      ORDER BY time_created ASC, id ASC LIMIT ?`,
+  );
+  for (;;) {
+    if (turns.length >= maxTurns) break;
+    const rows = stmt.all(cutoff, lastTs, lastTs, lastId, BATCH) as Array<{
+      id: string;
+      sid: string;
+      type: string;
+      ts: number;
+      data: string;
+    }>;
+    if (!rows.length) break;
+    for (const r of rows) {
+      // 游标对每一行前进：否则连续的非正文行会卡在原地反复重扫
+      lastTs = r.ts;
+      lastId = r.id;
+      advanced = true;
+      take(r, false);
+      if (turns.length >= maxTurns) break;
+    }
+    if (rows.length < BATCH) break;
+  }
+
+  // B. 回补：已经在游标之前、但最近又被改写过的消息（流式长尾）。
+  //    `time_created > startTs` 这条不能省 —— 少了它会把 cutover 之前那些「最近 6 小时
+  //    恰好被 touch 过」的老消息全当新内容灌一遍（本地实测 231 条 vs 实际新增 62 条）。
+  if (turns.length < maxTurns) {
+    const back = src.query(
+      `SELECT id, session_id AS sid, type, time_created AS ts, data
+         FROM session_message
+        WHERE type IN ('user','assistant','system')
+          AND time_created > ?
+          AND time_created <= ?
+          AND time_updated >= ?
+          AND time_updated <= ?
+        ORDER BY time_updated ASC LIMIT ?`,
+    ).all(startTs, lastTs, now - OPEN_BACKFILL_MS, cutoff, OPEN_BACKFILL_LIMIT) as Array<{
+      id: string;
+      sid: string;
+      type: string;
+      ts: number;
+      data: string;
+    }>;
+    for (const r of back) {
+      if (turns.length >= maxTurns) break;
+      take(r, true); // 不推进游标：主路径的进度只由 A 段决定
+    }
+  }
+
+  // 真·断流哨兵：v2 里明明有比游标新得多的数据，本轮却一条没产出。水位内的正常流式
+  // 不会误触（差距只有几分钟），所以这条一旦亮起，就是解析规则失效了。
+  let lagNote = "";
+  try {
+    const m = src
+      .query("SELECT MAX(time_created) AS t FROM session_message WHERE type IN ('user','assistant','system')")
+      .get() as { t: number | null } | null;
+    const maxTs = Number(m?.t ?? 0);
+    if (maxTs && lastTs && maxTs - lastTs > OPEN_STALL_MS && turns.length === 0) {
+      const h = Math.round((maxTs - lastTs) / 3600_000);
+      lagNote = `⚠ v2 最新数据比游标新 ${h} 小时，本轮零产出 —— 解析规则可能已失效`;
+    }
+  } catch {
+    lagNote = "";
+  }
+
+  // 水位之内还有多少条在写 —— 让「最近新增 0」不再是哑的
+  let pending = 0;
+  try {
+    const p = src
+      .query("SELECT COUNT(*) AS c FROM session_message WHERE time_created > ? AND type IN ('user','assistant','system')")
+      .get(cutoff) as { c: number } | null;
+    pending = Number(p?.c ?? 0);
+  } catch {
+    pending = 0;
+  }
+
+  return {
+    turns,
+    cursor: advanced ? [lastTs, lastId] : null,
+    scanned,
+    suspects,
+    unparsed,
+    // 结构指纹**只由 v1 的 part 键集决定**：混进 v2 的行为会让指纹在「这轮 v1 恰好有新行 /
+    // 恰好没有」之间来回跳，变成假告警。v2 改版与否看 unparsed 的增长曲线，够用了。
+    keySets: [],
+    pending,
+    note: lagNote,
+  };
+}
+
 function collectOpencode(
   db: Database,
   maxTurns: number,
@@ -410,7 +676,8 @@ function collectOpencode(
   if (!path) return { turns: [], cursor: "", scanned: 0, note: "未找到 opencode.db", suspects: 0, unparsed: 0, keySets: [] };
   const src = openReadonly(path);
   try {
-    let [lastTs, lastId] = parseCursorPair(loadCursor(db, "opencode"));
+    const oc = parseOpenCursor(loadCursor(db, "opencode"));
+    let [lastTs, lastId] = oc.v1;
     const stmt = src.query(
       `SELECT p.id AS id, p.session_id AS sid, p.time_created AS ts, p.data AS pd, m.data AS md
          FROM part p JOIN message m ON m.id = p.message_id
@@ -469,7 +736,24 @@ function collectOpencode(
       }
       if (turns.length >= maxTurns || rows.length < BATCH) break;
     }
-    return { turns, cursor: `${lastTs}|${lastId}`, scanned, note: "", suspects, unparsed, keySets };
+    // v1 扫完再接 v2：v1 冻结在 cutover 时刻，v2 正是从那一刻起来的。
+    const v2 = collectOpencodeV2(src, oc, Math.max(0, maxTurns - turns.length));
+    const cursor = fmtOpenCursor({ v1: [lastTs, lastId], v2: v2.cursor ?? oc.v2 });
+    const notes: string[] = [];
+    if (v2.note) notes.push(v2.note);
+    // 「最近新增 0」在 v2 时代必须是可解释的：要么真没说话，要么还在写（水位内）——
+    // 把水位内待定的条数摆出来，静默断流就再也藏不住了。
+    if (v2.pending > 0) notes.push(`v2 水位内 ${v2.pending} 条待定`);
+    if (turns.length + v2.turns.length >= maxTurns) notes.push("达单轮上限，余下轮继续");
+    return {
+      turns: turns.concat(v2.turns),
+      cursor,
+      scanned: scanned + v2.scanned,
+      note: notes.join(" · "),
+      suspects: suspects + v2.suspects,
+      unparsed: unparsed + v2.unparsed,
+      keySets: keySets.concat(v2.keySets),
+    };
   } finally {
     src.close();
   }
@@ -1074,7 +1358,11 @@ export function collectClientSessions(db: Database, opts: CollectOptions = {}): 
         recordedAt: fmtLocal(t.atMs ?? Date.now()),
       }));
       if (opts.dryRun) {
-        inserted = rows.length;
+        // 预演也要按去重键判一遍：v2 的回补批会把已入档的同一句再产出一次，
+        // 直接数 rows.length 会让「将新增」虚高（实测 136 vs 实际 68），
+        // 而预演数字正是「要不要按下发版」的判断依据。
+        const hit = db.query("SELECT 1 FROM episodes WHERE dedupe_key = ?");
+        inserted = rows.reduce((n, r) => n + (r.dedupeKey && hit.get(r.dedupeKey) ? 0 : 1), 0);
       } else {
         // 分块提交。整源一个事务（opencode 一轮 6 千行）会把写锁按住一两秒：这期间用户点
         // 「删除记忆」只能干等 busy_timeout，到期还直接失败。500 行一块后锁持有时间降到几十

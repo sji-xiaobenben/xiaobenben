@@ -561,6 +561,105 @@ console.log("⑮ 单行超过读取块大小：整行拿到才解析，尾部半
   check("半行补全后被补采（不永久丢）", after.c === 2, after.c);
 }
 
+console.log("⑯ opencode v2：part 内联进 session_message 后仍然采得到");
+{
+  // 真实世界的样子（2026-11-10 23:11 cutover 之后）：
+  //   · part / message 冻结，不再写；session_part 建了但一行不写
+  //   · 正文内联进 session_message：user/system 在 data.text，assistant 在 data.content[]
+  //   · 迁移时把历史消息整体搬进新表，所以新表里既有老内容也有新内容
+  //   · 消息是流式写的，time_created 之后几十秒正文还在长
+  const T = Date.now();
+  const oc2Path = join(fx, "opencode-v2.db");
+  {
+    const d = new Database(oc2Path, { create: true });
+    d.exec(`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)`);
+    d.exec(`CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)`);
+    d.exec(`CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_created INTEGER)`);
+    d.exec(
+      `CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+        time_created INTEGER, time_updated INTEGER, data TEXT)`,
+    );
+    d.exec(
+      `CREATE TABLE session_part (message_id TEXT, session_id TEXT, ordinal INTEGER, type TEXT,
+        time_created INTEGER, time_updated INTEGER, data TEXT)`, // 真空表：v2 就是不走这张
+    );
+    const insM = d.prepare("INSERT INTO message VALUES (?,?,?,?)");
+    const insP = d.prepare("INSERT INTO part VALUES (?,?,?,?,?)");
+    const insS = d.prepare("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)");
+    d.prepare("INSERT INTO session_v2 VALUES (?,?)").run("ses_V", T - 900_000);
+
+    // v1 时代的老话（正在 v1 表里）
+    insM.run("msg_old", "ses_V", T - 900_000, JSON.stringify({ role: "user" }));
+    insP.run("prt_old", "msg_old", "ses_V", T - 900_000, JSON.stringify({ type: "text", text: "v1 时代的老话" }));
+    // 同一条被迁移进 v2 —— 起点锚在 v1 冻结点，不该再采一遍
+    insS.run("msg_old", "ses_V", "user", 1, T - 900_000, T - 900_000, JSON.stringify({ text: "v1 时代的老话" }));
+
+    // cutover 之后的新内容（5 分钟前，已过稳定水位）
+    insS.run("msg_new1", "ses_V", "user", 2, T - 300_000, T - 300_000, JSON.stringify({ text: "v2 里的用户提问" }));
+    insS.run(
+      "msg_new2",
+      "ses_V",
+      "assistant",
+      3,
+      T - 299_000,
+      T - 240_000,
+      JSON.stringify({
+        content: [
+          { type: "reasoning", text: "内心独白不该入库" },
+          { type: "text", text: "v2 里的助手回答·上半段" },
+          { type: "tool", callID: "c1" },
+          { type: "text", text: "v2 里的助手回答·下半段" },
+        ],
+      }),
+    );
+    // 只调了工具、一句话没说 —— 这是常态，不能计成解析失败
+    insS.run("msg_tool", "ses_V", "assistant", 4, T - 200_000, T - 200_000, JSON.stringify({ content: [{ type: "tool", callID: "c2" }] }));
+    // 宿主动静不算人话
+    insS.run("msg_syn", "ses_V", "synthetic", 5, T - 190_000, T - 190_000, JSON.stringify({ text: "宿主注入" }));
+    // 10 秒前刚开始写，正文还在长 —— 水位内不采
+    insS.run("msg_live", "ses_V", "user", 6, T - 10_000, T - 10_000, JSON.stringify({ text: "还在写的那句" }));
+    d.close();
+  }
+
+  // 换库要重置游标，否则会拿上一个夹具的进度来切
+  db.exec("UPDATE ingest_sources SET cursor = NULL WHERE source = 'opencode'");
+  db.exec("DELETE FROM episodes WHERE source = 'opencode'");
+
+  const p2 = { ...paths, opencode: oc2Path };
+  const r1 = collectClientSessions(db, { paths: p2, sources: ["opencode"] });
+  const bodies = (db.query("SELECT content FROM episodes WHERE source='opencode' ORDER BY id").all() as Array<{ content: string }>).map(
+    (x) => x.content,
+  );
+  check("v1 时代的老话照采（part 表那条路没坏）", bodies.includes("v1 时代的老话"), bodies);
+  check("v2 新内容采得到（换表不再断流）", bodies.includes("v2 里的用户提问"), bodies);
+  check(
+    "assistant 的多个 text 元素按序拼成一条正文",
+    bodies.some((b) => b.includes("上半段") && b.includes("下半段") && b.indexOf("上半段") < b.indexOf("下半段")),
+    bodies,
+  );
+  check("迁移进 v2 的老消息没有重采（起点锚在 v1 冻结点）", bodies.filter((b) => b === "v1 时代的老话").length === 1, bodies);
+  check("只有工具调用的 assistant 不算解析失败", r1.results[0].unparsed === 0, r1.results[0]);
+  check("解析率 100%（不制造假告警）", r1.results[0].suspects > 0 && r1.results[0].unparsed === 0, r1.results[0]);
+  check("水位内那条不采，且在说明里报到", !bodies.includes("还在写的那句") && /水位内 1 条待定/.test(r1.results[0].note), r1.results[0].note);
+  check("reasoning / synthetic 都没进库", !bodies.some((b) => b.includes("内心独白") || b.includes("宿主注入")), bodies);
+
+  const r2 = collectClientSessions(db, { paths: p2, sources: ["opencode"] });
+  check("第二遍新增 0 条（游标 + 去重键都正确）", r2.inserted === 0, r2.results);
+
+  // 时间流逝后水位放开：刚才那条应当补上，而且不多不少
+  {
+    const d = new Database(oc2Path);
+    d.prepare("UPDATE session_message SET time_created = ?, time_updated = ? WHERE id = 'msg_live'").run(T - 130_000, T - 130_000);
+    d.close();
+  }
+  const r3 = collectClientSessions(db, { paths: p2, sources: ["opencode"] });
+  const after3 = db.query("SELECT content FROM episodes WHERE source='opencode'").all() as Array<{ content: string }>;
+  check("水位放开后补上那条", after3.some((x) => x.content === "还在写的那句") && r3.inserted === 1, {
+    inserted: r3.inserted,
+    note: r3.results[0].note,
+  });
+}
+
 db.close();
 try {
   rmSync(root, { recursive: true, force: true });
