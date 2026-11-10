@@ -85,6 +85,8 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           TAG: ${{ steps.t.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           AS=.github/signing-keys/allowed_signers
@@ -92,17 +94,29 @@ jobs:
           git config gpg.format ssh
           git config gpg.ssh.allowedSignersFile "$AS"
 
+          # ⚠️ 2026-11-11 发 0.4.50 时踩到：跑完 actions/checkout，本地 refs/tags/<tag> 解析
+          #    出来的**不是 tag 对象**，于是下面第 ① 层判据必然假红（远端 API 查过
+          #    git/ref/tags/v0.4.50 的 object.type 是 tag，SSHSIG 块也在，tag -v 本机也验得过）。
+          #    显式重取一次 tag ref。refspec 用完整路径 refs/tags/<tag>，绕开任何短名解析。
+          #    persist-credentials 是 false（本 job 只读仓库），所以凭据从 GITHUB_TOKEN 现拼。
+          git fetch --force --no-tags \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            "+refs/tags/${TAG}:refs/tags/${TAG}" >/dev/null 2>&1 || true
+
           fail_or_warn() {
             if [ "$EVENT" = "push" ]; then echo "::error::$1"; exit 1; fi
             echo "::warning::$1（补归档通道，不阻断）"
           }
 
-          if [ "$(git cat-file -t "$TAG" 2>/dev/null || echo none)" != "tag" ]; then
-            fail_or_warn "$TAG 不是 annotated tag。lightweight tag 结构上没有签名位，用 git tag -s 重打。"
+          # 判据统一用完整 ref 路径：短名 `v1.2.3` 在「恰好存在同名文件/分支」时有歧义，
+          # 而排障时最怕的就是「看起来像个 git 问题」。失败时把实际类型打出来。
+          objtype=$(git cat-file -t "refs/tags/$TAG" 2>/dev/null || echo none)
+          if [ "$objtype" != "tag" ]; then
+            fail_or_warn "$TAG 不是 annotated tag（本地 refs/tags/$TAG 的类型=$objtype）。lightweight tag 结构上没有签名位，用 git tag -s 重打。"
             exit 0
           fi
 
-          if ! git cat-file tag "$TAG" | grep -q '^-----BEGIN SSH SIGNATURE-----$'; then
+          if ! git cat-file tag "refs/tags/$TAG" | grep -q '^-----BEGIN SSH SIGNATURE-----$'; then
             fail_or_warn "$TAG 没有 SSH 签名。补签：git tag -d $TAG && git tag -s $TAG <commit> -F <说明文件>"
             exit 0
           fi
