@@ -5,6 +5,7 @@
  * serve 协议级冒烟：headless 拉起 → healthz/stats/verify/ui 四断言 → 收杀。
  * 原理同 mcp-smoke：CI 三平台真跑，不 mock。
  */
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { PersonalStore } from "../src/store";
@@ -12,7 +13,7 @@ import { SPACE_PERSONAL } from "../src/schema";
 import { appendEpisode, ingestDedupeKey } from "../src/episodes";
 
 const bun = process.execPath;
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const PORT = 17639; // 冒烟专用端口，避开真实 17630
 const base = `http://127.0.0.1:${PORT}`;
 

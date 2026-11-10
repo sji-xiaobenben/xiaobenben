@@ -48,6 +48,7 @@
  * 用法：`bun run tools/gen-app-icon.ts [--preview]`
  *   --preview 额外打印 16×16 / 32×32 的 ASCII 预览（# 红底 / O 白书签 / · 透明）。
  */
+import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { encodeIco, insidePolygon } from "./lib/icon-codec";
@@ -183,7 +184,7 @@ function renderSvg(): string {
 
 // ── 输出 ────────────────────────────────────────────────────────────────────
 
-const root = join(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"), ".");
+const root = join(fileURLToPath(new URL("..", import.meta.url)), ".");
 const icoPath = join(root, "assets", "app.ico");
 const svgPath = join(root, "assets", "brand", "logo.svg");
 

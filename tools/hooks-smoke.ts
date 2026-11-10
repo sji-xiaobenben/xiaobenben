@@ -6,11 +6,12 @@
  * 隔离 serve → 种子记忆 → stdin JSON 形态与 argv JSON 形态（Codex）真跑适配器
  * → 验证 inbox 收到推送。CI 三平台真跑，不 mock。
  */
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { PersonalStore } from "../src/store";
 
 const bun = process.execPath;
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const PORT = 17641; // 冒烟专用端口，避开真实 17630 与 serve-smoke 的 17639
 const base = `http://127.0.0.1:${PORT}`;
 const HOOK = `${root}plugins/hooks/xbb-hook.mjs`;

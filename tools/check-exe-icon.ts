@@ -13,12 +13,13 @@
  * 解析逻辑在 `tools/lib/pe-icon.ts`：`tools/build.ts` 构建完 Windows 产物时也会调它，
  * 同一条断言两处复用，不留第二份 PE 解析。纯字节解析、不执行产物 ⇒ 交叉编译的产物同样能查。
  */
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractEmbeddedIcon } from "./lib/pe-icon";
 
-const root = join(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"), ".");
+const root = join(fileURLToPath(new URL("..", import.meta.url)), ".");
 const artifact = process.argv[2];
 
 if (!artifact) {

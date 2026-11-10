@@ -13,11 +13,12 @@
  *
  * 反过来，dev 侧（资产可读、菜单形状、释放语义）由 `tools/tray-smoke.ts` 覆盖。
  */
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { trayBinName, trayIconAssetName } from "../src/tray-assets";
 
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const cliRoot = join(root, ".");
 
 const artifact = process.argv[2];

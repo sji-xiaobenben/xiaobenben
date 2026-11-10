@@ -20,10 +20,11 @@
  *  3. 求值出真实 HTML 后：内联 <script> 必须能通过语法检查，且每个 `onclick="fn(...)"`
  *     引用的函数都必须在脚本里有 `function fn(` 声明（本次事故的用户可见症状）。
  */
+import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const SRC = process.argv[2] && !process.argv[2].startsWith("--")
   ? process.argv[2]
   : join(root, "src", "web", "admin.ts");

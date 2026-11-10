@@ -35,6 +35,7 @@
  * 用法：`bun run tools/gen-tray-icon.ts [--preview]`
  *   --preview 额外打印 16×16 / 32×32 的 ASCII 预览，用来肉眼核对形状（CI 不跑）。
  */
+import { fileURLToPath } from "node:url";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { encodeIco, encodePng, insidePolygon } from "./lib/icon-codec";
@@ -112,7 +113,7 @@ function renderRgba(size: number): Uint8Array {
 
 // ── 输出 ────────────────────────────────────────────────────────────────────
 
-const root = join(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"), ".");
+const root = join(fileURLToPath(new URL("..", import.meta.url)), ".");
 const pngPath = join(root, "assets", "tray.png");
 const icoPath = join(root, "assets", "tray.ico");
 

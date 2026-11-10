@@ -25,11 +25,12 @@
  *
  * 用法：`bun run tools/admin-ui-check.ts`（设 `CHROME` 环境变量可指定浏览器路径）
  */
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 
 const bun = process.execPath;
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const HOME = `${root}.uicheck-home`;
 const PORT = 17641;
 const base = "http://127.0.0.1:" + PORT;

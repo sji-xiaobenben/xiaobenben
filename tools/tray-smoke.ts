@@ -18,6 +18,7 @@
  *
  * 真机起托盘（屏幕上会真的出现一个图标）需显式 `XBB_TRAY_E2E=1`：CI 无显示环境，不能默认跑。
  */
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +40,7 @@ const home = mkdtempSync(join(tmpdir(), "xbb-tray-smoke-"));
 process.env.XBB_HOME = home;
 
 // `..` 相对 tools/ ⇒ 指到 cli/ 本身（与 serve-smoke 的 root 同义）
-const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const cliRoot = join(root, ".");
 let pass = 0;
 let total = 0;

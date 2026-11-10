@@ -24,11 +24,12 @@
  * 立刻读回资源段比对字节，对不上就 **exit 1** —— 让 CI 红在构建这一步，而不是等用户装了
  * 一个没有图标的 exe。同一份断言也做成独立工具 `tools/check-exe-icon.ts`，可用于存量产物复核。
  */
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractEmbeddedIcon } from "./lib/pe-icon";
 
-const root = join(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"), ".");
+const root = join(fileURLToPath(new URL("..", import.meta.url)), ".");
 
 function fail(msg: string): never {
   console.error(`✗ ${msg}`);
