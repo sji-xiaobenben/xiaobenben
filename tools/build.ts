@@ -25,9 +25,10 @@
  * 一个没有图标的 exe。同一份断言也做成独立工具 `tools/check-exe-icon.ts`，可用于存量产物复核。
  */
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractEmbeddedIcon } from "./lib/pe-icon";
+import { restoreGenerated, writeGenerated } from "./lib/ort-embed";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)), ".");
 
@@ -118,6 +119,35 @@ if (isWindows) {
   );
 }
 cmd.push(`--outfile=${outfile}`, "src/index.ts");
+
+// ── 内嵌向量运行时 ──────────────────────────────────────────────────────────
+// 为什么内嵌：`bun build --compile` 打不进 `.node`，所以 0.4.49 及以前是「exe + 另下一个
+// zip」两步分发，绝大多数用户只走了第一步 —— 拿到纯词法检索却以为产品就这样。体积账与
+// 释放策略见 tools/lib/ort-embed.ts 与 src/ort-embedded.ts 的文件头。
+//
+// 清理挂在 process.on("exit") 而不是 try/finally：`fail()` 走 process.exit，finally 不会执行。
+process.on("exit", () => restoreGenerated(root));
+
+const ortPkg = join(root, "node_modules", "onnxruntime-node");
+if (!existsSync(join(ortPkg, "dist", "ort-bundle.cjs"))) {
+  // 缺 bundle 就静默产出「没有向量」的 exe，正是这次要消灭的失败模式 —— 补跑，失败就红
+  const b = Bun.spawnSync(["bun", "run", "bundle:ort"], { cwd: root, stdio: ["inherit", "inherit", "inherit"] });
+  if (b.exitCode !== 0) fail("bundle:ort 失败，向量运行时无法内嵌");
+}
+
+const embedded = writeGenerated(root, { pkg: ortPkg, plat, arch, version: pkg.version });
+if (!embedded) {
+  // 「该平台上游没发原生库」是合法事实（darwin-x64），「有库但收不全」是构建坏了，必须红
+  const nat = join(ortPkg, "bin", "napi-v6", plat === "windows" ? "win32" : plat, arch);
+  if (existsSync(nat)) fail(`目标平台原生库存在但内嵌资源收集失败：${nat}`);
+  console.log(`· ${plat}-${arch} 不内嵌向量运行时（上游未发布该平台的原生库），产物固定为纯词法检索`);
+} else {
+  const mb = (n: number) => (n / 1048576).toFixed(1);
+  console.log(
+    `✓ 内嵌向量运行时 ${embedded.files} 个文件（去重后 ${embedded.uniqueBlobs} 份）` +
+      ` ${mb(embedded.rawBytes)}MB → gzip ${mb(embedded.gzBytes)}MB`,
+  );
+}
 
 console.log(`$ ${cmd.join(" ")}`);
 const proc = Bun.spawnSync(cmd, { cwd: root, stdio: ["inherit", "inherit", "inherit"] });

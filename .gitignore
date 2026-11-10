@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# 构建期内嵌资源（tools/lib/ort-embed.ts 生成，构建结束自动清理）
+src/generated-ort/
 *.db
 *.sqlite
 .env

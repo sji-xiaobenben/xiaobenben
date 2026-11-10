@@ -18,9 +18,13 @@
 #     · `**/*.md` / `LICENSE` / `docs/**` —— 纯文档，不进二进制。
 #     · `tools/**` —— 开发工具（smoke / bench / 清单签名脚本）。产物只由
 #       `bun build --compile src/index.ts` 决定，tools 一个字节都不进 exe。
-#       ⚠️ 唯一的例外曾是 `tools/poc/bundle-entry.ts`（onnxruntime 打包入口，**是构建输入**），
-#       2026-10-16 已移到 `src/ort-bundle-entry.ts`。**今后任何构建输入都不许放 tools/**，
-#       否则就是这个豁免要防的那类静默漏发。
+#       ⚠️ 已知的**例外**（这几处改动确实会改变产物，却被这条豁免盖住了）：
+#         - `tools/build.ts` —— 唯一构建入口，图标/版本资源/内嵌清单都在这里装配
+#         - `tools/lib/ort-embed.ts` —— 0.4.50 起装配向量运行时的内嵌资源
+#         改了这两个文件请走 `workflow_dispatch` 发版，别指望 push 触发。
+#       历史上还有一个 `tools/poc/bundle-entry.ts`（**是构建输入**），2026-10-16 已移到
+#       `src/ort-bundle-entry.ts`。今后新增构建输入优先放 src/；实在放不进 src/ 的，
+#       必须登记到上面这份例外清单里——不登记就是一次静默漏发。
 #       ⚠️ `tools/check-tray-embedded.ts` 是**产物查验闸**（改变的是"怎么验"，不是产物本身）：
 #       改它不触发发版，新版查验逻辑会在下一次发版时生效 —— 这是可接受的。
 #
@@ -365,6 +369,11 @@ jobs:
             *)
               chmod +x "$ART"
               "./$ART" version
+              # 内嵌向量运行时自检（0.4.50 起）。这条链路的每一步失败都是**静的**：gz 没被
+              # Bun 内嵌、解压出 0 字节、漏了 binding.node —— 三种情况下 exe 照样能跑，只是
+              # 悄悄降级成纯词法检索，命令行不报错、退出码 0。用户感受到的是「搜得不准」，
+              # 账记在产品头上。所以必须在发出去之前用真产物验一次（见该脚本文件头）。
+              bun run tools/check-embedded-ort.ts "./$ART"
               ;;
           esac
           # 托盘资产必须真的嵌进产物。这条是 2026-10-07「托盘在所有正式版里

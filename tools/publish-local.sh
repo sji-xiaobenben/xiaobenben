@@ -192,6 +192,13 @@ for art in $ALL_ARTS; do
   cp -R "$P/lib" "$S/lib"
   cp "$P/package.json" "$S/package.json"
   cp -R "$P/bin/napi-v6/$OSP/$ARN" "$S/bin/napi-v6/$OSP/$ARN"
+  # GPU 后端（DirectML / dxcompiler / dxil）在 Windows 包里占 36.5MB，而 embedder 建 session
+  # 时写死 executionProviders: ["cpu"] —— 它们一次都不会被加载，纯占位。
+  # 依据：已在全新隔离环境只放 CPU 四文件实测，`[xbb] 向量就绪` 正常；
+  # 0.4.50 起 exe 内嵌的也是这份 CPU-only 集合，两条分发路径口径一致。
+  rm -f "$S/bin/napi-v6/$OSP/$ARN/DirectML.dll" \
+        "$S/bin/napi-v6/$OSP/$ARN/dxcompiler.dll" \
+        "$S/bin/napi-v6/$OSP/$ARN/dxil.dll"
   [ -f "$S/bin/napi-v6/$OSP/$ARN/onnxruntime_binding.node" ] || die "旁路包缺 onnxruntime_binding.node（$art）"
 
   # 绝对路径——打包时会把 cwd 切进 stage 目录，相对路径极易算错层级

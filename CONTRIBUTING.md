@@ -54,10 +54,14 @@ bun run build:mac-intel
 `bun run build` 是给外部贡献者用的那一条：按当前平台编译、按当前平台定名，你不需要知道
 bun 的 target 三元组。`build:*` 那四条是交叉编译用的显式形式，发布流水线走的也是它们。
 
-构建产物是 Bun 单文件可执行，不需要额外运行时。唯一的例外是向量旁路：`onnxruntime` 的
-`.node` 原生模块没法内联进单文件，走 `bun run bundle:ort` 单独出 `xbb-ort-<平台>.zip`，
-运行时从 exe 同目录的 `node_modules/` 加载（见 `src/embedder.ts` 的 `loadOrt`）。缺了它
-产品照跑，只是退化成纯词法检索。
+构建产物是 Bun 单文件可执行。向量运行时（onnxruntime 的 CPU 后端）**在构建期内嵌**：
+`tools/build.ts` 会把它 gzip 后写进 `src/ort-assets.generated.ts` 再参与编译，运行时解压到
+`~/.xiaobenben/ort/<key>/`（见 `src/ort-embedded.ts`）。`.node` 原生模块没法直接内联，所以
+这是一层「内嵌 + 首启释放」，不是真正的单文件静态链接。
+
+构建期间那个清单文件会被覆写，构建结束后自动还原成空壳——**不要手动编辑它，也不要提交
+构建留下的版本**（`.gitignore` 已覆盖 `src/generated-ort/`）。`bun run bundle:ort` 仍然存在，
+它产出的 `ort-bundle.cjs` 既进内嵌包，也进兼容用的 `xbb-ort-<平台>.zip`。
 
 这几条都只是 `tools/build.ts` 的薄壳，**不要绕开它直接调 `bun build --compile`**：
 Windows 产物的图标、产品名、发行者、文件版本都写在 PE 资源段里，参数漏一项不会报错，

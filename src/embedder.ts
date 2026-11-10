@@ -8,8 +8,9 @@
  * 红线（与 server 同一纪律）：
  *  - 双降级：模型缺失/加载失败/推理异常 → embed() 返回 null → 明文照存/检索纯词法，永不因模型故障挂
  *  - 模型首启静默下载：cli models.ts 基建接线（sha256 双校验 + staging 原子落盘），失败静默重试
- *  - 加载：compile exe 走旁路 ort-bundle.cjs（PoC 定案：createRequire 绝对路径，
- *    bundle 内联全部 JS 依赖、binding.node 相对路径命中真实 DLL）；bun 开发模式直接 import
+ *  - 加载：内嵌 ORT 释放到 ~/.xiaobenben/ort/<key>（0.4.50+ 默认）→ exe 旁 node_modules
+ *    旁路包 → bun 开发模式直接 import。前两条都走 createRequire 绝对路径，
+ *    bundle 内联全部 JS 依赖、binding.node 相对路径命中真实 DLL
  *  - vec_model 列 = 坐标系账本（换模型=全库重算）
  */
 import { modelsDir } from "./home";
@@ -18,6 +19,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { ensureModel, type ModelManifest } from "./models";
+import { releaseEmbeddedOrt } from "./ort-embedded";
 
 export const EMBED_DIM = 512;
 export const VEC_MODEL = "bge-small-zh-v1.5/int8";
@@ -281,19 +283,34 @@ export async function loadOrtFromPkg(pkg: string): Promise<typeof import("onnxru
 }
 
 /**
- * 加载 onnxruntime：编译产物走「exe 同目录 node_modules」旁路，开发模式走常规 import。
+ * 加载 onnxruntime：内嵌释放 → 手动旁路包 → 开发模式常规 import，任一路径失败都返回 null。
  *
- * 为什么不是直接 import：`bun build --compile` 会把 JS 打进去，但 onnxruntime-node 的
- * `.node` 原生模块无法内联进单文件。于是构建时额外产出一个 `ort-bundle.cjs`
- * （`bun run bundle:ort`，落在 node_modules/onnxruntime-node/dist/ 下，`*.node` 外置），
- * 运行时从 exe 旁边的 node_modules 里按需加载它。
- * 旁路不存在（用户只拷了一个 exe）时退回常规 import，任一路径失败都返回 null ——
- * 调用方据此降级为纯全文检索，不影响可用性。
+ * 查找顺序为什么是这个顺序：
+ *   ① **内嵌**（0.4.50+）—— 版本受控、开箱即有，是发行产物的正路。放第一位是因为它一定
+ *      和当前 exe 同源；把用户手动装的旧包排在前面，等于让「装过一次就不再升级」变成默认。
+ *   ② **手动旁路包** —— 0.4.49 及以前的安装方式（exe 同目录 node_modules/onnxruntime-node）。
+ *      保留它是为了不让已经按老文档装过的人升一次版本反而丢功能。
+ *   ③ **常规 import** —— 只有开发模式（bun run src/index.ts）会走到这里。
+ *
+ * ①失败时继续试②③而不是直接降级：内嵌释放可能因目录被占/杀软隔离失败，而用户本地那份
+ * 是好的 —— 多试一次的代价是一次 existsSync，收益是少一个「升级后突然搜不准」的报障。
+ *
+ * `bun build --compile` 把 JS 打进去，但 `.node` 原生模块无法内联进单文件，所以发行态一律
+ * 走「exe 旁边的包目录」这条 createRequire 绝对路径，bundle 内联全部 JS 依赖、binding.node
+ * 相对路径命中真实 DLL。
  */
 export async function loadOrt(): Promise<typeof import("onnxruntime-node") | null> {
   try {
-    const pkg = join(dirname(process.execPath), "node_modules", "onnxruntime-node");
-    if (existsSync(join(pkg, "dist", "ort-bundle.cjs"))) return await loadOrtFromPkg(pkg);
+    const fromEmbedded = releaseEmbeddedOrt();
+    if (fromEmbedded) {
+      const m = await loadOrtFromPkg(fromEmbedded);
+      if (m) return m;
+    }
+    const manual = join(dirname(process.execPath), "node_modules", "onnxruntime-node");
+    if (existsSync(join(manual, "dist", "ort-bundle.cjs"))) {
+      const m = await loadOrtFromPkg(manual);
+      if (m) return m;
+    }
     return await import("onnxruntime-node");
   } catch {
     return null;
@@ -361,9 +378,16 @@ class Embedder {
     this.status = "loading";
     this.loading = (async () => {
       try {
+        // 让出一轮事件循环再动手：首启要把内嵌的 ORT 解压出来（同步 IO，约 1 秒、仅一次），
+        // 而 warmupEmbedder 是在 MCP 握手路径上 fire 的 —— 不让出的话这 1 秒会排在
+        // initialize 响应前面，等于拖慢每一次「第一次连接」。
+        await new Promise<void>((r) => setTimeout(r, 0));
+        // 先备运行时再备模型：ORT 首启要解压内嵌资源（约 1 秒、只在第一次），而模型是 24MB
+        // 网络下载。先做本地这件意味着进程起来后 ORT 目录立刻可见 —— 装没装对能当场看出来，
+        // 而不是「等模型下完再说」。
+        const ort = await loadOrt();
         const ok = await ensureModel(BGE_MANIFEST, dir);
         if (!ok) { this.status = "failed"; return false; }
-        const ort = await loadOrt();
         if (!ort) { this.status = "failed"; return false; }
         this.ort = ort;
         this.session = await ort.InferenceSession.create(join(dir, "model_quantized.onnx"), {
