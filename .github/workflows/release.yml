@@ -426,6 +426,13 @@ jobs:
           # 只拷本平台原生库：整包分发会让每个用户下载 288MB，其中 5/6 是自己平台用不到的。
           cp -R "$P/bin/napi-v6/$OSP/$ARN" "$S/bin/napi-v6/$OSP/$ARN"
 
+          # GPU 后端（DirectML / dxcompiler / dxil，Windows 包内共 36.5MB）不进包：建 session 时
+          # 写死 executionProviders: ["cpu"]，它们一次都不会被加载。与 tools/publish-local.sh
+          # 里同一段剔除保持口径一致——两条发版路径（本 workflow / 本地脚本）产出的包必须等价。
+          rm -f "$S/bin/napi-v6/$OSP/$ARN/DirectML.dll" \
+                "$S/bin/napi-v6/$OSP/$ARN/dxcompiler.dll" \
+                "$S/bin/napi-v6/$OSP/$ARN/dxil.dll"
+
           # 运行时解析路径写死在 dist/binding.js：require(`../bin/napi-v6/${platform}/${arch}/...`)
           NEED="$S/bin/napi-v6/$OSP/$ARN/onnxruntime_binding.node"
           if [ ! -f "$NEED" ]; then
@@ -437,8 +444,11 @@ jobs:
           du -sh "$S" "$P"
 
           if command -v zip >/dev/null 2>&1; then
-            # -y：把符号链接存成符号链接（darwin 包内 libonnxruntime.1.dylib 是软链，
-            # 解引用会凭空多出 44MB 重复内容）
+            # -y 保留符号链接。⚠️ 但它在这里**其实不起作用**：实测上游 npm 包里
+            # libonnxruntime.1.dylib 与 libonnxruntime.1.31.1.dylib 是两份逐字节相同的
+            # **真文件**（45,331,560 字节 ×2，不是软链），所以 darwin 包内天生多存一份 45MB。
+            # 0.4.50 起 exe 已内嵌运行时（那条路按 gzip 内容哈希去重，86.8MB 只占 12.1MB），
+            # zip 只剩兼容用途，不值得为一个次要产物去人工造软链、赌用户那边的解压工具。
             ( cd .ort-stage && zip -q -r -y "../xbb-ort-${{ matrix.art }}.zip" onnxruntime-node )
           else
             # Windows runner 无 zip。python zipfile 不保留符号链接，但 win32 目录本就没有软链
