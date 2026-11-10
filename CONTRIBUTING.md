@@ -54,7 +54,10 @@ bun run build:mac-intel
 `bun run build` 是给外部贡献者用的那一条：按当前平台编译、按当前平台定名，你不需要知道
 bun 的 target 三元组。`build:*` 那四条是交叉编译用的显式形式，发布流水线走的也是它们。
 
-构建产物是 Bun 单文件可执行，不需要额外运行时。
+构建产物是 Bun 单文件可执行，不需要额外运行时。唯一的例外是向量旁路：`onnxruntime` 的
+`.node` 原生模块没法内联进单文件，走 `bun run bundle:ort` 单独出 `xbb-ort-<平台>.zip`，
+运行时从 exe 同目录的 `node_modules/` 加载（见 `src/embedder.ts` 的 `loadOrt`）。缺了它
+产品照跑，只是退化成纯词法检索。
 
 这几条都只是 `tools/build.ts` 的薄壳，**不要绕开它直接调 `bun build --compile`**：
 Windows 产物的图标、产品名、发行者、文件版本都写在 PE 资源段里，参数漏一项不会报错，

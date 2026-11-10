@@ -27,7 +27,7 @@ One SQLite file on your own disk. Any MCP client. Memory that outlives sessions,
 
 XiaoBenBen (小本本, "the little notebook") is a memory service that your AI client launches as an MCP stdio server. Memories live in a single SQLite file on your machine. Your AI queries it before answering, writes conclusions into it when a decision is made, and the next session — or the next model, or the next IDE — picks up where you left off.
 
-No account. No login. No telemetry. Works fully offline (only cloud collaboration needs the network). One file to download, no runtime, no system service, no config file to write first.
+No account. No login. No telemetry. Works fully offline (only cloud collaboration needs the network). One executable, no system service, no config file to write first — plus one optional archive if you want vector retrieval (see [Install](#install)).
 
 ## Why this exists
 
@@ -189,7 +189,28 @@ Sixteen products, twenty-one capabilities, every cell scored 0–10 (0 means the
 
 ## Install
 
-Download the single-file executable for your platform from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases). No runtime dependency. After that the binary updates itself from the signed official manifest; what changed in each version is in the [changelog](https://xiaobenben.net/docs/personal-local/changelog/).
+Download your platform's executable from <https://xiaobenben.net> or [Releases](https://github.com/sji-xiaobenben/xiaobenben/releases). It is a single file, but **semantic retrieval needs one extra download** — the ONNX runtime ships as a separate archive because its native `.node` module cannot be linked into a single-file binary.
+
+| Step | File | What it brings |
+|---|---|---|
+| 1 | `xbb-windows-x64.exe` · `xbb-darwin-arm64` · `xbb-linux-x64` | everything else: lexical + timeline + verbatim recall, 23 MCP tools, local service |
+| 2 | `xbb-ort-<platform>.zip` | **semantic (vector) retrieval only** |
+
+Step 2 — unpack it so the runtime ends up in `node_modules/` **next to the executable**:
+
+```bash
+mkdir -p node_modules
+unzip xbb-ort-windows-x64.zip -d node_modules   # → node_modules/onnxruntime-node/
+```
+
+Skip step 2 and nothing breaks: the process starts, every tool works, but retrieval falls back to lexical-only, and the only notice is one line on stderr that your MCP host probably does not show you. That is the whole reason this is spelled out here.
+
+| Platform | Binary works | Vector retrieval |
+|---|:---:|---|
+| Windows x64 · macOS arm64 · Linux x64 | ✅ | ✅ with step 2 |
+| macOS x64 (Intel) | ✅ | ❌ — no runtime archive is published for it, so it is lexical-only with no way to opt in |
+
+Nothing to initialise: the database is created on your first MCP handshake. `xbb home init` is only for non-default locations. After that the binary updates itself from the signed official manifest; what changed in each version is in the [changelog](https://xiaobenben.net/docs/personal-local/changelog/).
 
 ```bash
 xbb --help          # every command, zero side effects
