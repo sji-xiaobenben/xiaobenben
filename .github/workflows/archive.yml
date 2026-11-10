@@ -14,7 +14,8 @@
 #
 # 版本号怎么来：release.yml 读 package.json 的 version，所以**发版前就知道**这次是哪个号
 # （package.json 里那一行就是版本号）。tag 名必须与之完全一致，否则本流水线会失败。
-# tag 仍然建议发完再打：先确认 CDN 上的 stable.json 已经指向新版本，再 git tag -s 锚定。
+# tag 必须用 `git tag -s` 打：本流水线会验 SSH 签名，未签的 tag 直接失败（见「校验 tag 签名」
+# 一步）。顺序上仍然建议发完再打 —— 先确认 CDN 上的 stable.json 已指向新版本，再签。
 # ─────────────────────────────────────────────────────────────────────────────
 name: Archive
 
@@ -54,6 +55,66 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "✓ 归档 $tag"
+
+      # 验签需要 tag 对象本身（不只是它指向的 commit），所以必须 fetch-tags。
+      # persist-credentials: false —— 后面的步骤不推送任何东西，别把 token 留在 .git/config。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # ── tag 签名闸 ────────────────────────────────────────────────────────
+      # 为什么要有这道闸：v0.4.49 就是在没有闸的情况下漏签的一个版本。人对「顺手加个 -s」
+      # 的记忆力不可靠，而漏签的后果不可逆 —— tag 一旦进了公开仓库并被镜像抓走，事后补签
+      # 只能删了重打，GitHub Release 跟着抖一下。所以把「签了没有」变成流水线的准入条件。
+      #
+      # ⚠️ 这里有一个必踩的坑：`git tag -v` 对**未签名**的 annotated tag **不报错、退出码 0**，
+      #    只把 tag 内容打印一遍。拿它当闸门等于没闸。所以判定分三层，缺一不可：
+      #    ① 必须是 annotated tag（lightweight tag 在结构上就没有放签名的地方）
+      #    ② tag 对象里真的有 SSHSIG 块
+      #    ③ 用仓库内的 allowed_signers 验，输出里有 `Good "git" signature`
+      #
+      # 公钥放在 .github/signing-keys/allowed_signers 而不是塞进 secrets：它不是秘密，
+      # 放在仓库里任何人都能自己复现这条校验，README 里也直接指向它。
+      #
+      # 补归档历史版本（workflow_dispatch）不设闸：那些 tag 打在闸门存在之前，用新版规则
+      # 追溯旧账只会把「补存档」这条应急通道也堵死。未签时打 warning，让人知道情况。
+      - name: 校验 tag 签名
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ steps.t.outputs.tag }}
+        run: |
+          set -euo pipefail
+          AS=.github/signing-keys/allowed_signers
+          [ -f "$AS" ] || { echo "::error::仓库里缺 $AS"; exit 1; }
+          git config gpg.format ssh
+          git config gpg.ssh.allowedSignersFile "$AS"
+
+          fail_or_warn() {
+            if [ "$EVENT" = "push" ]; then echo "::error::$1"; exit 1; fi
+            echo "::warning::$1（补归档通道，不阻断）"
+          }
+
+          if [ "$(git cat-file -t "$TAG" 2>/dev/null || echo none)" != "tag" ]; then
+            fail_or_warn "$TAG 不是 annotated tag。lightweight tag 结构上没有签名位，用 git tag -s 重打。"
+            exit 0
+          fi
+
+          if ! git cat-file tag "$TAG" | grep -q '^-----BEGIN SSH SIGNATURE-----$'; then
+            fail_or_warn "$TAG 没有 SSH 签名。补签：git tag -d $TAG && git tag -s $TAG <commit> -F <说明文件>"
+            exit 0
+          fi
+
+          out=$(git tag -v "$TAG" 2>&1) || true
+          if ! printf '%s' "$out" | grep -q 'Good "git" signature'; then
+            fail_or_warn "$TAG 签名验不过（公钥不匹配或被篡改）：$(printf '%s' "$out" | head -5 | tr '\n' ' ')"
+            exit 0
+          fi
+
+          printf '%s\n' "$out" | head -1
+          echo "✓ $TAG 的 SSH 签名有效"
 
       # 刻意**不重新构建**：CDN 上那份产物就是用户手上那一份，从那里回拉才能保证存档与
       # 线上字节一致。重新构建会因为依赖树、时间戳、签名随机数而产出不同字节——那就不是

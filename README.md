@@ -473,7 +473,18 @@ Do not open a public issue for a vulnerability. Report it as described in [`SECU
 
 The public history starts at `v0.4.47`; earlier development history is retained privately by the copyright holder. This repository contains the client only — the server and cloud capabilities are not here and are not open source.
 
-The initial commit and the release tag are SSH-signed and can be verified with `git log --show-signature`.
+Release tags are SSH-signed by the copyright holder, and [`archive.yml`](.github/workflows/archive.yml)
+refuses to publish an archive for a tag whose signature does not verify. The maintainer's public key
+ships in this repository, so there is nothing to look up:
+
+```bash
+git -c gpg.ssh.allowedSignersFile=.github/signing-keys/allowed_signers tag -v v0.4.48
+```
+
+`v0.4.47`, `v0.4.48` and `oss-start` verify against it. `v0.4.49` was tagged before this became a
+gate and carries no signature; every tag after it must pass. Individual commits are not signed —
+the tag is what binds a version number to a signed identity, and that is the guarantee this
+repository offers.
 
 ---
 
