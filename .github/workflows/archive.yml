@@ -146,7 +146,12 @@ jobs:
           set -euo pipefail
           base="${DIST_BASE}/releases/v${VERSION}"
           mkdir -p dl && cd dl
-          if ! curl -fsS --max-time 60 "${base}/SHA256SUMS.txt" -o SHA256SUMS.txt; then
+          # ⚠️ 2026-11-11 实测：这一条原来没有重试，runner 在境外、CDN 在国内，
+          #    第一次请求就撞了 curl 28（60 秒连接超时），直接把整条归档判成「tag 号错了」。
+          #    而同一个 URL 本机亚秒返回 200、Content-Length 778 —— 产物一直是好的。
+          #    下面的文件下载早就加了 --retry-all-errors，唯独这个 778 字节的小清单漏了。
+          if ! curl -fsS --max-time 60 --retry 4 --retry-delay 3 --retry-all-errors \
+               "${base}/SHA256SUMS.txt" -o SHA256SUMS.txt; then
             echo "::error::CDN 上取不到 ${base}/SHA256SUMS.txt"
             echo "::error::两种可能，先分清再动手："
             echo "::error::  ① tag 名与实际发布版本不一致（tag=v${VERSION}，但线上没有这个号）"
