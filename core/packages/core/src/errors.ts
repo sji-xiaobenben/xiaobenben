@@ -8,6 +8,22 @@
 export const ERRORS = {
   E_KEY_INVALID: { zh: "访问密钥无效或已吊销", en: "Access key is invalid or revoked" },
   E_KEY_REVOKED: { zh: "密钥已被撤销", en: "Key has been revoked" },
+  /**
+   * 设备密钥数量达到上限（2026-11-10 引入）。
+   *
+   * 口径：**一个成员在单个组织内**同时可持有的「未过期且未吊销」key 至多 N 个（默认 5）。
+   * 按组织而非按自然人计，是因为限制的口径必须与「用户在 UI 里能看见、能吊销」的集合一致
+   * （`/auth/keys` 列表即 per-org 视角）——否则会出现「说超限了、但我在这个组织里只看到 3 个」
+   * 的死锁，用户无从自救。
+   *
+   * 目的不是防白嫖（按量计费已经防住），而是让「一个 key 后面站着一百个终端用户」这种
+   * 代理转售模式在工程上不可行：转售方要覆盖 N 个客户就得先造 N 个成员身份。
+   * 转售同时违反《使用条款》第四条（禁止转售、代理、出租服务访问权）。
+   */
+  E_KEY_LIMIT: {
+    zh: "设备密钥数量已达上限，请先吊销不用的密钥再签发新的",
+    en: "Device key limit reached; revoke an unused key before issuing a new one",
+  },
   E_ORG_FROZEN: { zh: "组织余额已归零，组织通道只读冻结", en: "Organization balance depleted; org channel is read-only" },
   /**
    * 配额用尽（2026-10-09 启用）。
