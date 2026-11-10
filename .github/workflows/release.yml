@@ -716,8 +716,14 @@ jobs:
           # 依据：单段 PUT 的 OSS 对象 ETag 就是内容 MD5（本项目实测成立的例子：87MB 的 exe
           # 也是单段，ETag 与 stat 里的 Content-Md5 逐位相同），所以拿本地 `md5sum` 就能与
           # 远端 ETag 直接对账，不必把 292MB 再拉回来（跨境下载会拖死发布）。
-          # 若哪天真出现分段上传，ETag 会带 `-N` 后缀 —— 那时**明确跳过**并打印出来，
-          # 而不是悄悄当作通过（宁可少一条断言，不可多一条假绿灯）。
+          #
+          # ⚠️ 2026-11-11 发 0.4.50 时踩到的假红：linux-x64 涨到 100.1MB 后跨过了 OSS 的分片
+          #    阈值，ETag 变成 `00E6…E584-26`（末尾 `-26` = 26 个分片）。原代码判的是
+          #    `case "$rt" in ""|-*)` —— 匹配「以 - 开头」，而分片标记在**末尾**，条件永远不成立，
+          #    于是拿文件整体 md5 去比分片 ETag，必然不等，发布被误判为失败。产物其实完全正确
+          #    （事后拉回整个文件核 sha256，与 stable.json 逐位一致）。
+          #    改法：命中 `*-*` 就认分片、跳过整体 MD5，但**补一条 Content-Length 对账** ——
+          #    少一条断言可以，不能多一条假绿灯，也不能把「传了个别的文件」放过去。
           while read -r _sha f; do
             [ -z "$f" ] && continue
             p="artifacts/${f}"
@@ -726,9 +732,24 @@ jobs:
               fail=1; continue
             fi
             lm=$(md5sum "$p" | cut -d' ' -f1 | tr 'a-f' 'A-F')
-            rt=$(cdn_head "/latest/${f}" | awk '{print $1}' | tr -d '"')
+            lsz=$(stat -c%s "$p")
+            hd=$(cdn_head "/latest/${f}")
+            rt=$(printf '%s' "$hd" | awk '{print $1}' | tr -d '"')
+            rl=$(printf '%s' "$hd" | awk '{print $2}')
+            if [ -z "$rt" ]; then
+              echo "::error::${f} 取不到远端 ETag，无法确认发出去的字节（CDN 未就绪或路径不对）"
+              fail=1; continue
+            fi
+            if [ "$rl" != "$lsz" ]; then
+              echo "::error::${f} 线上 Content-Length ${rl:-空} ≠ 本地 ${lsz}（发出去的不是同一份）"
+              fail=1; continue
+            fi
             case "$rt" in
-              ""|-*) echo "  ! ${f} 远端 ETag 不可作 MD5 比对（${rt:-空}），跳过"; continue ;;
+              *-*)
+                # 分片 ETag 无法还原整体 MD5。长度已对上，这里如实打印「校验降级」而不是装作通过。
+                echo "  ~ ${f} 分片上传（ETag ${rt}），跳过整体 MD5；Content-Length ${rl} 与本地一致"
+                continue
+                ;;
             esac
             if [ "$lm" != "$rt" ]; then
               echo "::error::${f} 构建件 md5 ${lm} ≠ 线上 ETag ${rt}（发出去的不是构建出来的那份）"
