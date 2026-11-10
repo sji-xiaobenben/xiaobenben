@@ -196,15 +196,21 @@ jobs:
         with:
           tag_name: ${{ steps.t.outputs.tag }}
           name: ${{ steps.t.outputs.tag }}
-          # ⚠️ 2026-11-11 发现：这里原来只写 `files: dl/*`（从 CDN 回拉的产物），而下面
-          #    body 里明明白白写着「许可全文见本 Release 附带的 LICENSE」——承诺了却没带。
-          #    AGPL-3.0 第 4 条要求分发时附带许可副本，Release 附件是真实分发通道之一，
-          #    所以这不是文案瑕疵。许可文件在仓库里就有，直接挂上，不必依赖 CDN 上也存一份。
+          # ⚠️ 2026-11-11 发现：这里原来只写 `files: dl/*`，而下面 body 里明明白白写着
+          #    「许可全文见本 Release 附带的 LICENSE」——承诺了却没带，AGPL-3.0 第 4 条
+          #    要求分发时附带许可副本，这不是文案瑕疵。补的时候有个坑：
+          #
+          #    `dl/*` 其实**已经包含** LICENSE / NOTICE / THIRD-PARTY-LICENSES.md ——
+          #    回拉步骤的 for 循环就是 `cd dl` 之后下载到当前目录的。再显式列一遍
+          #    LICENSE 和 NOTICE，等于同名文件传给 softprops 两次：它会并发上传，
+          #    第二次撞 404（update-release-asset）把整个 job 判红，而且 NOTICE 真的丢了。
+          #    实测 0.4.51 首次归档就这么挂的：14 个上传任务里 LICENSE/NOTICE 各两条，
+          #    Release 停在 draft、附件少一个 NOTICE。
+          #
+          #    所以这里只补 dl/ 里没有的那一个。许可文件仍然进了 Release，只是走 dl/* 一条路。
           files: |
             dl/*
-            LICENSE
             LICENSE-Commercial.md
-            NOTICE
           generate_release_notes: true
           body: |
             下载请走 CDN：https://dl.xiaobenben.net/releases/v${{ steps.t.outputs.version }}/
