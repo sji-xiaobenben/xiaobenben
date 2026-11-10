@@ -196,7 +196,15 @@ jobs:
         with:
           tag_name: ${{ steps.t.outputs.tag }}
           name: ${{ steps.t.outputs.tag }}
-          files: dl/*
+          # ⚠️ 2026-11-11 发现：这里原来只写 `files: dl/*`（从 CDN 回拉的产物），而下面
+          #    body 里明明白白写着「许可全文见本 Release 附带的 LICENSE」——承诺了却没带。
+          #    AGPL-3.0 第 4 条要求分发时附带许可副本，Release 附件是真实分发通道之一，
+          #    所以这不是文案瑕疵。许可文件在仓库里就有，直接挂上，不必依赖 CDN 上也存一份。
+          files: |
+            dl/*
+            LICENSE
+            LICENSE-Commercial.md
+            NOTICE
           generate_release_notes: true
           body: |
             下载请走 CDN：https://dl.xiaobenben.net/releases/v${{ steps.t.outputs.version }}/
