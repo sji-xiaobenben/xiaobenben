@@ -160,26 +160,26 @@ Local is not the right answer for everything: for geographically distributed tea
 
 Sixteen products, twenty-one capabilities, every cell scored 0–10 (0 means the mechanism does not exist). Scored October 2026.
 
-| # | Product | Origin | Retrieval<br><sub>41.1%</sub> | Memory structure<br><sub>19.9%</sub> | Delivery &amp; sovereignty<br><sub>24.5%</sub> | Storage &amp; context<br><sub>14.6%</sub> | Overall |
-|---:|---|---|---:|---:|---:|---:|---:|
-| 1 | **XiaoBenBen** | China | **8.78** | **9.37** | **9.70** | **9.86** | **9.28** |
-| 2 | Graphiti | United States | 7.46 | 5.40 | 6.64 | 8.09 | 6.94 |
-| 3 | Zep | United States | 7.68 | 5.40 | 7.15 | 6.14 | 6.87 |
-| 4 | MemOS | China | 7.01 | 4.83 | 6.09 | 7.32 | 6.40 |
-| 5 | Mem0 | United States | 6.80 | 4.83 | 6.22 | 7.09 | 6.31 |
-| 6 | Cognee | Germany | 6.00 | 4.73 | 6.09 | 7.09 | 5.93 |
-| 7 | Letta | United States | 5.85 | 4.90 | 5.43 | 7.05 | 5.73 |
-| 8 | Obsidian | Canada | 4.14 | 4.83 | 8.39 | 6.95 | 5.73 |
-| 9 | QwenWork | China | 5.22 | 5.23 | 6.05 | 7.05 | 5.69 |
-| 10 | DouBao Work | China | 5.65 | 6.17 | 5.43 | 4.80 | 5.58 |
-| 11 | WorkBuddy | China | 5.17 | 4.47 | 6.34 | 6.23 | 5.47 |
-| 12 | Supermemory | United States | 5.27 | 4.23 | 6.46 | 5.32 | 5.36 |
-| 13 | Qoder | China | 3.97 | 6.00 | 5.96 | 6.45 | 5.22 |
-| 14 | Codex | United States | 3.56 | 4.33 | 6.65 | 7.23 | 5.01 |
-| 15 | Kimi Work | China | 4.89 | 4.73 | 4.68 | 5.09 | 4.83 |
-| 16 | ima | China | 4.69 | 2.73 | 4.74 | 4.95 | 4.35 |
+| # | Product | Retrieval | Memory structure | Delivery &amp; sovereignty | Storage &amp; context | Overall |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | **XiaoBenBen** | **8.78** | **9.37** | **9.70** | **9.86** | **9.28** |
+| 2 | Graphiti | 7.46 | 5.40 | 6.64 | 8.09 | 6.94 |
+| 3 | Zep | 7.68 | 5.40 | 7.15 | 6.14 | 6.87 |
+| 4 | MemOS | 7.01 | 4.83 | 6.09 | 7.32 | 6.40 |
+| 5 | Mem0 | 6.80 | 4.83 | 6.22 | 7.09 | 6.31 |
+| 6 | Cognee | 6.00 | 4.73 | 6.09 | 7.09 | 5.93 |
+| 7 | Letta | 5.85 | 4.90 | 5.43 | 7.05 | 5.73 |
+| 8 | Obsidian | 4.14 | 4.83 | 8.39 | 6.95 | 5.73 |
+| 9 | QwenWork | 5.22 | 5.23 | 6.05 | 7.05 | 5.69 |
+| 10 | DouBao Work | 5.65 | 6.17 | 5.43 | 4.80 | 5.58 |
+| 11 | WorkBuddy | 5.17 | 4.47 | 6.34 | 6.23 | 5.47 |
+| 12 | Supermemory | 5.27 | 4.23 | 6.46 | 5.32 | 5.36 |
+| 13 | Qoder | 3.97 | 6.00 | 5.96 | 6.45 | 5.22 |
+| 14 | Codex | 3.56 | 4.33 | 6.65 | 7.23 | 5.01 |
+| 15 | Kimi Work | 4.89 | 4.73 | 4.68 | 5.09 | 4.83 |
+| 16 | ima | 4.69 | 2.73 | 4.74 | 4.95 | 4.35 |
 
-**How to read it.** The four groups are weighted means of the 21 capabilities (retrieval 7 columns, memory structure 4, delivery / portability / sovereignty / cost 6, storage / capacity / context cost 4). Weights sum to 151; the group percentages are those weights divided by 151. Overall is the weighted mean of all 21 cells, which is why the group scores and the total always agree — re-weighting the groups gives you the same total back.
+**How to read it.** The four groups are weighted means of the 21 capabilities (retrieval 7 columns, memory structure 4, delivery / portability / sovereignty / cost 6, storage / capacity / context cost 4), all summing to 151. Overall is the weighted mean of all 21 cells, which is why the group scores and the total always agree — re-weighting the groups gives you the same total back.
 
 **Read a row, not the ranking.** A single number hides the interesting part. Obsidian scores 4.14 on retrieval and 8.39 on delivery, because it is a notebook rather than a memory engine — and if what you want is a notebook, it is the right answer.
 
