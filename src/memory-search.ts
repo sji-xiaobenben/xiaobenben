@@ -544,21 +544,40 @@ export async function searchHybrid(
     const merged: SearchHit[] = [];
     const budget = params.budget ?? 2000;
     const limit = params.limit ?? 5;
-    const usedTokens = lexical.tokensUsed;
-    let tokens = usedTokens;
+    /**
+     * 预算必须按「最终留下什么」重算，不能拿 `lexical.tokensUsed` 当起点。
+     *
+     * 词法管线为了自己那几条已经把这笔账记满了（含链附注与预览），而 RRF 合并后
+     * 榜上第 2 名很可能是一个纯向量命中 —— 起点即满额 ⇒ 第一次判就越界 ⇒ 立刻 break，
+     * 词法第 2~5 名（账早付过）连「已在结果里」那条分支都进不去。
+     * 实测默认预算 2000 / limit 5：纯词法 5 条、混合只剩 1 条 —— **开了向量比不开向量
+     * 少四条**，而返回里还写着 vecStatus=ok。这条伤害是方向性的：省预算省掉的是
+     * 本来已经算出来的答案，用户看到的是「小本本记不住了」。
+     */
+    const chainTokens = (h: SearchHit) => (h.chain ? h.chain.reduce((t, l) => t + estTokens(l.content), 0) : 0);
+    let tokens = 0;
     for (const id of [...rrf.keys()].sort((a, b) => (rrf.get(b) ?? 0) - (rrf.get(a) ?? 0))) {
       // 上限必须放在最前面：以前只在「向量补取」那条分支里查，而词法已命中的走
       // `exist` 分支直接 push —— RRF 排序下向量榜第 1 名会插到词法第 2 名之前，
       // 于是「词法#1 → 向量#1 → 词法#2」把 limit 顶穿（实测 limit 2 返回 3、5 返回 6）。
       if (merged.length >= limit) break;
       const exist = byId.get(id);
-      if (exist) { merged.push(exist); continue; }
+      if (exist) {
+        // 词法命中也要过闸：重算之后它不再是"已付费"，而是候选之一。
+        // 第一条无条件放行（和词法管线一致 —— 有命中就绝不返回空）。
+        const tk = estTokens(exist.content) + chainTokens(exist);
+        if (tokens + tk > budget && merged.length > 0) break;
+        tokens += tk;
+        merged.push(exist);
+        continue;
+      }
       const m = db.prepare(
         "SELECT id, content, type, occurred_at, session_id, device_id, source_ref FROM memories WHERE id = ? AND deleted_at IS NULL AND status = 'active'",
       ).get(id) as { id: string; content: string; type: string; occurred_at: string | null; session_id: string | null; device_id: string | null; source_ref: string | null } | undefined;
       if (!m) continue;
       const tk = estTokens(m.content);
-      if (tokens + tk > budget) break;
+      // 与词法管线同一条规矩：第一条无条件放行，别让"预算不够"变成"什么都没搜到"。
+      if (tokens + tk > budget && merged.length > 0) break;
       tokens += tk;
       merged.push({
         id: m.id, content: maskSecrets(m.content), type: m.type,
@@ -572,6 +591,12 @@ export async function searchHybrid(
     // 7 月记的是"电饭煲"）。漏在这里，等于多跳链在最需要它的那条路径上断掉。
     const lexIds = new Set(lexical.hits.map((h) => h.id));
     let linkedPreview = lexical.linkedPreview;
+    // 词法那批预览是它自己按预算挑出来的，重算后这笔账要补回来 ——
+    // 否则 tokensUsed 少报一整块，上层按它分配后续预算时会被反噬。
+    // 顺带按剩余额度裁一次：合并后条目可能变多，原来够用的预览现在未必够。
+    const lexPreviewRoom = Math.max(0, Math.floor((budget - tokens) / PREVIEW_TOKEN_COST));
+    if (linkedPreview.length > lexPreviewRoom) linkedPreview = linkedPreview.slice(0, lexPreviewRoom);
+    tokens += linkedPreview.length * PREVIEW_TOKEN_COST;
     const extraIds = merged.filter((h) => !lexIds.has(h.id)).map((h) => h.id);
     if (extraIds.length) {
       const seen = new Set(merged.map((h) => h.id));

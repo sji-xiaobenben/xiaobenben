@@ -364,6 +364,35 @@ describe("混合检索：预算闸覆盖预览，tokensUsed 不越界", () => {
   });
 });
 
+describe("混合检索：开向量不能让结果变少", () => {
+  function setEmbedding(id: string, v: Float32Array) {
+    db.prepare("UPDATE memories SET embedding = ?, vec_model = ? WHERE id = ?")
+      .run(Buffer.from(v.buffer.slice(0)), "bge-small-zh-v1.5/int8", id);
+  }
+
+  test("预算被词法吃满时，纯向量条目插进榜中不该把后面的词法命中挤掉", async () => {
+    // 每条 ~100 字：单条约 103 token，5 条必然顶到 500 之上 —— 就是要制造
+    // 「词法管线已经把这笔预算记满了」这个前提，而这正是线上出事的形状。
+    const filler = "占位内容".repeat(22);
+    for (let i = 0; i < 5; i++) await mem(`曜石标定-第${i}次记录${filler}`);
+    // 正文里没有任何查询词 ⇒ 词法必定搜不到，只能靠向量
+    const vecOnly = await mem(`那台老设备的保养周期该重算了${filler}`);
+    setEmbedding(vecOnly, new Float32Array(512).fill(0.5));
+
+    const v = new Float32Array(512).fill(0.05);
+    const params = { terms: ["曜石标定"], limit: 5, budget: 500 };
+    const lexOnly = searchMemory(db, params);
+    const r = await searchHybrid(db, async () => v, params);
+
+    // 修复前：lexical.tokensUsed≈412 被当成起点，向量条目 103 token 一判就越界 ⇒
+    // 直接 break，词法第 2 名之后全部丢失，混合只剩 1 条。
+    expect(r.vecStatus).toBe("ok");
+    expect(r.hits.length).toBeGreaterThanOrEqual(lexOnly.hits.length);
+    expect(r.hits.some((h) => h.id === vecOnly)).toBe(true); // 向量确实带来了新东西
+    expect(r.tokensUsed).toBeLessThanOrEqual(params.budget);
+  });
+});
+
 describe("混合检索：向量降级必须有信号", () => {
   test("模型未就绪时结果带 vecStatus=not-ready，不是一份看起来正常的词法结果", async () => {
     await mem("砚台维护-未就绪场景");
