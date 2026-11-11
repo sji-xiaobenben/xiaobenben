@@ -527,39 +527,107 @@ export function migrateV10(db: Database): void {
   if (v.user_version < 10) db.exec("PRAGMA user_version = 10");
 }
 
+/** 目标结构版本：所有 migrateV* 收敛到的终点。healthz 靠它判断「服务活着但库还是旧的」。 */
+export const SCHEMA_TARGET_VERSION = 10;
+
+/** 拿不到写锁时的总尝试次数。每次尝试内部还会各自等 `busy_timeout`（默认 3s）。 */
+const BUSY_ATTEMPTS = Math.max(1, Number(process.env.XBB_SCHEMA_RETRIES ?? 3));
+
+/**
+ * 结构升级拿不到写锁 —— 必须给人话，不能把 `SQLiteError: database is locked` 甩给用户。
+ *
+ * 2026-11-11 用户反馈（官网 /feedback，Win11 + serve + 两个 MCP 同时开着）：
+ * 0.4.49 升 0.4.51 后首次 `xbb ingest` 只吐了一句 Bun 堆栈，没有任何「接下来怎么办」，
+ * 用户只能自己猜出「先全停再重跑」。
+ */
+export class SchemaBusyError extends Error {
+  constructor(detail: string) {
+    super(
+      "另一个小本本进程正在写库，结构升级没能拿到写锁。\n" +
+        `  底层原因：${detail}\n` +
+        "  怎么处理：先执行 `xbb stop` 把所有 xbb 进程停下（含 AI 客户端里的 mcp），再重跑刚才的命令；\n" +
+        "            升级完成后再启动 AI 客户端即可。库里的数据不会丢，升级是幂等的。",
+    );
+    this.name = "SchemaBusyError";
+  }
+}
+
+export function schemaVersion(db: Database): number {
+  return (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+}
+
+const isBusy = (e: unknown): boolean =>
+  /SQLITE_BUSY|database is locked/i.test(e instanceof Error ? e.message : String(e));
+
+/** 同步退避睡眠：迁移路径是同步的，只能用同步等待；Atomics.wait 不烧 CPU。 */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 /**
  * 建库/升级入口。**全部 DDL 必须在一个事务里**。
  *
- * 为什么：下面每一步都是几十条 `db.exec`，不包事务时每条 DDL 都是一个独立隐式事务、
+ * 为什么包事务：下面每一步都是几十条 `db.exec`，不包事务时每条 DDL 都是一个独立隐式事务、
  * 各自 fsync。实测新建库要 310 ms，其中九成耗在提交次数上；包成一个事务后只剩一次提交。
- * 这不只是测试变快——真实用户第一次启动、以及任何需要迁移的升级，付的都是这笔钱。
  *
- * 为什么是 `BEGIN`（deferred）而不是 `BEGIN IMMEDIATE`：deferred 只在第一条写语句时取锁，
- * 与原来「每条 DDL 各取一次锁」的行为一致但窗口更小；用 IMMEDIATE 则会在 open 的瞬间就抢写锁，
- * 而 `xbb serve` 与各客户端的 `xbb mcp` 可能同时打开同一个库，那会让并发启动互相等待。
+ * ⚠️ 为什么必须是 `BEGIN IMMEDIATE`，**不能**是 `BEGIN`（2026-11-11 实测修正）：
+ *
+ * 这里原来写的是 deferred，理由是「IMMEDIATE 会在 open 瞬间抢写锁，让并发启动互相等待」。
+ * 这个取舍写反了 —— 等待恰恰是我们要的，立刻失败才是灾难：
+ *
+ *   deferred 事务在第一条 DDL 前已经执行了一堆读（`PRAGMA table_info`、查 FTS 表…），
+ *   手里握着一个**读快照**。此时如果 serve / 采集子进程 / 另一个 MCP 提交了一笔写，
+ *   快照即过期；再去 `ALTER TABLE` 需要把读事务升级成写事务，SQLite 判定快照已不可用，
+ *   **直接返回 SQLITE_BUSY，根本不调用 busy 处理器** —— `PRAGMA busy_timeout = 3000` 完全失效。
+ *
+ * 三组对照实测（同库同条件）：
+ *   · `BEGIN`            + 别人先提交     → 0ms 失败 database is locked（3000ms 超时形同虚设）
+ *   · `BEGIN IMMEDIATE`  + 同条件         → 4ms 成功
+ *   · `BEGIN IMMEDIATE`  + 对方持锁 1.2s  → 861ms 等到锁后成功
+ *
+ * 代价实测：118MB 真库完整跑一遍是 58ms。也就是说「并发启动多等 58ms」换掉「升级时随机失败」，
+ * 这个方向不存在争议。再不济还有下面这层重试兜底。
  *
  * 回滚失败不再抛：SQLite 在部分错误下会自动回滚，此时 ROLLBACK 会报「no transaction is active」，
- * 盖掉真正的错误原因。原错误必须原样抛出。
+ * 盖掉真正的错误原因。原错误必须原样抛出（由外层判断是否属于可重试的忙）。
  */
 export function initSchemaV2(db: Database): void {
-  db.exec("BEGIN");
-  try {
-    initSchema(db);
-    migrateV2(db);
-    migrateV4(db);
-    migrateV5(db);
-    migrateV6(db);
-    migrateV7(db);
-    migrateV8(db);
-    migrateV9(db);
-    migrateV10(db);
-    db.exec("COMMIT");
-  } catch (e) {
+  const before = schemaVersion(db);
+  for (let attempt = 1; ; attempt++) {
     try {
-      db.exec("ROLLBACK");
-    } catch {
-      /* 已自动回滚 */
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        initSchema(db);
+        migrateV2(db);
+        migrateV4(db);
+        migrateV5(db);
+        migrateV6(db);
+        migrateV7(db);
+        migrateV8(db);
+        migrateV9(db);
+        migrateV10(db);
+        db.exec("COMMIT");
+      } catch (e) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* 已自动回滚 */
+        }
+        throw e;
+      }
+      break; // 成功
+    } catch (e) {
+      if (!isBusy(e)) throw e;
+      // 写锁被占满整个 busy_timeout：退避后再来。整段迁移是幂等的，重跑安全。
+      if (attempt >= BUSY_ATTEMPTS) {
+        throw new SchemaBusyError(e instanceof Error ? e.message : String(e));
+      }
+      sleepSync(200 * attempt);
     }
-    throw e;
   }
+
+  // 结构真的变了才说话 —— 而且走 stderr：MCP 模式下 stdout 是 JSON-RPC 帧流，
+  // 往里写一个字符就能让宿主解析失败。这条日志每个进程开库时都可能打印。
+  const after = schemaVersion(db);
+  if (after > before) console.error(`[xbb] 库结构已升级 v${before} → v${after}`);
 }

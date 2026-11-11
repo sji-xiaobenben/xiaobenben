@@ -82,6 +82,11 @@ export class PersonalStore {
     this.db = db;
   }
 
+  /** 库结构版本（PRAGMA user_version）。healthz 用它回答「服务活着，但库是新的吗」。 */
+  schemaVersion(): number {
+    return (this.db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  }
+
   /** 打开（必要时创建）个人库。默认 ~/.xiaobenben/memory.db（统一），测试传显式路径 */
   static open(path?: string, opts: { force?: boolean } = {}): PersonalStore {
     // 无显式路径 ⇒ 走判定闸：库不在配置指定的位置时**抛错，绝不静默新建**。

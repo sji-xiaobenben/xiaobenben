@@ -8,7 +8,7 @@
 import { programDir, DbMissingError } from "./home";
 import { runMcp } from "./mcp";
 import { PersonalStore } from "./store";
-import { ORG_PERSONAL } from "./schema";
+import { ORG_PERSONAL, SchemaBusyError } from "./schema";
 import { startServe, lastRequestAtMs } from "./serve";
 import { startTray, type TrayHandle, type TrayState } from "./tray";
 import { ensureToastAppId } from "./notify";
@@ -92,6 +92,13 @@ if (cmd === "serve") {
       console.error(e.message);
       console.error("\n服务没有起来 —— 这是刻意的：宁可起不来，也不要在空库上继续用下去。\n");
       process.exit(2);
+    }
+    // 结构升级拿不到写锁：给「怎么办」，不要给 Bun 堆栈
+    if (e instanceof SchemaBusyError) {
+      console.error("\n❌ 小本本未启动：数据库正在被别的进程写入\n");
+      console.error(e.message);
+      console.error("\n服务没有起来 —— 这是刻意的：结构没升级完就起服务，用户会以为升级已经生效。\n");
+      process.exit(3);
     }
     throw e;
   }
@@ -558,7 +565,19 @@ if (cmd === "serve") {
   // 为什么要有这个命令：MCP 拿不到对话流，靠 AI 每轮上报实测不可靠；
   // 而各家客户端本来就把完整会话落在本机盘上，引擎自己去读才是完整性的唯一保证。
   const { collectClientSessions, ingestStatus, layerBalance, probeSources, ALL_SOURCES } = await import("./ingest");
-  const store = PersonalStore.open();
+  let store: PersonalStore;
+  try {
+    store = PersonalStore.open();
+  } catch (e) {
+    // 这里以前直接裸抛：用户升级后撞上写锁抢占，看到的只有 `SQLiteError: database is locked`
+    // 加一段 Bun 内部堆栈（2026-11-11 官网反馈原文）。加锁重试已在 initSchemaV2 内做，
+    // 走到这里说明锁被占了整整几轮 —— 只能明确告诉他要先停掉谁。
+    if (e instanceof SchemaBusyError) {
+      console.error(`\n❌ 采集没能开始：${e.message}\n`);
+      process.exit(3);
+    }
+    throw e;
+  }
 
   // `xbb ingest on|off`：与页面上的「不要自动整理」写同一份落盘开关。
   // 常驻服务每轮开跑前都会重读它（见 ingest-job.ts 的 tick），所以这里关掉后最迟下一轮生效。

@@ -106,7 +106,17 @@ export async function startServe(store: PersonalStore, port = 17630, opts: { ing
       // 页面每 5 秒轮询一次采集状态：那不算「有人在用」，否则空闲闸永远等不到窗口
       if (url.pathname !== "/api/ingest") lastRequestAt = Date.now();
       if (url.pathname === "/healthz") {
-        return Response.json({ ok: true, service: "xiaobenben", ts: new Date().toISOString() });
+        // 必须带 version 与 schema：这两个数是「升级到底生效没有」的唯一可核验答案。
+        // 2026-11-11 用户反馈就是被这个盲区坑的 —— 磁盘上 exe 已换新、结构迁移失败，
+        // 但仍在跑的旧进程 healthz 照样回 {ok:true}，用户以为升级已完整生效。
+        // 排查时一句 `curl 127.0.0.1:17630/healthz` 就能看出「服务活的，但库还是 v5」。
+        return Response.json({
+          ok: true,
+          service: "xiaobenben",
+          version: BUILD_VERSION,
+          schema: store.schemaVersion(),
+          ts: new Date().toISOString(),
+        });
       }
       if (url.pathname === "/stats") {
         return Response.json({ ok: true, db: defaultDbPath(), port, ...store.stats() });
