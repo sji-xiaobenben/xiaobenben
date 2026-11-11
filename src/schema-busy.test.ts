@@ -163,7 +163,7 @@ describe("initSchemaV2 的写锁行为", () => {
     await makeV5(p);
     // 重试次数压到 1，避免测试白等十几秒；busy_timeout 也调小，只验证「放弃时怎么说」
     process.env.XBB_SCHEMA_RETRIES = "1";
-    const { initSchemaV2 } = await import("./schema?retry=1");
+    const { initSchemaV2 } = await import("./schema");
     const child = holdLock(p, 2500);
     await Bun.sleep(250);
 

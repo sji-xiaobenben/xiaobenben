@@ -530,8 +530,12 @@ export function migrateV10(db: Database): void {
 /** 目标结构版本：所有 migrateV* 收敛到的终点。healthz 靠它判断「服务活着但库还是旧的」。 */
 export const SCHEMA_TARGET_VERSION = 10;
 
-/** 拿不到写锁时的总尝试次数。每次尝试内部还会各自等 `busy_timeout`（默认 3s）。 */
-const BUSY_ATTEMPTS = Math.max(1, Number(process.env.XBB_SCHEMA_RETRIES ?? 3));
+/** 拿不到写锁时的总尝试次数。每次尝试内部还会各自等 `busy_timeout`（默认 3s）。
+ *  读取时机放在调用时而非模块加载时：测试要能把重试压到 1 次而不必搞第二个模块实例。 */
+function busyAttempts(): number {
+  const n = Number(process.env.XBB_SCHEMA_RETRIES ?? 3);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3;
+}
 
 /**
  * 结构升级拿不到写锁 —— 必须给人话，不能把 `SQLiteError: database is locked` 甩给用户。
@@ -619,7 +623,7 @@ export function initSchemaV2(db: Database): void {
     } catch (e) {
       if (!isBusy(e)) throw e;
       // 写锁被占满整个 busy_timeout：退避后再来。整段迁移是幂等的，重跑安全。
-      if (attempt >= BUSY_ATTEMPTS) {
+      if (attempt >= busyAttempts()) {
         throw new SchemaBusyError(e instanceof Error ? e.message : String(e));
       }
       sleepSync(200 * attempt);
