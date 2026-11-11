@@ -869,7 +869,19 @@ export async function runMcp(): Promise<void> {
     process.stderr.write(`[xbb] MCP 云端模式: ${cfg!.apiBase} org=${cb.orgLabel}（${cfg!.orgId}）\n`);
   }
   const { warmupEmbedder } = await import("./embedder");
-  if (!fault) warmupEmbedder(); // 首启静默下载+后台加载，不阻塞 MCP；降级模式下模型也不知该放哪，别下
+  if (!fault) {
+    // 首启静默下载+后台加载，不阻塞 MCP；降级模式下模型也不知该放哪，别下。
+    // 就绪后顺手把「有正文没向量」的行补上：写入路径那条 fire-and-forget 的向量回填
+    // 一旦错过就永不自愈，而检索侧根本看不见这些行（见 embed-backfill.ts）。
+    // 云端模式下向量在服务端算，本地库不该被顺手改动。
+    const localDb = backend.kind === "local" ? (backend as import("./cloud").LocalBackend).db : null;
+    warmupEmbedder(() => {
+      if (!localDb) return;
+      void import("./embed-backfill")
+        .then((m) => m.backfillEmbeddings(localDb))
+        .catch(() => { /* 双降级红线：回填失败绝不影响会话 */ });
+    });
+  }
 
   // 更新检测：快照过期才打网络，且有硬预算——超预算就带旧快照继续，
   // 绝不让 CDN 抖动推迟 MCP 握手（握手里程碑失败 = 整个会话用不了记忆）。

@@ -33,7 +33,8 @@ for (const f of ["memory.db", "memory.db-shm", "memory.db-wal", ".initialized"])
 }
 
 const child = spawn(bun, [`${root}src/index.ts`, "serve", "--headless"], {
-  env: { ...process.env, XBB_HOME: `${root}.smoke-home`, PORT: String(PORT) },
+  // XBB_WARMUP=0：冒烟验的是端点与来源闸，不该顺带下 24MB 模型（CI 无网会挂在那儿等）
+  env: { ...process.env, XBB_HOME: `${root}.smoke-home`, PORT: String(PORT), XBB_WARMUP: "0" },
   stdio: ["ignore", "pipe", "pipe"],
 });
 let log = "";

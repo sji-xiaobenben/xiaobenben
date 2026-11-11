@@ -56,6 +56,8 @@ const req = (method: string, path: string, host: string, extra = "", body = "") 
 describe("本地服务的来源闸：每条路由都要过", () => {
   beforeAll(async () => {
     process.env.XBB_SEED = "0"; // 不播种默认约束，测试不该写业务数据
+    // 预热会去下 24MB 模型并解压 ORT：单元测试要的是不联网、不落缓存
+    process.env.XBB_WARMUP = "0";
     dir = mkdtempSync(join(tmpdir(), "xbb-serve-guard-"));
     store = PersonalStore.open(join(dir, "memory.db"));
     // startServe 是 async：不 await 拿到的是 Promise，`.port` 会是 undefined

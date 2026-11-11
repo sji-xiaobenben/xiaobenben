@@ -92,6 +92,20 @@ export async function startServe(store: PersonalStore, port = 17630, opts: { ing
     const { seedDefaultConstraints } = await import("./seed");
     await seedDefaultConstraints(store);
   }
+  // 向量预热 + 存量回填。
+  // 以前 serve 完全不引用 embedder —— 这个常驻进程里模型永远是冷的，而它恰恰是
+  // 「开机就在跑、可能连跑几天」的那一个；spawn 才几百毫秒的 MCP 进程反而预热了。
+  // 回填放在这里最稳：用户不打开任何 AI 客户端，缺向量的行也能被补上。
+  // XBB_WARMUP=0 给测试/CI 留出口：这里一旦预热就会去下 24MB 模型，
+  // 而单元测试要的是「不联网、不落缓存」。
+  if (process.env.XBB_WARMUP !== "0") {
+    const { warmupEmbedder } = await import("./embedder");
+    warmupEmbedder(() => {
+      void import("./embed-backfill")
+        .then((m) => m.backfillEmbeddings(store.db))
+        .catch(() => { /* 双降级：回填失败不影响服务 */ });
+    });
+  }
   return Bun.serve({
     hostname: "127.0.0.1",
     port,
