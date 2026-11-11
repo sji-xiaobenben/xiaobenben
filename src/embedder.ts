@@ -24,6 +24,13 @@ import { releaseEmbeddedOrt } from "./ort-embedded";
 export const EMBED_DIM = 512;
 export const VEC_MODEL = "bge-small-zh-v1.5/int8";
 
+/**
+ * 检索侧遇到「模型正在加载」时最多等多久（毫秒）。
+ * 常态下加载 <500ms（ORT 已解压过），等一等远好过白降级一次；
+ * 首次冷启要解压 + 下 24MB，那种情况本来就该降级，不能挂在工具调用路径上。
+ */
+const EMBED_WAIT_MS = 800;
+
 /** 模型清单（sha256 与 server 侧一致；多源：hf-mirror → huggingface） */
 export const BGE_MANIFEST: ModelManifest = {
   name: "bge-small-zh-v1.5-int8",
@@ -409,8 +416,32 @@ class Embedder {
     return this.loading;
   }
 
-  /** 单条 embed：失败返回 null（双降级） */
+  /**
+   * 单条 embed：失败返回 null（双降级）。
+   *
+   * 加载窗口内**等一小会儿**再判生死。MCP 客户端每开一次连接就 spawn 一个新进程，
+   * 而 warmup 是 fire-and-forget（不能让 1 秒的解压排在 initialize 响应前面）——
+   * 于是「连上就问」这件事必然撞在模型加载窗口里。实测：连上 0ms 检索 = not-ready，
+   * 500ms 就 ok 了；而老实现看到 status !== "ready" 直接 return null，既不等也不触发加载。
+   * 代价是每次首问都白降级一次，而 AI 拿到降级结果会直接对用户说"没找到相关记录"。
+   *
+   * 800ms 上限：够覆盖「ORT 已解压过」的常态（<500ms），又不至于把首次冷启
+   * （解压约 1 秒 + 模型 24MB 下载）挂在工具调用路径上 —— 那种情况本来就该降级。
+   */
   async embed(text: string): Promise<Float32Array | null> {
+    if (this.status === "loading" && this.loading) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<boolean>((r) => {
+        timer = setTimeout(() => r(false), EMBED_WAIT_MS);
+        // 不让这个定时器单独吊住进程退出（CLI 一次性命令会等它）
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        await Promise.race([this.loading, timeout]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
     if (this.status !== "ready" || !this.session || !this.vocab || !this.ort) return null;
     try {
       const tokens = basicTokenize(text).flatMap((w) => wordpiece(w, this.vocab!, this.unk)).slice(0, 510);
@@ -442,11 +473,16 @@ class Embedder {
 
 export const embedder = new Embedder();
 
-/** 惰性后台加载（serve/mcp 启动时 fire，不阻塞任何功能） */
-export function warmupEmbedder(): void {
+/**
+ * 惰性后台加载（serve/mcp 启动时 fire，不阻塞任何功能）。
+ * `onReady` 在模型真正可用后触发（失败不触发）—— 目前只有存量向量回填挂在这里。
+ */
+export function warmupEmbedder(onReady?: () => void): void {
   void embedder.load().then((ok) => {
-    if (ok) process.stderr.write(`[xbb] 向量就绪: ${VEC_MODEL} (${EMBED_DIM}d)\n`);
-    else process.stderr.write(`[xbb] 向量不可用，纯词法检索（双降级）\n`);
+    if (ok) {
+      process.stderr.write(`[xbb] 向量就绪: ${VEC_MODEL} (${EMBED_DIM}d)\n`);
+      try { onReady?.(); } catch { /* 回调自己的问题不该污染加载结果 */ }
+    } else process.stderr.write(`[xbb] 向量不可用，纯词法检索（双降级）\n`);
   });
 }
 
