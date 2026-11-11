@@ -394,17 +394,20 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
         const r = (await searchHybrid(db(), () => embedder.embed(semantic), a)) as {
           hits?: Array<{ id: string; payloads?: unknown }>;
           vecNote?: string;
+          lexNote?: string;
         };
         // 载荷提货单（只给引用与描述、不给字节）。无载荷的命中**不出现 payloads 键**。
         if (r?.hits?.length) {
           const { attachPayloads } = await import("./payloads");
           attachPayloads(db(), r.hits);
         }
-        // 向量降级说明必须送到 AI 眼前。少了这一句，「语义通道没跑」和「库里真没这段记忆」
-        // 对它来说完全一样 —— 它会直接用肯定的语气告诉用户「没有相关记录」。
-        if (r.vecNote) {
-          const { vecNote, ...rest } = r;
-          return { ...rest, note: vecNote };
+        // 降级说明必须送到 AI 眼前。少了这一句，「语义通道没跑 / 词没对上被拆词兜底」和
+        // 「库里真没这段记忆」对它来说完全一样 —— 它会用肯定的语气告诉用户「没有相关记录」，
+        // 或者把字面相近的邻居当答案。两条说明可能同时存在（向量降级 + 词法回退），合并成一条。
+        const note = [r.vecNote, r.lexNote].filter(Boolean).join("；");
+        if (note) {
+          const { vecNote, lexNote, ...rest } = r as { vecNote?: string; lexNote?: string };
+          return { ...rest, note };
         }
         return r as object;
       }),

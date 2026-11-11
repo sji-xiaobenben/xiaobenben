@@ -126,6 +126,13 @@ export interface SearchResult {
   vecStatus?: "ok" | "empty-index" | "not-ready" | "error";
   /** 降级原因的人话说明，直接透传给 AI（非降级时不带）。 */
   vecNote?: string;
+  /**
+   * 词法侧的降级说明（n-gram 回退生效时才带）。
+   *
+   * 和 vecNote 同一个理由：AI 分不清「库里真没有」和「词没对上，我给你拆词凑了凑」。
+   * 后者必须说出来 —— 否则它会把一堆字面相近的邻居当成答案。
+   */
+  lexNote?: string;
 }
 
 /** 估算一条记忆的 token 占用（中文 ~1 字 ≈ 1 token，保守 + 头部开销） */
@@ -147,6 +154,51 @@ function normTime(t: string): string {
   if (isNaN(d.getTime())) return t;
   const p = (n: number, l = 2) => String(n).padStart(l, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** 一条记忆的「有效时间」：有事件时间用事件时间，没有就用录入时间。 */
+function effTime(m: { occurred_at: string | null; created_at: string }): string {
+  return normTime(m.occurred_at ?? m.created_at);
+}
+
+/**
+ * 时间窗判定的两个边界。**上界补 "z"** 是「包含整天」的老技巧：日期串
+ * `2026-11-11` 与时刻串 `2026-11-11 18:00:00` 在第 11 位分大小，空格(0x20) < 'z'(0x7A)，
+ * 所以补 z 之后当天任意时刻都算 ≤ 上界；若上界本身带时刻，`18:00` < `18:00z` 同样成立
+ * （':' 0x3A < 'z'），也包含该时刻内的秒级尾数。抽出来是因为**词法路与向量路必须用
+ * 同一套边界**，两份实现迟早漂移。
+ */
+function timeWindow(from?: string, to?: string): { lo: string | null; hi: string | null } {
+  return { lo: from ? normTime(from) : null, hi: to ? normTime(to) + "z" : null };
+}
+
+function withinWindow(t: string | null, lo: string | null, hi: string | null): boolean {
+  if (t == null) return false;
+  if (lo && t < lo) return false;
+  if (hi && t > hi) return false;
+  return true;
+}
+
+/** 只对含中日韩统一表意文字的词做 n-gram 拆分（纯 ASCII 拆出来全是噪音） */
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff]/;
+
+/**
+ * 把中文复合词拆成相邻 2-gram：`发版流水线` → 发版 / 版流 / 流水 / 水线。
+ *
+ * 为什么要这一步：倒排（memory_terms）是 `term = ?` 的**精确等值**，而写入侧 AI 给的
+ * terms 是 2-4 字短词（实测占 71%），查询侧给的却是「发版流水线」「怎么配置」这类复合词。
+ * 一个 5 字复合词在倒排里一条都对不上；FTS 的 trigram 又要求三字连续滑窗全部命中，
+ * 复合词同样落空 ⇒ 词法三路全空，向量路（无相似度下限）接管整份结果，返回一堆语义邻居
+ * 且**不给任何信号**。576 条库里 100% 复现，与库大小无关。
+ *
+ * 中文里二字词是有意义的原子粒度，命中「发版」就能捞出真实发版记录 —— 拆词比不拆强得多。
+ */
+function bigramsOf(term: string): string[] {
+  const ch = [...term];
+  if (ch.length < 3 || !CJK_RE.test(term)) return [];
+  const out: string[] = [];
+  for (let i = 0; i + 1 < ch.length; i++) out.push(ch[i]! + ch[i + 1]!);
+  return out;
 }
 
 /**
@@ -262,10 +314,39 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     }
   }
 
+  // ── 路径 D：长词降级（中文 2-gram 回退）──
+  // 只在 A/B/C 三路**全空**时启用 —— 有任一命中就说明词对上了，再拆词只会把噪音掺进
+  // 本来干净的结果里。这是纯粹的兜底路径，不参与正常排序。
+  // 命中项在 matched 里带 `~` 前缀，打分时半权（见下方融合），回包时经 lexNote 明说。
+  let ngGrams: string[] = [];
+  if (!ftsScores.size && !termScores.size && !entityScores.size) {
+    ngGrams = [...new Set(terms.flatMap(bigramsOf))];
+    if (ngGrams.length) {
+      const qGram = db.prepare("SELECT memory_id AS id, term FROM memory_terms WHERE term = ? LIMIT 500");
+      for (const g of ngGrams) {
+        const rows = qGram.all(g) as Array<{ id: string; term: string }>;
+        for (const row of rows) {
+          let e = termScores.get(row.id);
+          if (!e) {
+            e = { terms: new Set() };
+            termScores.set(row.id, e);
+          }
+          e.terms.add("~" + g);
+        }
+      }
+      // 一条都没捞到就别拿空的 gram 列表去算 df（白跑 5 次 SQL）
+      if (!termScores.size) ngGrams = [];
+    }
+  }
+
   // ── IDF 加权融合 ──
   const total = (db.prepare("SELECT COUNT(*) AS c FROM memories WHERE deleted_at IS NULL AND status != 'forgotten'").get() as { c: number }).c || 1;
-  const dfRows = terms.length
-    ? db.prepare("SELECT term, COUNT(*) AS c FROM memory_terms WHERE term IN (" + placeholders + ") GROUP BY term").all(...terms) as Array<{ term: string; c: number }>
+  // df 必须把回退用的 gram 一并算进来：gram 若查不到 df 就会落到 `?? 1`（=最稀有的词），
+  // 半权之后仍可能压过真正的词群命中 —— 兜底路径不该赢过正路。
+  const dfTerms = ngGrams.length ? [...new Set([...terms, ...ngGrams])] : terms;
+  const dfPh = dfTerms.map(() => "?").join(",");
+  const dfRows = dfTerms.length
+    ? db.prepare("SELECT term, COUNT(*) AS c FROM memory_terms WHERE term IN (" + dfPh + ") GROUP BY term").all(...dfTerms) as Array<{ term: string; c: number }>
     : [];
   const df = new Map<string, number>();
   for (const r of dfRows) df.set(r.term, r.c);
@@ -283,7 +364,9 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     const ts = termScores.get(id);
     if (ts) for (const t of ts.terms) {
       if (!matched.has(t)) {
-        score += 1.0 * Math.log(1 + total / Math.max(1, df.get(t) ?? 1));
+        // `~` 前缀 = n-gram 回退命中，只给半权：拼出来的字面巧合不等于词群命中
+        const ng = t.startsWith("~");
+        score += (ng ? 0.5 : 1.0) * Math.log(1 + total / Math.max(1, df.get(ng ? t.slice(1) : t) ?? 1));
         matched.add(t);
       }
     }
@@ -301,15 +384,17 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const metaById = new Map<string, { tags: string | null; entities: string | null }>();
   let tokensUsed = 0;
   const loadMem = db.prepare(`
-    SELECT m.id, m.content, m.type, m.occurred_at, m.session_id, m.device_id, m.source_ref, m.superseded_by, m.tags, m.entities, d.name AS device_name
+    SELECT m.id, m.content, m.type, m.occurred_at, m.created_at, m.session_id, m.device_id, m.source_ref, m.superseded_by, m.tags, m.entities, d.name AS device_name
     FROM memories m LEFT JOIN devices d ON d.id = m.device_id
     WHERE m.id = ? AND m.deleted_at IS NULL
   `);
   const qSuperseded = db.prepare("SELECT id, superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
+  const win = timeWindow(params.occurredFrom, params.occurredTo);
+  const hasWindow = win.lo != null || win.hi != null;
   for (const s of scored) {
     if (hits.length >= limit) break;
     let m = loadMem.get(s.id) as {
-      id: string; content: string; type: string; occurred_at: string | null; session_id: string | null;
+      id: string; content: string; type: string; occurred_at: string | null; created_at: string; session_id: string | null;
       device_id: string | null; source_ref: string | null; superseded_by: string | null; device_name: string | null;
       tags: string | null; entities: string | null;
     } | undefined;
@@ -326,8 +411,20 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
       if (!hm) continue;
       m = hm;
     }
-    if (params.occurredFrom && (!m.occurred_at || m.occurred_at < params.occurredFrom)) continue;
-    if (params.occurredTo && (!m.occurred_at || m.occurred_at > params.occurredTo + "z")) continue;
+    /**
+     * 时间闸必须**回落 created_at**。
+     *
+     * 旧写法是 `if (from && (!m.occurred_at || …)) continue` —— 没有 `occurred_at` 就直接
+     * 丢弃。而 occurred_at 实测只覆盖 469/576（81.4%），缺的 107 条以 fact / procedure /
+     * decision 为主，恰恰是最该被时间范围捞出来的那类。后果是**传了时间范围反而比不传搜到
+     * 的更少**：用户问「上个月我们定了什么」，拿到的是一份被悄悄裁掉五分之一的结果集，
+     * 而且没有任何信号说明裁掉了什么。
+     *
+     * 没有事件时间不等于不在这段时间里 —— 录入时间就是它最诚实的下界。
+     * 两个时间戳格式还不一样（occurred_at 本地格式 / created_at ISO UTC），
+     * 直接字符串比较会错序，所以统一过 normTime。
+     */
+    if (hasWindow && !withinWindow(effTime(m), win.lo, win.hi)) continue;
     if (hitIds.has(m.id)) continue;
     const tk = estTokens(m.content);
     if (tokensUsed + tk > budget && hits.length > 0) break;
@@ -394,6 +491,10 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     linkedPreview,
     relatedTags: [...tagSet].slice(0, 10),
     tokensUsed,
+    // 拆词兜底必须说出来：不说的话，AI 会把「字面相近」当成「答案」，这比返回空更难纠。
+    lexNote: ngGrams.length
+      ? `词群原样一条都没命中（复合词在倒排里是精确等值），已自动拆成 2 字片段重搜（${ngGrams.slice(0, 6).join("/")}${ngGrams.length > 6 ? "…" : ""}）——结果偏字面相近，未必对题；不准就换更短的词再搜一次，或直接换 recall_topic / recall_timeline`
+      : undefined,
   };
 }
 
@@ -504,6 +605,32 @@ function vecTopK(
 const VEC_MODEL_REF = "bge-small-zh-v1.5/int8";
 
 /**
+ * 给向量路补时间闸。
+ *
+ * 词法管线在组装 hits 时逐条判 occurredFrom/occurredTo，向量路却是把 top-100 **无条件**
+ * 塞进 RRF —— 于是「传了时间范围」在混合检索下形同虚设：范围外的语义邻居照样排进来，
+ * 甚至因为向量排名靠前而挤掉范围内的词法命中。两条路的闸门必须同高：只对一半结果生效的
+ * 过滤，比完全不过滤更欺骗 —— 它让人以为过滤是真的。
+ *
+ * 一次 IN 查询（≤100 个 id）约 0.2ms，不值得为此往向量缓存里再塞一列时间。
+ */
+function vecHitsWithin(
+  db: Database,
+  hits: Array<{ id: string; score: number }>,
+  from?: string,
+  to?: string,
+): Array<{ id: string; score: number }> {
+  const { lo, hi } = timeWindow(from, to);
+  if ((lo == null && hi == null) || !hits.length) return hits;
+  const ph = hits.map(() => "?").join(",");
+  const rows = db
+    .prepare(`SELECT id, occurred_at, created_at FROM memories WHERE id IN (${ph}) AND deleted_at IS NULL`)
+    .all(...hits.map((h) => h.id)) as Array<{ id: string; occurred_at: string | null; created_at: string }>;
+  const tById = new Map(rows.map((r) => [r.id, effTime(r)]));
+  return hits.filter((h) => withinWindow(tById.get(h.id) ?? null, lo, hi));
+}
+
+/**
  * 混合检索入口（MCP search_memory 本地路径）：
  * 词法三路（searchMemory）∪ 向量路 → RRF 合并 → 链重定向/预算封顶（词法管线内已完成的部分保留）。
  * query embed 失败/模型未就绪 = 直接返回词法结果（自动降级）。
@@ -524,12 +651,16 @@ export async function searchHybrid(
           "语义通道未就绪（向量模型还没加载完/加载失败），本次只有词法检索结果 —— 用词不同但意思相近的记忆可能漏掉，稍后重试一次能补上",
       };
     }
-    const vecHits = vecTopK(db, qv, 100);
+    const rawVec = vecTopK(db, qv, 100);
+    // 向量路走同一道时间闸（见 vecHitsWithin）。原实现完全不过滤。
+    const vecHits = vecHitsWithin(db, rawVec, params.occurredFrom, params.occurredTo);
     if (vecHits.length === 0) {
       return {
         ...lexical,
-        vecStatus: "empty-index",
-        vecNote: "语义索引还是空的（本地还没有可检索的向量），本次只有词法检索结果",
+        vecStatus: rawVec.length ? "ok" : "empty-index",
+        vecNote: rawVec.length
+          ? "时间窗内没有语义相近的记忆（语义通道也按同一个时间范围过滤过了），本次结果全部来自词法检索"
+          : "语义索引还是空的（本地还没有可检索的向量），本次只有词法检索结果",
       };
     }
 
