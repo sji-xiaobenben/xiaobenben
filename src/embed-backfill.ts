@@ -34,8 +34,8 @@ export interface BackfillOutcome {
 }
 
 /**
- * 回填缺失的向量。调用前提：`embedder.load()` 已成功 —— 本函数不负责加载模型，
- * 否则一次「模型没下下来」就会变成一次全表空扫。
+ * 回填缺失的向量。自带一次幂等加载（已就绪时立刻返回 true），模型不可用就直接放弃 ——
+ * 「模型没下下来」不该变成一次全表空扫，也不该要求调用方记得先 load 过。
  *
  * @param reembed 连 vec_model 对不上的行一起重算（换模型才有意义）。
  *                默认取 `XBB_REEMBED=1` —— 整库重算是几十分钟的 CPU，
@@ -46,6 +46,14 @@ export async function backfillEmbeddings(
   opts: { reembed?: boolean } = {},
 ): Promise<BackfillOutcome> {
   const reembed = opts.reembed ?? process.env.XBB_REEMBED === "1";
+  // 自带一次幂等加载（就绪后立刻返回）。原来这里隐含要求「调用方先 load 过」——
+  // 而漏掉这一步的表现是「一条都算不出来」：total 有 121，done 是 0，
+  // 日志还写着「下次启动再试」，看着像模型坏了。这个模块存在的理由就是消灭这类沉默，
+  // 自己不能是下一个。
+  if ((await embedder.load()) !== true) {
+    process.stderr.write("[xbb] 向量回填跳过: 模型不可用\n");
+    return { total: 0, done: 0, failed: 0 };
+  }
   const where = reembed
     ? "deleted_at IS NULL AND status = 'active' AND length(content) > 0 AND (embedding IS NULL OR vec_model IS NULL OR vec_model != ?)"
     : "deleted_at IS NULL AND status = 'active' AND length(content) > 0 AND embedding IS NULL";

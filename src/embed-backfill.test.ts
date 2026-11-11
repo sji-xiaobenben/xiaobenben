@@ -37,12 +37,19 @@ const mem = (content: string) => store.deliver({ spaceId: "sp-1", actor: "ai-hos
 const nullCount = () =>
   (db.query("SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL AND deleted_at IS NULL").get() as { n: number }).n;
 
-/** 替换 embed（返回 restore）。这里不需要真模型，只需要「哪些能算、哪些算不出来」 */
+/**
+ * 替换 embed 与 load（返回 restore）。这里不需要真模型：load 直接放行、
+ * embed 只回答「这一条算不算得出来」。真跑 load 会去解压 ORT 并下 24MB 模型，
+ * 单测不该碰网络。
+ */
 function stubEmbed(fn: (t: string) => Float32Array | null): () => void {
-  const real = embedder.embed;
+  const realEmbed = embedder.embed;
+  const realLoad = embedder.load;
+  embedder.load = async () => true;
   embedder.embed = async (t: string) => fn(t);
   return () => {
-    embedder.embed = real;
+    embedder.embed = realEmbed;
+    embedder.load = realLoad;
   };
 }
 
@@ -112,5 +119,16 @@ describe("存量向量回填", () => {
     expect(after.vec_model).toBe(VEC_MODEL);
     expect(r.done).toBeGreaterThanOrEqual(1); // 换模型那条被重算
     expect(nullCount()).toBe(0);
+  });
+
+  test("模型加载不起来就直接放弃，不做全表空扫", async () => {
+    await mem("模型没了也不该被空扫的一条");
+    const realLoad = embedder.load;
+    embedder.load = async () => false;
+    const r = await backfillEmbeddings(db);
+    embedder.load = realLoad;
+    // 关键：不是「121 条里失败 121 条」，而是当场承认这条路走不通
+    expect(r).toEqual({ total: 0, done: 0, failed: 0 });
+    expect(nullCount()).toBeGreaterThan(0);
   });
 });
