@@ -339,7 +339,10 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     }
   }
 
-  // ── IDF 加权融合 ──
+  // ── IDF 归一化融合 ──
+  // 四个通道的权重只表达「信号有多可靠」，稀有度全部交给归一化后的 df：
+  //   FTS 精确短语 2.0 ∥ 实体名精确等值 2.0 ∥ 倒排 term 等值 1.0 ∥ n-gram 拆词 0.5
+  // 这样加一个通道、改一次库规模，都不需要重新标定任何常数。
   const total = (db.prepare("SELECT COUNT(*) AS c FROM memories WHERE deleted_at IS NULL AND status != 'forgotten'").get() as { c: number }).c || 1;
   // df 必须把回退用的 gram 一并算进来：gram 若查不到 df 就会落到 `?? 1`（=最稀有的词），
   // 半权之后仍可能压过真正的词群命中 —— 兜底路径不该赢过正路。
@@ -351,6 +354,45 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const df = new Map<string, number>();
   for (const r of dfRows) df.set(r.term, r.c);
 
+  /**
+   * 归一化分母。**这一步修的是 bug，不是调参。**
+   *
+   * `log(1 + total/df)` 没有上界，所以它会随库规模单调增长：df=1 的词在 576 条库里
+   * 得 12.72 分，在 10 万条库里得 23.03 分。而下面的权重（FTS 2.0 / 倒排 1.0）是常数
+   * ⇒ 同一个查询，**库长大之后排序会自己变**，而且是悄悄变，没有任何一处会报错。
+   *
+   * 除上 log(1+total) 之后：idf(1) ≈ 1、idf(total) ≈ 0，落在 (0,1] 且与 N 无关。
+   * total ≥ 1 ⇒ 分母 ≥ log(2) ≈ 0.69，不存在除零。
+   */
+  const idfDenom = Math.log(1 + total);
+  const idfOf = (dfN: number) => Math.log(1 + total / Math.max(1, dfN)) / idfDenom;
+
+  /**
+   * 实体的 df —— 实体命中也要按稀有度计权。
+   *
+   * 原来是 `score += 3.0`，对所有实体一视同仁。但 `小本本` 一个实体挂着 191 条记忆
+   * （占全库 33%），`硼酸结晶` 只挂 1 条；给它们同一个分数，等于让那 191 条凭一个
+   * 人人共有的词并列第一，真正稀缺的精确锚点反而被淹没。实体命中也是命中，就该参与 IDF。
+   *
+   * （顺带说明那 3.0 的来历：initial commit 里直接写的估值，无注释、未标定 ——
+   *   作者当时大概率以为 log 值在 1~3 量级，实际 df=1 时是 12.72。所以这里修的是
+   *   意图，不是行为：实体是精确锚点，本该强于字面共现。）
+   */
+  const entityDf = new Map<string, number>();
+  if (entityScores.size) {
+    const names = [...new Set([...entityScores.values()].flatMap((s) => [...s]))];
+    if (names.length) {
+      const ePh = names.map(() => "?").join(",");
+      const rows = db.prepare(
+        `SELECT e.name AS name, COUNT(me.memory_id) AS c
+         FROM entities e LEFT JOIN memory_entity me ON me.entity_id = e.id
+         WHERE e.name IN (${ePh})
+         GROUP BY e.name`,
+      ).all(...names) as Array<{ name: string; c: number }>;
+      for (const r of rows) entityDf.set(r.name, r.c);
+    }
+  }
+
   const candidates = new Set<string>([...ftsScores.keys(), ...termScores.keys(), ...entityScores.keys()]);
   const scored: { id: string; score: number; matched: Set<string> }[] = [];
   for (const id of candidates) {
@@ -358,20 +400,26 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     const matched = new Set<string>();
     const fts = ftsScores.get(id);
     if (fts) for (const t of fts.terms) {
-      score += 2.0 * Math.log(1 + total / Math.max(1, df.get(t) ?? 1));
+      // 权重只表达**信号可靠度**，稀有度一律交给 df：FTS 是精确短语，2.0。
+      score += 2.0 * idfOf(df.get(t) ?? 1);
       matched.add(t);
     }
     const ts = termScores.get(id);
     if (ts) for (const t of ts.terms) {
       if (!matched.has(t)) {
-        // `~` 前缀 = n-gram 回退命中，只给半权：拼出来的字面巧合不等于词群命中
+        // 倒排是 term 精确等值，1.0；n-gram 拆出来的只是字面巧合，再打半折。
         const ng = t.startsWith("~");
-        score += (ng ? 0.5 : 1.0) * Math.log(1 + total / Math.max(1, df.get(ng ? t.slice(1) : t) ?? 1));
+        score += (ng ? 0.5 : 1.0) * idfOf(df.get(ng ? t.slice(1) : t) ?? 1);
         matched.add(t);
       }
     }
+    // 实体名精确等值比 trigram 更严格（结构化锚点而非字面共现），取其与 FTS 同档 2.0，
+    // 但同样按该实体自己的 df 降权 —— 命中一个挂了 191 条的实体不该跟命中孤例一个分量。
     const es = entityScores.get(id);
-    if (es) { score += 3.0; for (const t of es) matched.add(t); }
+    if (es) for (const n of es) {
+      score += 2.0 * idfOf(entityDf.get(n) ?? 1);
+      matched.add(n);
+    }
     if (score > 0) scored.push({ id, score, matched });
   }
   scored.sort((a, b) => b.score - a.score);

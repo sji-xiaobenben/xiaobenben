@@ -144,7 +144,101 @@ describe("长词降级：复合词三路全空时拆 2-gram 兜底", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. 混合检索的时间闸
+// 3. IDF 归一化
+//
+// 旧实现 `2.0 * log(1 + total/df)` 没有上界，随库规模单调增长，而实体分写死 3.0。
+// 于是「一个词 vs 一个实体」的兑换率会随库长大而漂移 —— 同一个查询，今天和半年后
+// 排序不一样，且没有任何一处会报错。
+//
+// 这一组的做法：在**两个规模相差 100 倍的独立库**里，跑同一个查询，比较
+// 「只靠词命中」与「只靠实体命中」两条记忆的分数**比值**。比值必须恒定。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("IDF 归一化：分数不随库规模漂移", () => {
+  /**
+   * 在独立库里造一对记忆并返回两者的分数：
+   *   byTerm —— 正文含查询词（走 FTS），但没有倒排词、没有实体
+   *   byEnt  —— 正文不含任何查询词，只挂两个查询词同名实体
+   * 两条互不干扰，分数分别代表「纯词信号」与「纯实体信号」。
+   */
+  async function measure(noise: number): Promise<{ term: number; ent: number }> {
+    const d = mkdtempSync(join(tmpdir(), "xbb-idf-"));
+    const s = PersonalStore.open(join(d, "t.db"));
+    const ldb = s.db;
+    try {
+      for (let i = 0; i < noise; i++) {
+        await s.deliver({ spaceId: "sp-1", actor: "x", content: `噪音记录 ${i}，与本次查询完全无关` });
+      }
+      const byTerm = await s.deliver({ spaceId: "sp-1", actor: "x", content: "长河渡口的船闸在检修" });
+      const byEnt = await s.deliver({ spaceId: "sp-1", actor: "x", content: "那座水闸年久失修该换了" });
+      // 实体名必须与 terms 精确相等才会命中（路径 C 是 `e.name IN (terms)`）
+      ldb.prepare("INSERT OR IGNORE INTO entities (name) VALUES (?)").run("长河渡口");
+      const e1 = (ldb.query("SELECT id FROM entities WHERE name = ?").get("长河渡口") as { id: number }).id;
+      ldb.prepare("INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?,?)").run(byEnt.id, e1);
+      ldb.prepare("INSERT OR IGNORE INTO entities (name) VALUES (?)").run("青岚水闸");
+      const e2 = (ldb.query("SELECT id FROM entities WHERE name = ?").get("青岚水闸") as { id: number }).id;
+      ldb.prepare("INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?,?)").run(byEnt.id, e2);
+
+      const r = searchMemory(ldb, { terms: ["长河渡口", "青岚水闸"], limit: 10 });
+      const t = r.hits.find((h) => h.id === byTerm.id)!.score;
+      const e = r.hits.find((h) => h.id === byEnt.id)!.score;
+      return { term: t, ent: e };
+    } finally {
+      ldb.close();
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* 临时目录残留 */ }
+    }
+  }
+
+  test("库量级差 100 倍，词信号与实体信号的分数比值必须不变", async () => {
+    const small = await measure(0);    // total = 2
+    const large = await measure(200);  // total = 202
+
+    // 分数本身确实是正常量级（不是归一化过头全变 0）
+    expect(small.term).toBeGreaterThan(0.5);
+    expect(large.term).toBeGreaterThan(0.5);
+
+    // 核心断言：比值恒定。
+    // 旧实现这里会塌：total=2 时 term≈2.20 / ent=3.0 = 0.73；
+    // total=202 时 term≈10.63 / ent=3.0 = 3.54 —— 差 4.8 倍，排序直接翻转。
+    expect((large.term / large.ent) / (small.term / small.ent)).toBeCloseTo(1, 2);
+  });
+
+  test("常见实体自动降权：挂 20 条的实体不能和孤例实体同分", async () => {
+    const d = mkdtempSync(join(tmpdir(), "xbb-idf2-"));
+    const s = PersonalStore.open(join(d, "t.db"));
+    const ldb = s.db;
+    try {
+      const common: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        common.push((await s.deliver({ spaceId: "sp-1", actor: "x", content: `周报第 ${i} 期` })).id);
+      }
+      const rare = await s.deliver({ spaceId: "sp-1", actor: "x", content: "关于丙烷脱氢的那次讨论" });
+      const mk = (id: string, name: string) => {
+        ldb.prepare("INSERT OR IGNORE INTO entities (name) VALUES (?)").run(name);
+        const eid = (ldb.query("SELECT id FROM entities WHERE name = ?").get(name) as { id: number }).id;
+        ldb.prepare("INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?,?)").run(id, eid);
+      };
+      mk(rare.id, "孤例锚点");
+      for (const id of common) mk(id, "周报");
+
+      // limit 放到 25：要能同时拿到两类，否则截断本身就会伪装成「排序正确」
+      const r = searchMemory(ldb, { terms: ["孤例锚点", "周报"], limit: 25 });
+      const rareScore = r.hits.find((h) => h.id === rare.id)!.score;
+      const commonScore = r.hits.find((h) => h.id === common[0]!)!.score;
+
+      // 稀有实体（df=1）→ 2.0；常见实体（df=20）→ 2.0*log(1+21/20)/log(22) ≈ 0.46。
+      // 旧实现两条都是死板的 `+= 3.0`，两者相等 ⇒ 这条断言必挂。
+      // 之所以比「谁排第一」而不是「分数」：并列时的先后取决于 SQL 返回顺序，
+      // 拿它当判据会变成一条偶尔碰巧通过的假测试。
+      expect(rareScore).toBeGreaterThan(commonScore * 2);
+    } finally {
+      ldb.close();
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* 临时目录残留 */ }
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. 混合检索的时间闸
 //
 // 词法路在组装 hits 时逐条判时间，向量路却把 top-100 无条件塞进 RRF —— 于是
 // 「传了时间范围」在混合检索下形同虚设：范围外的语义邻居照样排进来，还可能因为
