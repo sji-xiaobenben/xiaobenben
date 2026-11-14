@@ -1,6 +1,6 @@
 {
   "name": "xiaobenben",
-  "version": "0.4.54",
+  "version": "0.4.55",
   "description": "面向 AI 的个人记忆库客户端 · local-first · Bun 单文件可执行 · MCP stdio",
   "license": "AGPL-3.0-only",
   "type": "module",
