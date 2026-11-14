@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 // 产品元数据单一来源（此前此处硬编码 VERSION = "0.2.0"，与 build-meta 漂移）
 import { PRODUCT_NAME, PRODUCT_EN, VERSION, OFFICIAL_SITE } from "../build-meta";
+import { distillHint } from "./distill";
 
 type AnyDb = Database;
 
@@ -372,9 +373,43 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     const epSources = db.prepare(
       "SELECT COALESCE(source,'unknown') AS source, COUNT(*) AS c FROM episodes GROUP BY 1 ORDER BY c DESC"
     ).all() as any[];
+
+    // ── 蒸馏状态：记忆层 vs 原话层 ──────────────────────────────────────
+    // memories 只能由 AI 主动 write_memory 产生，episodes 由采集器自动写。于是必然
+    // 出现「原话一直在涨、记忆层原地不动」——数据一条没丢，但 AI 检索只翻记忆层
+    // （memory-search.ts 不引用 episodes），用户看到的就是「它把我这几天说的忘了」。
+    // 2026-11-14 老板问「这几天的记忆哪去了」就是这个：记忆停在 11-10、原话攒到 11-14。
+    //
+    // ⚠️ 两列时间格式不同，**不能朴素比字符串**（这是本段唯一容易写错的地方）：
+    //   memories.created_at = '2026-11-10T18:51:43.476Z'（ISO UTC）
+    //   episodes.recorded_at = '2026-11-14 23:53:52'      （本地时间、空格分隔）
+    //   空格 0x20 < 'T' 0x54，同一天内直接比较会得出相反结论。实测确认
+    //   datetime('2026-11-10T18:51:43.476Z','localtime') → '2026-11-11 02:51:43'，
+    //   与事件账本里那条 memory.deliver 完全吻合，所以统一用 datetime(...,'localtime')
+    //   归一化成 'YYYY-MM-DD HH:MM:SS' 再比。
+    const lastMemRaw: string | null =
+      ((db.prepare("SELECT MAX(created_at) AS raw FROM memories WHERE deleted_at IS NULL").get() as any)?.raw) ?? null;
+    const lastMemLocal: string | null = lastMemRaw
+      ? (db.prepare("SELECT datetime(?, 'localtime') AS v").get(lastMemRaw) as any).v
+      : null;
+    const epSince = (db.prepare(
+      "SELECT COUNT(*) AS c FROM episodes WHERE datetime(recorded_at) > " +
+        "(SELECT datetime(MAX(created_at), 'localtime') FROM memories WHERE deleted_at IS NULL)"
+    ).get() as any).c as number;
+    const memAt = lastMemRaw ? Date.parse(lastMemRaw) : NaN;
+    const memoryAgeDays = Number.isFinite(memAt) ? Math.floor((Date.now() - memAt) / 86400000) : null;
+    const distill = {
+      lastMemoryAt: lastMemRaw,
+      lastMemoryLocal: lastMemLocal,
+      ageDays: memoryAgeDays,
+      episodeSince: epSince,
+      hint: distillHint({ lastMemoryAt: lastMemRaw, episodeSince: epSince, memoryTotal: total }),
+    };
+
     return json({
       total, byType, byKind, domains, devices: devices.map((d) => d.name),
       episodes: { total: ep.c, sessions: ep.s, first: ep.first, last: ep.last, sources: epSources },
+      distill,
     });
   }
 
@@ -756,6 +791,7 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
   <div class="cloudbar" id="cloudbar"></div>
   <div class="updatebar" id="updatebar"></div>
   <div class="tipbar" id="tipbar"></div>
+  <div class="tipbar" id="distillbar"></div>
   <div class="stats" id="stats"></div>
   <div id="list"></div>
   <div class="pager" id="pager"></div>
@@ -1119,9 +1155,15 @@ function loadStats(){
     (s.byKind||[]).forEach(function(t){ parts.push(kindLabel(t.kind)+" "+t.c); });
     var ep = s.episodes || {};
     if(ep.total) parts.push("原话 "+ep.total+" 条 · "+ep.sessions+" 会话");
+    // 记忆层最近一次写入距今多久 —— 直接回答「为什么看到的都是几天前的」
+    var dist = s.distill || {};
+    if(dist.ageDays !== null && dist.ageDays !== undefined){
+      parts.push(dist.ageDays <= 0 ? "记忆今天写过" : "记忆最近写入 "+dist.ageDays+" 天前（"+String(dist.lastMemoryLocal||"").slice(0,10)+"）");
+    }
     var doms = (s.domains||[]).map(function(d){ return d.domain+"("+d.c+")"; }).join("、");
     if(doms) parts.push("约束域: "+doms);
     document.getElementById("stats").textContent = parts.join(" · ") + " · 设备: " + s.devices.join("、");
+    distillRender(dist);
     var sel = document.getElementById("epSrc");
     if(sel && !sel.getAttribute("data-filled")){
       var srcs = ep.sources || [];
@@ -1133,6 +1175,19 @@ function loadStats(){
       sel.setAttribute("data-filled","1");
     }
   });
+}
+
+// 「记忆层停在那儿了」提示条。判定在服务端（src/web/distill.ts，纯函数、可单测），
+// 这里只渲染 —— 前端算天数会因为时区/时钟漂移和 API 说法打架。
+var DIST_ICON = '<svg class="ti" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.4 2.4h9.2v11.2H3.4z"/><path d="M5.6 5.6h4.8M5.6 8.1h4.8M5.6 10.6h3"/></svg>';
+function distillRender(d){
+  var el = document.getElementById("distillbar"); if(!el) return;
+  var h = d && d.hint;
+  if(!h){ el.className = "tipbar"; el.innerHTML = ""; return; }
+  el.className = "tipbar on " + (h.tone === "warn" ? "warn" : "off");
+  el.innerHTML = DIST_ICON
+    + '<div class="tb"><b>' + esc(h.title) + '</b><i>' + esc(h.detail) + '</i></div>'
+    + '<button class="lk" onclick="setKind(&#39;episodes&#39;)">看原话</button>';
 }
 
 function setTabs(k){
