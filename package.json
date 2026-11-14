@@ -19,7 +19,8 @@
   ],
   "mcpName": "io.github.sji-xiaobenben/xiaobenben",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "engines": {
     "node": ">=20.10.0",
