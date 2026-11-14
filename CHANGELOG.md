@@ -9,6 +9,8 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
 
 ## [未发布]
 
+## [0.4.54] - 2026-11-15
+
 ### 新增
 
 - **npm 分发**：`npx xiaobenben mcp` 与 `npm i -g xiaobenben` 现在可用。包本体只有
