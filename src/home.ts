@@ -716,6 +716,9 @@ export interface DbCounts {
   memories: number;
   episodes: number;
   events: number;
+  /** `PRAGMA user_version`。用来回答「这份库比我这个程序新还是旧」——
+   *  库比程序新时程序会照常读写但不改结构（见 schema.ts），「home show」得能看见。 */
+  schema: number;
 }
 
 /**
@@ -764,6 +767,7 @@ export function readDbCounts(p: string): DbCounts {
       memories: one("SELECT count(*) n FROM memories"),
       episodes: one("SELECT count(*) n FROM episodes"),
       events: one("SELECT count(*) n FROM events"),
+      schema: (db.query("PRAGMA user_version").get() as { user_version: number }).user_version,
     };
   } finally {
     db.close();

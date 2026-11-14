@@ -549,7 +549,10 @@ export class SchemaBusyError extends Error {
     super(
       "另一个小本本进程正在写库，结构升级没能拿到写锁。\n" +
         `  底层原因：${detail}\n` +
-        "  怎么处理：先执行 `xbb stop` 把所有 xbb 进程停下（含 AI 客户端里的 mcp），再重跑刚才的命令；\n" +
+        "  怎么处理：把所有 xbb 进程停下，再重跑刚才的命令。最省事的是关掉正在使用小本本的\n" +
+        "            AI 客户端会话（每个会话各拉起一个进程），命令行里也可以：\n" +
+        "              xbb stop                  装过桌面版（PATH 里有 xbb）时用\n" +
+        "              npx -y xiaobenben stop    走 npx 接入、PATH 里没有 xbb 时用\n" +
         "            升级完成后再启动 AI 客户端即可。库里的数据不会丢，升级是幂等的。",
     );
     this.name = "SchemaBusyError";
@@ -597,6 +600,27 @@ function sleepSync(ms: number): void {
  */
 export function initSchemaV2(db: Database): void {
   const before = schemaVersion(db);
+
+  /**
+   * 库比程序新：旧程序打开了新版本写的库。
+   *
+   * 这里**不拒绝、也不改结构**，是有意的：
+   *   · 迁移全部 additive-only，而且每步都带 `< N` 闸，v{N+1} 的库进来时一个 `ALTER` 都不会执行
+   *     （只剩 `CREATE TABLE/INDEX IF NOT EXISTS` 这类幂等语句）；
+   *   · 硬拒会让「回滚到旧版」变成彻底打不开，而用户没有任何自救路径 —— 比潜在风险更糟。
+   *
+   * 但必须说一句。否则旧代码往新结构的库上持续写，将来出问题（排序变了、某列读不到）
+   * 没人能复盘出「当时跑的是旧版本」。stderr 是这类提示唯一的合法出口：MCP 模式下 stdout 是
+   * JSON-RPC 帧流。
+   */
+  if (before > SCHEMA_TARGET_VERSION) {
+    console.error(
+      `[xbb] 注意：记忆库结构是 v${before}，比当前程序支持的 v${SCHEMA_TARGET_VERSION} 更新。\n` +
+        "        本程序不改库结构、照常读写，但新版本才有的字段与索引用不上。\n" +
+        "        建议升级到最新版：xbb update（走 npx 接入的下次启动会自动取最新）",
+    );
+  }
+
   for (let attempt = 1; ; attempt++) {
     try {
       db.exec("BEGIN IMMEDIATE");

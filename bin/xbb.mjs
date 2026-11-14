@@ -27,7 +27,7 @@ const say = (msg) => process.stderr.write(`[xiaobenben] ${msg}\n`);
 
 async function resolveExe() {
   const ready = findInstalled(pkgRoot);
-  if (ready) return ready;
+  if (ready) return { path: ready, downloaded: false };
 
   // 首次运行（或 `npm install --ignore-scripts` 装进来的）—— 就地补装。
   // 放这里而不是只靠 postinstall：`--ignore-scripts` 太常见了，只靠 postinstall
@@ -49,15 +49,28 @@ async function resolveExe() {
   });
   if (!existsSync(path)) throw new Error(`安装完成但文件不存在：${path}`);
   say("就绪");
-  return path;
+  // 真实发生了下载 ⇒ 这是「首次」的确切时刻，不需要额外的 marker 文件来记
+  // （marker 一旦被 MCP 客户端的静默启动消耗掉，用户之后在终端里就再也看不到了）。
+  return { path, downloaded: true };
 }
 
-let exe;
+let resolved;
 try {
-  exe = await resolveExe();
+  resolved = await resolveExe();
 } catch (e) {
   say(`启动失败：${explainError(e)}`);
   process.exit(1);
+}
+const exe = resolved.path;
+
+/**
+ * 装完给一句回执 —— 否则用户敲完 `npx xiaobenben` 什么都看不到，
+ * 以为装失败了（npx 版没有托盘、没有图标、没有开始菜单，零反馈）。
+ * 必须说清「引擎」和「接入」是两件事：引擎就绪 ≠ AI 已经在用它。
+ */
+if (resolved.downloaded) {
+  say("引擎已就绪，但它还没有接入任何 AI 客户端。");
+  say("运行 `npx xiaobenben connect` 查看该把哪段配置写进哪个客户端。");
 }
 
 const child = spawn(exe, process.argv.slice(2), {

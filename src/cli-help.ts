@@ -65,6 +65,28 @@ const MCP_HELP = `用法: xbb mcp
 
 手动排障：先 xbb home show 确认库在位，再看宿主的 MCP 日志里 xbb 的 stderr。`;
 
+const CONNECT_HELP = `用法: xbb connect [--json]
+
+看这台机器上**哪些 AI 客户端已经接入了小本本**，以及每个客户端该把配置写在哪。
+
+为什么要单独一条命令：装引擎和接入客户端是两件事。npx 只把可执行文件放到磁盘上，
+接入是反过来的 —— 你要在客户端自己的配置里加一条 command，客户端启动时再把它拉起来。
+所以「我装哪了」从来不能靠安装动作回答，只能靠反过来读那些配置。
+
+  输出包含：
+    · 客户端是否安装（配置目录在不在）
+    · 是否已接入、接的是桌面版还是 npx 包
+    · 配置里指向的可执行文件**是否还在**（升级/搬目录后失效是最难自查的故障）
+    · 未接入的客户端给出可直接粘贴的片段，路径按它自己的格式生成
+
+  --json    机器可读输出（脚本/安装器用）
+
+**本命令只读，不修改任何文件。** 自动写入客户端配置需要备份、逐项确认与幂等设计，
+风险等级和「查状态」不是一回事，不会混在同一个命令里。
+
+npx 那行必须带 -y：首次会问「Ok to proceed?」，MCP stdio 下没人能回答，
+现象是客户端一直连不上，而不是报错。`;
+
 const STOP_HELP = `用法: xbb stop [--keep-mcp]
 
 停掉本机所有 xbb 进程（含后台 serve）。进程名会改名，所以判据取"命令行首 token 是 xbb"，
@@ -263,6 +285,7 @@ const OVERVIEW = `xbb — 小本本个人客户端
   xbb serve [--detach|--no-open|--headless]   启动本地服务 + 托盘 + 管理窗口（:17630）
   xbb start [--open]                          确保服务在跑 + 弹通知；绑桌面图标用这个
   xbb mcp                                     MCP stdio（AI 宿主的接入点，由宿主拉起）
+  xbb connect [--json]                        看引擎接进了哪些 AI 客户端（只读，不改配置）
   xbb stop [--keep-mcp]                       停掉本机所有 xbb 进程
   xbb autostart [on|off|status]               开机自启（默认开；三平台）
 
@@ -296,6 +319,8 @@ export function helpText(cmd: string, sub?: string): string {
       return START_HELP;
     case "mcp":
       return MCP_HELP;
+    case "connect":
+      return CONNECT_HELP;
     case "stop":
       return STOP_HELP;
     case "cloud":

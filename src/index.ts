@@ -7,8 +7,8 @@
  */
 import { programDir, DbMissingError } from "./home";
 import { runMcp } from "./mcp";
-import { PersonalStore } from "./store";
-import { ORG_PERSONAL, SchemaBusyError } from "./schema";
+import { PersonalStore, DbCorruptError } from "./store";
+import { ORG_PERSONAL, SchemaBusyError, SCHEMA_TARGET_VERSION } from "./schema";
 import { startServe, lastRequestAtMs } from "./serve";
 import { startTray, type TrayHandle, type TrayState } from "./tray";
 import { ensureToastAppId } from "./notify";
@@ -99,6 +99,13 @@ if (cmd === "serve") {
       console.error(e.message);
       console.error("\n服务没有起来 —— 这是刻意的：结构没升级完就起服务，用户会以为升级已经生效。\n");
       process.exit(3);
+    }
+    // 库文件损坏：**绝不能覆盖**（还有抢救价值），所以这里也拒绝起服务
+    if (e instanceof DbCorruptError) {
+      console.error("\n❌ 小本本未启动：记忆库文件已损坏\n");
+      console.error(e.message);
+      console.error("\n服务没有起来 —— 这是刻意的：在坏库上继续写只会让抢救更难。\n");
+      process.exit(4);
     }
     throw e;
   }
@@ -576,6 +583,11 @@ if (cmd === "serve") {
       console.error(`\n❌ 采集没能开始：${e.message}\n`);
       process.exit(3);
     }
+    if (e instanceof DbCorruptError) {
+      console.error(`\n❌ 采集没能开始：记忆库文件已损坏\n`);
+      console.error(e.message);
+      process.exit(4);
+    }
     throw e;
   }
 
@@ -685,6 +697,17 @@ if (cmd === "serve") {
   // 版本横幅 + 构建指纹（版本核对用）
   const { banner } = await import("./build-meta");
   console.log(banner());
+  // 附一行接入状态：`npx xiaobenben --version` 往往是用户装完之后唯一会敲的命令，
+  // 而「引擎装好了」和「已经接进某个客户端」是两件事 —— 不在这里说，用户就无从得知。
+  // 纯本地文件探测，不发网络请求，不拖慢版本查询。
+  const { probeClients, connectSummary } = await import("./connect");
+  console.log(connectSummary(probeClients()));
+} else if (cmd === "connect") {
+  // 「我到底把它装进哪个 AI 客户端了？」—— 只读探测，改动配置的事不在这里做
+  const { probeClients, recommendedEntry, renderConnect, toJson } = await import("./connect");
+  const statuses = probeClients();
+  const entry = recommendedEntry();
+  console.log(args.includes("--json") ? toJson(statuses, entry) : renderConnect(statuses, entry));
 } else if (cmd === "update") {
   // 手动检查更新：与托盘「检查更新」同一入口，并放行黑名单——便于排障与应急
   const updater = new Updater();
@@ -751,8 +774,19 @@ if (cmd === "serve") {
       try {
         const c = H.readDbCounts(p.dbPath);
         extra = `\n          记忆 ${c.memories} / 原话 ${c.episodes} / 事件 ${c.events} · 完整性 ${c.integrity}`;
+        // 库比程序新 = 曾经用过更高版本（回滚 / 另一台机器）后拿旧程序开库。
+        // 程序不拒开也不改结构，但这件事必须能在这里看见 —— 否则「为什么某个新字段读不到」
+        // 只能靠翻 stderr，而 MCP 模式下的 stderr 用户根本看不到。
+        if (c.schema > SCHEMA_TARGET_VERSION) {
+          extra += `\n          ⚠️ 库结构 v${c.schema} 比当前程序支持的 v${SCHEMA_TARGET_VERSION} 新 —— 照常读写但不改结构，建议升级到最新版`;
+        }
       } catch (e) {
-        extra = `\n          ⚠️ 打不开：${e instanceof Error ? e.message : String(e)}`;
+        const msg = e instanceof Error ? e.message : String(e);
+        extra = `\n          ⚠️ 打不开：${msg}`;
+        // 这是用户发现"库坏了"时最可能来的地方，不能只甩一句 file is not a database
+        if (/not a database|malformed/i.test(msg)) {
+          extra += "\n          ⚠️ 看起来是库文件损坏 —— 先把它连同 -wal / -shm 复制留存；别删、别覆盖";
+        }
       }
       const when = (p.mtime ?? "").slice(0, 16).replace("T", " ");
       console.log(`记忆库    ${p.dbPath}`);

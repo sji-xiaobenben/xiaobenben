@@ -17,8 +17,8 @@
  *   · 「别人长期持锁 ⇒ 抛 SchemaBusyError 并带人话」——证明失败时不再甩堆栈
  */
 import { Database } from "bun:sqlite";
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -181,9 +181,12 @@ describe("initSchemaV2 的写锁行为", () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).name).toBe("SchemaBusyError");
     const msg = (err as Error).message;
-    // 关键：不是 database is locked 的裸文案，而是「先 xbb stop 再重跑」
-    expect(msg).toContain("xbb stop");
+    // 关键：不是 database is locked 的裸文案，而是「先停进程再重跑」
     expect(msg).toContain("另一个小本本进程");
+    // 两条路径都得给：装过桌面版的用户有 `xbb`，走 npx 接入的用户**没有**
+    // —— 只写 `xbb stop` 等于对后者什么也没说（2026-11-14 实测：npx 用户的 PATH 里没有 xbb）
+    expect(msg).toContain("xbb stop");
+    expect(msg).toContain("npx -y xiaobenben stop");
     delete process.env.XBB_SCHEMA_RETRIES;
   });
 
@@ -199,5 +202,80 @@ describe("initSchemaV2 的写锁行为", () => {
     initSchemaV2(db);
     expect(schemaVersion(db)).toBe(SCHEMA_TARGET_VERSION);
     db.close();
+  });
+});
+
+/**
+ * 「库比程序新」与「库文件坏了」—— 两种**都不该覆盖用户数据**的异常路径。
+ *
+ * 起因（2026-11-14 实测）：同一台机器上先装桌面版、再用 npx 接入是常态，
+ * 于是必然出现「拿旧程序打开新库」和「memory.db 被同步工具 / 杀软搞坏」两种现场。
+ * 前者原来**一声不吭**（旧代码还会照常往里写），后者只甩一句 `file is not a database`
+ * —— 用户既不知道该别删，也不知道下一步做什么。
+ */
+describe("库比程序新 / 库已损坏", () => {
+  test("库结构比程序新：照常打开、不改版本号、但必须出提示", async () => {
+    const p = freshPath("ahead");
+    await makeV5(p);
+    const { initSchemaV2, schemaVersion } = await import("./schema");
+    const ahead = 99; // 远高于任何已知目标版本
+    {
+      const seed = new Database(p);
+      seed.exec(`PRAGMA user_version = ${ahead}`);
+      seed.close();
+    }
+
+    const errs: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errs.push(a.map(String).join(" "));
+    });
+    const db = new Database(p);
+    db.exec("PRAGMA busy_timeout = 3000");
+    let thrown: unknown;
+    try {
+      initSchemaV2(db);
+    } catch (e) {
+      thrown = e;
+    }
+    spy.mockRestore();
+    const after = schemaVersion(db);
+    db.close();
+
+    // 不硬拒：回滚到旧版的用户否则彻底打不开、且没有自救路径（详见 schema.ts 注释）
+    expect(thrown).toBeUndefined();
+    // 也不偷偷降级：版本号原样保留，结构一条都不删
+    expect(after).toBe(ahead);
+    const joined = errs.join("\n");
+    expect(joined).toContain("比当前程序支持");
+    expect(joined).toContain(`v${ahead}`);
+  });
+
+  test("memory.db 是垃圾字节：抛 DbCorruptError，且原文件一个字节都不动", async () => {
+    const p = freshPath("corrupt");
+    const junk = new Uint8Array(4096).map((_, i) => (i * 37 + 11) % 256);
+    writeFileSync(p, junk);
+
+    const { PersonalStore, DbCorruptError } = await import("./store");
+    let err: unknown;
+    try {
+      PersonalStore.open(p);
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(DbCorruptError);
+    const msg = (err as Error).message;
+    expect((err as Error).name).toBe("DbCorruptError");
+    // 三件必须说清的事：别删、留证、怎么从零开始
+    expect(msg).toContain("先别删");
+    expect(msg).toContain("复制一份");
+    expect(msg).toContain("home init --force");
+    // 而且是「改名留存」→ 不是直接覆盖：坏库里还有能捞的东西
+    expect(msg).toContain("memory.db.corrupt");
+
+    // 最硬的一条：原文件哈希没变（绝不在坏库上开写）
+    const after = readFileSync(p);
+    expect(after.length).toBe(junk.length);
+    expect(Buffer.compare(after, Buffer.from(junk))).toBe(0);
   });
 });

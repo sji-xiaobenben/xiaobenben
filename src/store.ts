@@ -75,6 +75,74 @@ function tightenPerms(file: string): void {
   }
 }
 
+/**
+ * 库文件在、但不是（或已损坏成不是）SQLite 库 —— 实测由 `file is not a database`
+ * 或 `database disk image is malformed` 触发。
+ *
+ * 为什么单独立一个类，而不是让 Bun 的裸文案冒上去：
+ *   「缺库」和「库坏了」用户要做的事**完全不同** —— 前者是找回来（DbMissingError：
+ *   home find / home set / move），后者是**先留证再谈**，而且**绝不能覆盖**。
+ *   以前这里只有一句 `file is not a database`，既没说别删、也没说下一步，用户只能靠猜。
+ *
+ * 共同铁律：两者都**绝不在原文件上动一个字节**。损坏的库还有抢救价值（sqlite .recover、
+ * 历史备份对比），覆盖掉就真的没了。
+ */
+export class DbCorruptError extends Error {
+  readonly code = "XBB_DB_CORRUPT";
+  constructor(
+    readonly file: string,
+    readonly detail: string,
+  ) {
+    super(
+      `小本本的记忆库打不开：这个文件已损坏（${detail}）。\n` +
+        `   文件：${file}\n` +
+        "   ⚠️ 先别删它 —— 原文件保持不动就还有抢救机会，覆盖或删除才是真的没了。\n" +
+        "   怎么处理：\n" +
+        "     ① 留证：把 memory.db 连同 memory.db-wal / -shm 一起复制一份到别处\n" +
+        "     ② 同目录若有历史备份，可以换上试：memory.db.bak-* / memory.db.gen1\n" +
+        "     ③ 确认要从零开始：先把它改名留存（memory.db → memory.db.corrupt），\n" +
+        "        再执行 xbb home init --force\n" +
+        "   排查：xbb home show        看库的位置、大小、最后写入时间",
+    );
+    this.name = "DbCorruptError";
+  }
+}
+
+/** SQLite 的「这不是库 / 库已坏」族。**不含** BUSY / 权限 —— 那些各有各的话术，不能混。 */
+const isCorrupt = (e: unknown): boolean =>
+  /not a database|malformed|SQLITE_NOTADB|SQLITE_CORRUPT|file is encrypted/i.test(
+    e instanceof Error ? e.message : String(e),
+  );
+
+/**
+ * 每次开库都要设置的连接级 PRAGMA。抽成函数只为让 `open()` 里那层 try/catch 读得清
+ * —— 损坏的库在第一条 `journal_mode` 上就会炸，必须和「建表」同一层兜住。
+ */
+function applyPragmas(db: Database): void {
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  // 写冲突让路而不是立刻报错：会话采集跑在独立子进程里（ingest-job.ts），
+  // 它成批插入原话时用户可能正在删记忆/改标签。SQLite 默认 busy_timeout=0 ⇒ 撞上就
+  // 抛 SQLITE_BUSY，用户看到的是"删除失败"，而真实原因只是"晚了几毫秒"。
+  // 3 秒足够等到一个插入批次提交完；再长就该报错而不是继续卡着。
+  db.exec("PRAGMA busy_timeout = 3000");
+  // 页缓存：SQLite 默认仅 2MB，1 万条库（约 49MB）读向量时页会被反复淘汰重读。
+  // 64MB 是连接级上限、按需分配；不改数据格式也不参与 SQL 语义，删掉即回到默认。
+  db.exec("PRAGMA cache_size = -65536");
+  // 提交不落盘等 fsync。
+  //
+  // SQLite 的 synchronous 默认是 FULL(2)，**切到 WAL 不会自动变 NORMAL** ——
+  // 很多人以为会，实测这台机器上每次提交固定 25ms（等磁盘 + Defender 扫描 WAL）。
+  // 而检索每次都写两笔账（hit_count / 共现强度，见 recall-feedback.ts），
+  // 于是「查一次记忆」里有 25ms 纯粹在等磁盘转，占 searchMemory 的六成。
+  //
+  // WAL + NORMAL 是 SQLite 官方给的推荐组合：进程崩溃不丢已提交事务（WAL 文件本身
+  // 保证一致性），只有**操作系统崩溃 / 掉电**可能丢掉最后若干个已提交事务。
+  // 对「用过几次」这种计数完全够用；真正要紧的用户正文写入仍走 WAL 落地。
+  // 若要回到掉电也不丢，把这一行删掉即可（代价是每次写 25ms）。
+  db.exec("PRAGMA synchronous = NORMAL");
+}
+
 export class PersonalStore {
   readonly db: Database;
 
@@ -101,30 +169,26 @@ export class PersonalStore {
       firstRun = gate.firstRun;
     }
     mkdirSync(dirname(file), { recursive: true });
-    const db = new Database(file, { create: true });
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA foreign_keys = ON");
-    // 写冲突让路而不是立刻报错：会话采集跑在独立子进程里（ingest-job.ts），
-    // 它成批插入原话时用户可能正在删记忆/改标签。SQLite 默认 busy_timeout=0 ⇒ 撞上就
-    // 抛 SQLITE_BUSY，用户看到的是"删除失败"，而真实原因只是"晚了几毫秒"。
-    // 3 秒足够等到一个插入批次提交完；再长就该报错而不是继续卡着。
-    db.exec("PRAGMA busy_timeout = 3000");
-    // 页缓存：SQLite 默认仅 2MB，1 万条库（约 49MB）读向量时页会被反复淘汰重读。
-    // 64MB 是连接级上限、按需分配；不改数据格式也不参与 SQL 语义，删掉即回到默认。
-    db.exec("PRAGMA cache_size = -65536");
-    // 提交不落盘等 fsync。
-    //
-    // SQLite 的 synchronous 默认是 FULL(2)，**切到 WAL 不会自动变 NORMAL** ——
-    // 很多人以为会，实测这台机器上每次提交固定 25ms（等磁盘 + Defender 扫描 WAL）。
-    // 而检索每次都写两笔账（hit_count / 共现强度，见 recall-feedback.ts），
-    // 于是「查一次记忆」里有 25ms 纯粹在等磁盘转，占 searchMemory 的六成。
-    //
-    // WAL + NORMAL 是 SQLite 官方给的推荐组合：进程崩溃不丢已提交事务（WAL 文件本身
-    // 保证一致性），只有**操作系统崩溃 / 掉电**可能丢掉最后若干个已提交事务。
-    // 对「用过几次」这种计数完全够用；真正要紧的用户正文写入仍走 WAL 落地。
-    // 若要回到掉电也不丢，把这一行删掉即可（代价是每次写 25ms）。
-    db.exec("PRAGMA synchronous = NORMAL");
-    initSchemaV2(db);
+    let db: Database;
+    try {
+      db = new Database(file, { create: true });
+    } catch (e) {
+      if (isCorrupt(e)) throw new DbCorruptError(file, e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+    try {
+      applyPragmas(db);
+      initSchemaV2(db);
+    } catch (e) {
+      try {
+        db.close();
+      } catch {
+        /* 句柄已经不可用，关不掉不是新问题 */
+      }
+      // 只有「这不是库 / 库坏了」才换成抢救话术；BUSY / 磁盘满 / 权限各有各的语境，原样抛。
+      if (isCorrupt(e)) throw new DbCorruptError(file, e instanceof Error ? e.message : String(e));
+      throw e;
+    }
     tightenPerms(file);
     // 「用过」的锚点：库被删之后，就靠它把"库丢了"和"全新安装"分开。
     if (firstRun) markInitialized();
