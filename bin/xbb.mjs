@@ -67,10 +67,18 @@ const exe = resolved.path;
  * 装完给一句回执 —— 否则用户敲完 `npx xiaobenben` 什么都看不到，
  * 以为装失败了（npx 版没有托盘、没有图标、没有开始菜单，零反馈）。
  * 必须说清「引擎」和「接入」是两件事：引擎就绪 ≠ AI 已经在用它。
+ *
+ * 而且要把用户交回**正规那条路**：npx 这里没有 AI 在场，写不了客户端配置、
+ * 也写不了 AGENTS.md（那需要 AI 判断宿主再落笔）。官网的 ai.md 就是干这个的，
+ * 一句话让用户手上正开着的 AI 自己接完 6 步 —— 比让用户照搬 JSON 靠谱。
  */
 if (resolved.downloaded) {
-  say("引擎已就绪，但它还没有接入任何 AI 客户端。");
-  say("运行 `npx xiaobenben connect` 查看该把哪段配置写进哪个客户端。");
+  say("引擎已就绪，但它还没有接入任何 AI 客户端 —— 此刻一条记忆都不会有。");
+  say("最省事的接法是让 AI 自己接，把下面这句粘到你的 AI 对话框：");
+  say("");
+  say("    请你按照 https://xiaobenben.net/doc/install/ai.md 帮我接入小本本");
+  say("");
+  say("它会配置客户端、写入规则、重启验证。只想自己贴配置就跑 `npx xiaobenben connect`。");
 }
 
 const child = spawn(exe, process.argv.slice(2), {

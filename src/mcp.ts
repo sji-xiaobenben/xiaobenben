@@ -22,6 +22,7 @@ import { VERSION } from "./build-meta";
 import { localNow } from "./memory-write";
 import { MAX_ATTACHMENTS } from "./payloads";
 import { prepareNotice, type PendingUpdate } from "./update-notice";
+import { applyIngestMode, probeIngestMode, type IngestMode } from "./ingest-status";
 
 // ── 写入静默检测（引擎唯一可信的"聊嗨未记"信号：
 //    只用调用序列+时钟，不接触对话内容。播种的默认约束第 7 条引用 memoryHint 字段。）
@@ -73,7 +74,13 @@ NEVER SUBSTITUTE TEXT FOR A FILE. When an attachment is rejected or unsupported,
 
 export function createMcpServer(
   backend: Backend,
-  opts: { updateNotice?: PendingUpdate | null; bootStamp?: CloudStamp | null; fault?: string | null } = {},
+  opts: {
+    updateNotice?: PendingUpdate | null;
+    bootStamp?: CloudStamp | null;
+    fault?: string | null;
+    /** 原话层当前有没有人在采。缺省 auto＝握手指令原样下发（桌面版常态） */
+    ingestMode?: IngestMode;
+  } = {},
 ): McpServer {
   // 更新提示：新会话开头问一句「要不要更新」。
   // 走**握手指令 + recall_directives 响应**双通道：握手指令是 AI 一接入就必然读到的契约，
@@ -98,7 +105,9 @@ export function createMcpServer(
     : "";
   const server = new McpServer(
     { name: "xiaobenben", version: VERSION, title: "小本本 —— 你的 AI 记忆库" },
-    { instructions: MCP_INSTRUCTIONS + orgRule + updateRule + faultRule },
+    // 原话层那一段按**事实**下发：没有常驻服务时握手指令必须改成"你要每轮上报"。
+    // 写死"引擎自动采集"会让 AI 在 npx 场景下照做——原话层永远空，且零报错。
+    { instructions: applyIngestMode(MCP_INSTRUCTIONS, opts.ingestMode ?? "auto") + orgRule + updateRule + faultRule },
   );
   const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
 
@@ -888,13 +897,23 @@ export async function runMcp(): Promise<void> {
 
   // 更新检测：快照过期才打网络，且有硬预算——超预算就带旧快照继续，
   // 绝不让 CDN 抖动推迟 MCP 握手（握手里程碑失败 = 整个会话用不了记忆）。
-  const updateNotice = await prepareNotice();
+  // 采集现状探测与它**并行**：两者都要碰一次本地端口/网络，串行只是白等。
+  const [updateNotice, ingest] = await Promise.all([
+    prepareNotice(),
+    // 探不到时按"没有常驻服务"处理：保守方向是让 AI 多报（多报只是冗余，少报是永久丢原话）
+    probeIngestMode().catch(
+      (): { mode: IngestMode; detail: string } => ({ mode: "absent", detail: "采集现状探测失败，按没有常驻服务处理" }),
+    ),
+  ]);
   if (updateNotice) {
     process.stderr.write(
       `[xbb] 检测到新版本 v${updateNotice.latest}（当前 v${updateNotice.current}）——将在会话中提示用户\n`
     );
   }
+  // 原话层有没有人在采，必须说出来：这一行是排障时分辨「AI 没写摘要」和
+  // 「引擎根本没采原话」的唯一线索 —— 两种故障在用户眼里都是"它什么都记不住"。
+  process.stderr.write(`[xbb] 原话层: ${ingest.detail}（握手指令按 ${ingest.mode} 下发）\n`);
 
-  const server = createMcpServer(backend, { updateNotice, bootStamp, fault });
+  const server = createMcpServer(backend, { updateNotice, bootStamp, fault, ingestMode: ingest.mode });
   await server.connect(new StdioServerTransport());
 }
