@@ -210,6 +210,17 @@ xbb version         # version + build fingerprint
 
 `--help` is intercepted before anything else runs, works anywhere in the line, and executes nothing — `xbb stop --help` will not stop anything.
 
+### Via npm
+
+```bash
+npx -y xiaobenben mcp     # run the MCP server without installing anything globally
+npm i -g xiaobenben       # or get the `xiaobenben` and `xbb` commands
+```
+
+The npm package is a ~47 kB wrapper, not the binary itself. `postinstall` fetches your platform's build from the signed manifest, **verifies its SHA-256 before writing anything**, and puts it in a per-version user cache (`%LOCALAPPDATA%\xiaobenben\pkg` · `~/Library/Caches/xiaobenben/pkg` · `~/.cache/xiaobenben/pkg`) so every project on the machine shares one copy. Installed with `--ignore-scripts`? The first run fetches it instead. Either way the binary keeps self-updating from the same signed manifest as the standalone download.
+
+Available on Windows x64, macOS arm64/x64 and Linux x64 — the same four builds as above. On other architectures npm installs the wrapper but logs that no build exists yet.
+
 ## Connect your AI client
 
 Add `xbb` as a stdio server in your client's MCP config. The host spawns the process; you do not run it by hand.
@@ -223,6 +234,16 @@ Add `xbb` as a stdio server in your client's MCP config. The host spawns the pro
 ```
 
 On Windows, if the exe is not on `PATH`, use the full path (e.g. `C:\\Users\\you\\.xiaobenben\\bin\\xbb.exe`).
+
+Or skip the download entirely and let npm handle it:
+
+```json
+{
+  "mcpServers": {
+    "xiaobenben": { "command": "npx", "args": ["-y", "xiaobenben", "mcp"] }
+  }
+}
+```
 
 Twelve hosts are verified. Six of them go beyond MCP:
 

@@ -16,3 +16,6 @@ tools/poc/*.exe
 tools/poc/dist-poc/
 .selfupdate-probe/
 .third-party-build/
+
+# npm 打包产物
+*.tgz

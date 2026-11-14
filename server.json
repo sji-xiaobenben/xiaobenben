@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sji-xiaobenben/xiaobenben",
+  "title": "小本本 (xiaobenben)",
+  "description": "Local-first long-term memory for AI assistants. Stores what you talk about in a SQLite file on your own machine and exposes it over MCP stdio, so any MCP client can recall it in later sessions without sending anything to a server.",
+  "websiteUrl": "https://xiaobenben.net",
+  "repository": {
+    "url": "https://github.com/sji-xiaobenben/xiaobenben",
+    "source": "github"
+  },
+  "version": "0.4.53",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "xiaobenben",
+      "version": "0.4.53",
+      "transport": { "type": "stdio" },
+      "runtimeHint": "npx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "valueHint": "command",
+          "description": "Run the MCP stdio server (this is the mode MCP clients need)"
+        }
+      ]
+    }
+  ]
+}

@@ -9,7 +9,31 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
 
 ## [未发布]
 
-（暂无）
+### 新增
+
+- **npm 分发**：`npx xiaobenben mcp` 与 `npm i -g xiaobenben` 现在可用。包本体只有
+  47 kB（11 个文件），不再有人为了「从源码跑」而额外下载 98 MB 的 `onnxruntime-node`；
+  真正的二进制由 `postinstall` 按平台取回。清单用**与 exe 自更新同一把内置 ed25519
+  公钥**验签，产物在落盘前校验 SHA-256，两者任一不过都不写文件——「CDN 被投毒但私钥
+  没泄露」这条路径在这里是断的。`--ignore-scripts` 装进来的，首次运行会自动补齐。
+
+  二进制落在按版本分的用户缓存（Windows `%LOCALAPPDATA%\xiaobenben\pkg`、
+  macOS `~/Library/Caches/xiaobenben/pkg`、Linux `~/.cache/xiaobenben/pkg`），
+  而不是包目录里——pnpm 的 `node_modules` 是硬链接到全局 store 的只读副本，往里写会
+  污染 store；放缓存也让多项目共用一份。
+
+  平台覆盖与安装包一致（win32-x64 / darwin-arm64 / darwin-x64 / linux-x64）。
+  其它架构会装下包装器但不下载，并说明「暂无官方构建」，不会伪装成网络失败。
+
+### 工程
+
+- 新增 `tools/npm-pkg-check.ts`：npm 安装阶段只能跑纯 Node，所以公钥、载荷魔数在
+  `scripts/lib/install.mjs` 里各有一份副本。漂移的后果不是报错而是**所有用户都装不下来**
+  （验签 fail-closed，日志里看不出原因），所以加了一条会响的断言——同时校验
+  `server.json` 与 `package.json` 的版本/名称、`files` 清单里的文件是否真实存在、
+  `bin` 是否带 shebang、以及安装侧有没有往 stdout 写东西（那是 MCP 的协议通道）。
+- `dependencies` 全部移入 `devDependencies`：npm 渠道的运行时依赖只有 Node 原生模块。
+
 
 ## [0.4.53] - 2026-11-12
 

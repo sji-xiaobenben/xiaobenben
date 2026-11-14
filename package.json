@@ -4,7 +4,25 @@
   "description": "面向 AI 的个人记忆库客户端 · local-first · Bun 单文件可执行 · MCP stdio",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "bin": {
+    "xiaobenben": "bin/xbb.mjs",
+    "xbb": "bin/xbb.mjs"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "server.json",
+    "LICENSE",
+    "LICENSE-Commercial.md",
+    "NOTICE",
+    "THIRD-PARTY-LICENSES.md"
+  ],
+  "mcpName": "io.github.sji-xiaobenben/xiaobenben",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
+    "node": ">=20.10.0",
     "bun": ">=1.4.2"
   },
   "homepage": "https://xiaobenben.net",
@@ -17,16 +35,17 @@
   },
   "author": "世纪之城（广州）信息科技有限公司",
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "dev": "bun run src/index.ts serve",
     "typecheck": "tsc --noEmit",
-    "test": "bun run bundle:ort && bun test src/home.test.ts src/open.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/schema-busy.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts src/search.test.ts src/shortcut.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/shortcut-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
+    "test": "bun run bundle:ort && bun test src/home.test.ts src/open.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/schema-busy.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts src/search.test.ts src/shortcut.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/shortcut-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/npm-pkg-check.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
     "build": "bun run tools/build.ts",
     "build:win": "bun run tools/build.ts --outfile dist/xbb-windows-x64.exe",
     "build:linux": "bun run tools/build.ts --target=bun-linux-x64 --outfile dist/xbb-linux-x64",
     "build:mac-arm": "bun run tools/build.ts --target=bun-darwin-arm64 --outfile dist/xbb-darwin-arm64",
     "build:mac-intel": "bun run tools/build.ts --target=bun-darwin-x64 --external onnxruntime-node --outfile dist/xbb-darwin-x64",
     "bundle:ort": "bun build --target=bun --format=cjs --external \"*.node\" --outfile node_modules/onnxruntime-node/dist/ort-bundle.cjs src/ort-bundle-entry.ts",
-    "test:ci": "bun run bundle:ort && bun test src/home.test.ts src/open.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/schema-busy.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts src/search.test.ts src/shortcut.test.ts src/embedder.test.ts src/embed-backfill.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/shortcut-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
+    "test:ci": "bun run bundle:ort && bun test src/home.test.ts src/open.test.ts src/cli-help.test.ts src/serve.test.ts src/store.test.ts src/schema-busy.test.ts src/models.test.ts src/cloud.test.ts src/notify.test.ts src/events-parse.test.ts src/notify-watch.test.ts src/constraints.test.ts src/links.test.ts src/search.test.ts src/shortcut.test.ts src/embedder.test.ts src/embed-backfill.test.ts && bun run tools/ort-path-smoke.ts && bun run tools/mcp-smoke.ts && bun run tools/payload-smoke.ts && bun run tools/serve-smoke.ts && bun run tools/events-smoke.ts && bun run tools/hooks-smoke.ts && bun run tools/tray-smoke.ts && bun run tools/autostart-smoke.ts && bun run tools/shortcut-smoke.ts && bun run tools/update-smoke.ts && bun run tools/check-admin-html.ts && bun run tools/npm-pkg-check.ts && bun run tools/episode-transcript.ts && bun run tools/sniff-smoke.ts && bun run tools/ingest-smoke.ts",
     "gen:tray-icon": "bun run tools/gen-tray-icon.ts",
     "gen:app-icon": "bun run tools/gen-app-icon.ts",
     "gen:licenses": "bun run tools/gen-third-party-licenses.ts",
@@ -38,11 +57,17 @@
     "core:sync": "bun run tools/sync-core.ts sync",
     "core:check": "bun run tools/sync-core.ts check"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "ai-memory",
+    "local-first",
+    "sqlite"
+  ],
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "^5.7.0"
-  },
-  "dependencies": {
+    "typescript": "^5.7.0",
     "@modelcontextprotocol/sdk": "^1",
     "onnxruntime-node": "^1.31.1",
     "systray2": "^2.1.4",
