@@ -23,7 +23,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type ClientId = "opencode" | "cursor" | "workbuddy" | "claudecode" | "claudedesktop" | "codex";
+import { detectRunningHosts, resolveHosts, type ProcNode, type RunningHost } from "./connect-proc";
+import { parseJsonc } from "./jsonc";
+
+export type { ClientId } from "./connect-proc";
+import type { ClientId } from "./connect-proc";
 
 /** 配置里那条目实际连的是哪种形态的引擎 —— 决定「要不要建议换成别的」 */
 export type EngineVia = "npx" | "desktop" | "pkg" | "other";
@@ -43,6 +47,16 @@ export interface ClientStatus {
   commandPath: string | null;
   /** 配了但不可用：JSON 坏了、或指向的 exe 已经不在了 */
   broken: string | null;
+  /**
+   * 结论是怎么来的。**这个字段是为了不再撒谎**：
+   * `config` = 在配置里读到了条目；`process` = 配置没定位到，但有它的 MCP 子进程在跑；
+   * null = 两者都没有 ⇒ 只能说「未检测到」，不能说「没接入」。
+   */
+  detectedBy: "config" | "process" | null;
+  /** 有 `xbb mcp` 子进程在跑（即使配置文件没找到） */
+  running: boolean;
+  /** 进程层看到的祖先进程名（原始大小写，排障用） */
+  hostProcess: string | null;
 }
 
 export interface Entry {
@@ -56,20 +70,32 @@ interface Spec {
   label: string;
   /** 任一存在 ⇒ 视为已安装 */
   installPaths: string[];
-  /** 候选配置路径，取第一个存在的；一个都不存在时用第一个作为「该往哪写」 */
+  /**
+   * 候选配置路径，**全部**都读（不是取第一个存在的就停）。
+   * 一个都不存在时，用第一个作为「该往哪写」。
+   */
   configPaths: string[];
   kind: "json" | "toml";
-  /** JSON 里装条目表的顶层键 */
-  container?: string;
+  /**
+   * JSON 里走到「条目表」的路径，可给多条。`*` 表示这一层是任意键，需要展开
+   * （Claude Code 的 `projects.<项目路径>.mcpServers` 就是这样）。
+   *
+   * 为什么是数组而不是单个字符串：同一个客户端的不同版本、不同作用域层级就不一样 ——
+   * opencode 有 `mcp` 与 `mcp.servers` 两代；Claude Code 有顶层与 `projects.*` 两级。
+   * 只认一种必然对另一半用户误报。
+   */
+  containers?: string[][];
   /** opencode 把 command 写成数组且需要 type/enabled */
   opencodeStyle?: boolean;
+  /** 项目级配置：从当前工作目录拼出来一起找（Cursor / Claude Code 都支持项目级） */
+  projectPath?: string;
 }
 
 /**
  * 各客户端的安装痕迹与配置位置。**这些路径是会过期的知识**，不是永恒真理 ——
  * 上游改版时这里就该跟着改，所以集中在一处，并且每一项都注释了判断依据。
  */
-function specs(home: string, env: NodeJS.ProcessEnv): Spec[] {
+function specs(home: string, env: NodeJS.ProcessEnv, cwd: string): Spec[] {
   const xdg = env.XDG_CONFIG_HOME || join(home, ".config");
   const appData = env.APPDATA || join(home, "AppData", "Roaming");
   const codexHome = env.CODEX_HOME || join(home, ".codex");
@@ -79,35 +105,48 @@ function specs(home: string, env: NodeJS.ProcessEnv): Spec[] {
       label: "opencode",
       // 本机实测：Windows 上 opencode 也用 ~/.config/opencode（不跟 APPDATA 走）
       installPaths: [join(xdg, "opencode"), join(home, ".opencode")],
-      configPaths: [join(xdg, "opencode", "opencode.json"), join(xdg, "opencode", "config.json")],
+      // 官方文档的示例现在一律是 .jsonc；老版本/手写配置是 .json，再老的是 config.json
+      configPaths: [
+        join(xdg, "opencode", "opencode.json"),
+        join(xdg, "opencode", "opencode.jsonc"),
+        join(xdg, "opencode", "config.json"),
+      ],
+      // 两代结构：老版 `mcp.<name>`，新版 `mcp.servers.<name>`（本机 v2.2.7 用老结构仍正常，
+      // 说明读取端兼容两代 —— 所以这里两种都要认，只认一种就会误报另一半用户）
+      containers: [["mcp"], ["mcp", "servers"]],
       kind: "json",
-      container: "mcp",
       opencodeStyle: true,
     },
     {
       id: "cursor",
       label: "Cursor",
       installPaths: [join(home, ".cursor")],
-      configPaths: [join(home, ".cursor", "mcp.json")],
+      // 官方两种位置：全局 ~/.cursor/mcp.json 与 项目级 <项目>/.cursor/mcp.json（两者合并）
+      configPaths: [join(home, ".cursor", "mcp.json"), join(cwd, ".cursor", "mcp.json")],
+      containers: [["mcpServers"]],
       kind: "json",
-      container: "mcpServers",
+      projectPath: join(".cursor", "mcp.json"),
     },
     {
       id: "workbuddy",
       label: "WorkBuddy",
       installPaths: [join(home, ".workbuddy")],
       configPaths: [join(home, ".workbuddy", "mcp.json")],
+      containers: [["mcpServers"]],
       kind: "json",
-      container: "mcpServers",
     },
     {
       id: "claudecode",
       label: "Claude Code",
       // CLI 的用户级配置在 ~/.claude.json（注意不是目录）；~/.claude 是它跑起来后建的
       installPaths: [join(home, ".claude.json"), join(home, ".claude")],
-      configPaths: [join(home, ".claude.json")],
+      // 三种作用域：user（顶层 mcpServers）、local（projects.<路径>.mcpServers，**默认作用域**）、
+      // project（项目根 .mcp.json）。只读顶层会漏掉绝大多数人 —— `claude mcp add` 不加 --scope
+      // 时写的就是 local。
+      configPaths: [join(home, ".claude.json"), join(cwd, ".mcp.json")],
+      containers: [["mcpServers"], ["projects", "*", "mcpServers"]],
       kind: "json",
-      container: "mcpServers",
+      projectPath: ".mcp.json",
     },
     {
       id: "claudedesktop",
@@ -117,8 +156,8 @@ function specs(home: string, env: NodeJS.ProcessEnv): Spec[] {
         join(appData, "Claude", "claude_desktop_config.json"),
         join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
       ],
+      containers: [["mcpServers"]],
       kind: "json",
-      container: "mcpServers",
     },
     {
       id: "codex",
@@ -165,26 +204,59 @@ function pickCommand(entry: Record<string, unknown>, opencodeStyle?: boolean): s
   return null;
 }
 
+/**
+ * 沿一条路径走到「条目表」，再把它展开成 `[名字 → 条目]`。
+ *
+ * `*` 表示这一层是任意键（Claude Code 的 `projects.<项目路径>.mcpServers`）。
+ * 只把**长着条目样子**的对象当条目：必须自带 `command` 或 `url`。
+ * 这条判据是为了不把 `mcp.servers` 这层包装当成一个叫 `servers` 的服务器 ——
+ * 它没有 command/url，只是容器。
+ */
+function collectEntries(
+  node: unknown,
+  path: string[],
+  out: Array<{ name: string; obj: Record<string, unknown> }>,
+  depth = 0,
+): void {
+  if (depth > 6) return; // 防御：脏数据里的自引用
+  if (path.length === 0) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    for (const [name, v] of Object.entries(node as Record<string, unknown>)) {
+      if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+      const obj = v as Record<string, unknown>;
+      if (!("command" in obj) && !("url" in obj)) continue;
+      out.push({ name, obj });
+    }
+    return;
+  }
+  if (!node || typeof node !== "object" || Array.isArray(node)) return;
+  const obj = node as Record<string, unknown>;
+  const [head, ...rest] = path;
+  if (head === "*") {
+    for (const v of Object.values(obj)) collectEntries(v, rest, out, depth + 1);
+    return;
+  }
+  collectEntries(obj[head!], rest, out, depth + 1);
+}
+
 function scanJson(
   text: string,
-  container: string,
+  containers: string[][],
   opencodeStyle?: boolean,
 ): { entries: Array<{ name: string; obj: Record<string, unknown> }>; problem: string | null } {
   let doc: unknown;
   try {
-    doc = JSON.parse(text);
+    // 先按 JSONC 剥一遍：opencode 的官方示例就带注释与尾逗号，纯 JSON.parse 会把
+    // 一份完全正常的配置判成「读不了」。（stripJsonc 对纯 JSON 是恒等变换）
+    doc = parseJsonc(text);
   } catch (e) {
     return { entries: [], problem: `配置不是合法 JSON（${e instanceof Error ? e.message : String(e)}）` };
   }
   if (!doc || typeof doc !== "object") return { entries: [], problem: "配置顶层不是对象" };
-  const box = (doc as Record<string, unknown>)[container];
-  if (!box || typeof box !== "object") return { entries: [], problem: null };
-  return {
-    entries: Object.entries(box as Record<string, unknown>)
-      .filter(([, v]) => v && typeof v === "object")
-      .map(([name, v]) => ({ name, obj: v as Record<string, unknown> })),
-    problem: null,
-  };
+  const entries: Array<{ name: string; obj: Record<string, unknown> }> = [];
+  for (const path of containers) collectEntries(doc, path, entries);
+  void opencodeStyle;
+  return { entries, problem: null };
 }
 
 /**
@@ -216,71 +288,138 @@ function scanToml(text: string): { entries: Array<{ name: string; body: string }
   };
 }
 
-function firstExisting(paths: string[]): { path: string; exists: boolean } {
-  for (const p of paths) if (existsSync(p)) return { path: p, exists: true };
-  return { path: paths[0] ?? "", exists: false };
-}
-
 /**
  * 探测所有客户端。**永不抛异常** —— 一个坏掉的配置文件不该让整条命令失败，
  * 那会让用户以为「小本本坏了」而不是「某个客户端配置写错了」。
+ *
+ * 两条判据缺一不可：
+ *   · **配置**：能精确指认「哪个客户端、接的哪种引擎、路径是否还有效」；
+ *   · **进程**：不依赖「配置放哪」，能证明「它正在被使用」，还能认出宿主。
+ * 只有两条都空时才敢说「未检测到」，而且措辞必须留有余地 —— 见 renderConnect。
+ *
+ * `procs` 可注入（测试用）：默认会真的去枚举本机进程，那在单测里既有污染又慢。
  */
-export function probeClients(opts: { home?: string; env?: NodeJS.ProcessEnv } = {}): ClientStatus[] {
+export function probeClients(
+  opts: {
+    home?: string;
+    env?: NodeJS.ProcessEnv;
+    cwd?: string;
+    procs?: ProcNode[];
+    /**
+     * 跳过进程枚举。`xbb --version` 那种「一眼摘要」用它 ——
+     * Windows 上一次全表 CIM 查询约 0.5s，为一行摘要付这个代价不值，
+     * 而且 `--version` 会被脚本反复调用。
+     *
+     * 跳过不等于撒谎：摘要文案已经改成「未检测到」并在措辞上注明不等同于没接入，
+     * 详细的进程判据留给 `xbb connect`（人主动敲的命令，愿意等那 0.5s）。
+     */
+    skipProcess?: boolean;
+  } = {},
+): ClientStatus[] {
   const home = opts.home ?? homedir();
   const env = opts.env ?? process.env;
-  return specs(home, env).map((spec) => {
+  const cwd = opts.cwd ?? process.cwd();
+
+  // 进程只枚举一次，按客户端分组。认不出宿主的（终端里手敲的、VS Code 里跑的）
+  // 单独留着，由 renderConnect 如实说明「有人在用，但认不出是谁」。
+  const hosts: RunningHost[] = opts.skipProcess
+    ? []
+    : opts.procs
+      ? resolveHosts(opts.procs)
+      : detectRunningHosts();
+  const runningBy = new Map<ClientId, RunningHost>();
+  for (const h of hosts) {
+    if (h.client && !runningBy.has(h.client)) runningBy.set(h.client, h);
+  }
+
+  return specs(home, env, cwd).map((spec) => {
+    const running = runningBy.get(spec.id) ?? null;
     const base: ClientStatus = {
       id: spec.id,
       label: spec.label,
-      installed: spec.installPaths.some((p) => existsSync(p)),
+      installed: spec.installPaths.some((p) => existsSync(p)) || !!running,
       configPath: spec.configPaths[0] ?? "",
       configExists: false,
       entryName: null,
       via: null,
       commandPath: null,
       broken: null,
+      detectedBy: null,
+      running: !!running,
+      hostProcess: running?.hostName ?? null,
     };
+
+    let hitPath: string | null = null;
+    let firstExistingPath: string | null = null;
+    let problem: string | null = null;
+
     try {
-      const cfg = firstExisting(spec.configPaths);
-      base.configPath = cfg.path;
-      base.configExists = cfg.exists;
-      if (!cfg.exists) return base;
+      // 逐个读：**不是**"找到第一个存在的文件就停"。同一个人可能在全局配了、
+      // 又在项目里配了；也可能 .json 是坏的、.jsonc 才是真正在用的那份。
+      for (const p of spec.configPaths) {
+        if (!existsSync(p)) continue;
+        if (!firstExistingPath) firstExistingPath = p;
 
-      const text = readFileSync(cfg.path, "utf8");
-      if (spec.kind === "toml") {
-        const { entries, problem } = scanToml(text);
-        if (problem) base.broken = problem;
-        for (const e of entries) {
-          const via = classify(e.body);
-          if (!via) continue;
-          const m = /\bcommand\s*=\s*['"]([^'"]+)['"]/.exec(e.body);
-          base.entryName = e.name;
-          base.via = via;
-          base.commandPath = m?.[1] ?? null;
-          break;
+        let text: string;
+        try {
+          text = readFileSync(p, "utf8");
+        } catch (e) {
+          problem ??= `${p}: ${e instanceof Error ? e.message : String(e)}`;
+          continue;
         }
-      } else {
-        const { entries, problem } = scanJson(text, spec.container ?? "mcpServers", spec.opencodeStyle);
-        if (problem) base.broken = problem;
-        for (const e of entries) {
-          const via = classify(flatten(e.obj));
-          if (!via) continue;
-          base.entryName = e.name;
-          base.via = via;
-          base.commandPath = pickCommand(e.obj, spec.opencodeStyle);
-          break;
+
+        if (spec.kind === "toml") {
+          const { entries, problem: prob } = scanToml(text);
+          if (prob) {
+            problem ??= prob;
+            continue;
+          }
+          for (const e of entries) {
+            const via = classify(e.body);
+            if (!via) continue;
+            const m = /\bcommand\s*=\s*['"]([^'"]+)['"]/.exec(e.body);
+            base.entryName = e.name;
+            base.via = via;
+            base.commandPath = m?.[1] ?? null;
+            hitPath = p;
+            break;
+          }
+        } else {
+          const { entries, problem: prob } = scanJson(text, spec.containers ?? [["mcpServers"]], spec.opencodeStyle);
+          if (prob) {
+            problem ??= prob;
+            continue;
+          }
+          for (const e of entries) {
+            const via = classify(flatten(e.obj));
+            if (!via) continue;
+            base.entryName = e.name;
+            base.via = via;
+            base.commandPath = pickCommand(e.obj, spec.opencodeStyle);
+            hitPath = p;
+            break;
+          }
         }
+        if (hitPath) break;
       }
+    } catch (e) {
+      problem ??= e instanceof Error ? e.message : String(e);
+    }
 
-      // 配了但跑不起来 —— 这是最难自查的故障：客户端里看着有、AI 就是没有记忆。
+    base.configExists = !!firstExistingPath;
+    base.configPath = hitPath ?? firstExistingPath ?? spec.configPaths[0] ?? "";
+    base.detectedBy = hitPath ? "config" : running ? "process" : null;
+
+    // 配了但跑不起来 —— 这是最难自查的故障：客户端里看着有、AI 就是没有记忆。
+    if (hitPath) {
       if (looksLikePath(base.commandPath) && !existsSync(base.commandPath)) {
         base.broken = `配置指向的可执行文件已不存在：${base.commandPath}`;
       }
-      return base;
-    } catch (e) {
-      base.broken = e instanceof Error ? e.message : String(e);
-      return base;
+    } else if (problem) {
+      // 只有「真配了却读不出来」才算 broken。连文件都没有不是故障，是没配。
+      base.broken = problem;
     }
+    return base;
   });
 }
 
@@ -346,27 +485,39 @@ function pad(s: string, n: number): string {
   return s + " ".repeat(Math.max(0, n - w));
 }
 
-export function renderConnect(statuses: ClientStatus[], entry: Entry): string {
+export function renderConnect(statuses: ClientStatus[], entry: Entry, hosts?: RunningHost[]): string {
   const installed = statuses.filter((s) => s.installed);
   const connected = statuses.filter((s) => s.via && !s.broken);
+  const runningOnly = statuses.filter((s) => !s.via && s.running);
+  const unknown = (hosts ?? []).filter((h) => !h.client);
   const lines: string[] = [];
 
   lines.push("小本本 · AI 客户端接入状态");
   lines.push("");
-  lines.push(`  ${pad("客户端", 16)}${pad("已安装", 10)}${pad("已接入", 10)}引擎`);
-  lines.push("  " + "─".repeat(50));
+  lines.push(`  ${pad("客户端", 16)}${pad("已安装", 10)}${pad("接入", 12)}引擎`);
+  lines.push("  " + "─".repeat(52));
   for (const s of statuses) {
     const inst = s.installed ? "是" : "否";
-    const conn = s.via ? (s.broken ? "异常" : "是") : s.installed ? "否" : "—";
+    // 「使用中」是进程层看到的事实、配置层没定位到。它与「是」的区别对用户很重要：
+    // 前者不该再去动配置（很可能已经正确，只是我们没找到那个文件）。
+    const conn = s.via
+      ? s.broken
+        ? "异常"
+        : "是"
+      : s.running
+        ? "使用中"
+        : s.installed
+          ? "未检测到"
+          : "—";
     const via = s.via ? VIA_LABEL[s.via] : "—";
-    lines.push(`  ${pad(s.label, 16)}${pad(inst, 10)}${pad(conn, 10)}${via}`);
+    lines.push(`  ${pad(s.label, 16)}${pad(inst, 10)}${pad(conn, 12)}${via}`);
   }
   lines.push("");
-  lines.push(
-    installed.length
-      ? `  检测到 ${installed.length} 个客户端，其中 ${connected.length} 个已接入。`
-      : "  没有检测到本机安装任何 AI 客户端。",
-  );
+  const bits: string[] = [];
+  bits.push(installed.length ? `检测到 ${installed.length} 个客户端` : "没有检测到本机安装任何 AI 客户端");
+  if (connected.length) bits.push(`${connected.length} 个已接入`);
+  if (runningOnly.length) bits.push(`${runningOnly.length} 个正在使用（配置未定位到）`);
+  lines.push("  " + bits.join("，") + "。");
 
   const broken = statuses.filter((s) => s.broken);
   if (broken.length) {
@@ -378,10 +529,20 @@ export function renderConnect(statuses: ClientStatus[], entry: Entry): string {
     }
   }
 
-  const pending = installed.filter((s) => !s.via);
+  if (runningOnly.length) {
+    lines.push("");
+    lines.push("  正在使用、但没在常见位置找到配置的：");
+    for (const s of runningOnly) {
+      const who = s.hostProcess ? `（宿主进程 ${s.hostProcess}）` : "";
+      lines.push(`     ${s.label}${who} —— 有 xbb mcp 子进程在跑，说明它已经能用了。`);
+    }
+    lines.push("     不要重新配置：这些客户端的配置可能放在项目目录或内部存储里。");
+  }
+
+  const pending = installed.filter((s) => !s.via && !s.running);
   if (pending.length) {
     lines.push("");
-    lines.push("  还没接入的客户端 —— 把下面这段放进它自己的配置文件：");
+    lines.push("  未检测到接入的客户端 —— 把下面这段放进它自己的配置文件：");
     for (const s of pending) {
       lines.push("");
       lines.push(`  ── ${s.label} ──  ${s.configPath}`);
@@ -394,7 +555,25 @@ export function renderConnect(statuses: ClientStatus[], entry: Entry): string {
     }
   } else if (installed.length) {
     lines.push("");
-    lines.push("  所有已安装的客户端都接入了，无需操作。");
+    lines.push("  所有已安装的客户端都能用了，无需操作。");
+  }
+
+  if (unknown.length) {
+    lines.push("");
+    lines.push("  另有 MCP 进程在跑，但认不出是哪个客户端拉起的：");
+    for (const h of unknown) {
+      const who = h.hostName ? `挂在 ${h.hostName} 下` : "宿主已退出";
+      lines.push(`     pid ${h.pid} · ${who}${h.fromShell ? "（像是在终端里手动跑的）" : ""}`);
+    }
+  }
+
+  // 「未检测到」必须自带这句话。否则用户会拿它当结论去重配一个本来好用的客户端 ——
+  // 这正是 2026-11-16 那条反馈里最要紧的一层。
+  if (statuses.some((s) => s.installed && !s.via && !s.running)) {
+    lines.push("");
+    lines.push("  说明：「未检测到」只代表本命令没在常见位置读到配置，不等于没接入。");
+    lines.push("        部分客户端把配置存在项目目录或内部数据库里，这里读不到但照样能用。");
+    lines.push("        确定自己在用的客户端，别照着上面的片段重配。");
   }
 
   lines.push("");
@@ -403,7 +582,7 @@ export function renderConnect(statuses: ClientStatus[], entry: Entry): string {
     lines.push("        而 MCP 下没人能回答，表现是客户端一直连不上而不是报错。");
   }
   lines.push("  改完配置要重启对应客户端才生效（它们只在启动时读一次）。");
-  lines.push("  本命令只读配置，不修改任何文件。");
+  lines.push("  本命令只读配置与进程，不修改任何文件。");
   return lines.join("\n");
 }
 
@@ -413,18 +592,23 @@ export function connectSummary(statuses: ClientStatus[]): string {
   if (!installed.length) return "接入: 未检测到本机 AI 客户端 · 运行 xbb connect 查看详情";
   const connected = installed.filter((s) => s.via && !s.broken);
   const broken = installed.filter((s) => s.broken);
+  const runningOnly = installed.filter((s) => !s.via && s.running);
+  // 「正在使用但配置没定位到」必须单独说，不能并进「已接入」，更不能并进「未接入」——
+  // 前者会让用户以为配置没问题（其实没读到），后者会让他去重配一个能用的客户端。
+  const tail = runningOnly.length ? ` · 另 ${runningOnly.length} 个正在使用` : "";
   if (!connected.length) {
     // 「配了但坏了」和「压根没配」是两种处境：前者用户会以为一切正常（客户端里明明有这一条），
-    // 后者他至少知道自己没接过。合并成一句「均未接入」会把前者藏起来 —— 而那正是
+    // 后者他至少知道自己没接过。合并成一句会把前者藏起来 —— 而那正是
     // 「AI 突然没有记忆」最难自查的形态。
     if (broken.length) {
-      return `接入: 0/${installed.length}（${broken.length} 个配置存在但连不上）· 运行 xbb connect 查看`;
+      return `接入: 0/${installed.length}（${broken.length} 个配置存在但连不上）${tail} · 运行 xbb connect 查看`;
     }
-    return `接入: 0/${installed.length}（已安装 ${installed.map((s) => s.label).join(" / ")} 均未接入）· 运行 xbb connect`;
+    // 措辞是刻意的：这里给不出「没接入」这个结论，只说「没检测到」。
+    return `接入: 未检测到（${installed.length} 个客户端${tail}）· 运行 xbb connect 查看`;
   }
   const names = connected.map((s) => s.label).join(" / ");
   const warn = broken.length ? ` · ${broken.length} 个配置异常` : "";
-  return `接入: ${names}（${connected.length}/${installed.length}）${warn} · 运行 xbb connect 查看全部`;
+  return `接入: ${names}（${connected.length}/${installed.length}）${tail}${warn} · 运行 xbb connect 查看全部`;
 }
 
 /** 给 `--json` 用：不含内部实现细节，字段名即语义 */
@@ -437,12 +621,17 @@ export function toJson(statuses: ClientStatus[], entry: Entry): string {
         label: s.label,
         installed: s.installed,
         connected: !!s.via && !s.broken,
+        /** config=配置里读到的 / process=进程在跑但配置没定位到 / null=两者都没有 */
+        detectedBy: s.detectedBy,
+        running: s.running,
+        hostProcess: s.hostProcess,
         via: s.via,
         entryName: s.entryName,
         configPath: s.configPath,
         configExists: s.configExists,
         broken: s.broken,
-        snippet: s.installed && !s.via ? snippet(s.id, entry) : null,
+        // 只有「真的没发现任何痕迹」才给片段。正在使用的不给 —— 那会诱导用户去重配。
+        snippet: s.installed && !s.via && !s.running ? snippet(s.id, entry) : null,
       })),
     },
     null,

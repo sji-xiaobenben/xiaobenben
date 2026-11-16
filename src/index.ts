@@ -701,13 +701,21 @@ if (cmd === "serve") {
   // 而「引擎装好了」和「已经接进某个客户端」是两件事 —— 不在这里说，用户就无从得知。
   // 纯本地文件探测，不发网络请求，不拖慢版本查询。
   const { probeClients, connectSummary } = await import("./connect");
-  console.log(connectSummary(probeClients()));
+  // 跳过进程枚举：`--version` 是脚本高频调用的命令，不该为一行摘要去扫全表进程
+  // （Windows 一次 CIM 查询约 0.5s）。进程判据留给 `xbb connect`。
+  console.log(connectSummary(probeClients({ skipProcess: true })));
 } else if (cmd === "connect") {
   // 「我到底把它装进哪个 AI 客户端了？」—— 只读探测，改动配置的事不在这里做
   const { probeClients, recommendedEntry, renderConnect, toJson } = await import("./connect");
-  const statuses = probeClients();
+  const { listProcesses, resolveHosts } = await import("./connect-proc");
+  // 进程表只枚举一次，两个用途共用：probeClients 拿它认宿主，renderConnect 拿它报
+  // 「认不出是谁」的那几个。枚举一次约 0.5s（Windows CIM 全表），不值得做两遍。
+  const procs = listProcesses();
+  const statuses = probeClients({ procs });
   const entry = recommendedEntry();
-  console.log(args.includes("--json") ? toJson(statuses, entry) : renderConnect(statuses, entry));
+  console.log(
+    args.includes("--json") ? toJson(statuses, entry) : renderConnect(statuses, entry, resolveHosts(procs)),
+  );
 } else if (cmd === "update") {
   // 手动检查更新：与托盘「检查更新」同一入口，并放行黑名单——便于排障与应急
   const updater = new Updater();

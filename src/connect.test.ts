@@ -26,6 +26,8 @@ import {
   snippet,
   toJson,
 } from "./connect";
+import type { ProcNode } from "./connect-proc";
+import { resolveHosts } from "./connect-proc";
 
 const EXE = process.platform === "win32" ? "xbb.exe" : "xbb";
 
@@ -52,11 +54,21 @@ function sandbox() {
 
 const byId = (list: ReturnType<typeof probeClients>, id: string) => list.find((c) => c.id === id)!;
 
+/**
+ * 统一的探测入口。**注入空进程表**是刻意的：默认实现会枚举本机真实进程，
+ * 那么「本机正好开着 opencode」就会让断言时绿时红。进程判据另有用例专门注入。
+ */
+function probe(s: ReturnType<typeof sandbox>, procs: ProcNode[] = [], cwd?: string) {
+  return probeClients({ home: s.home, env: s.env, procs, cwd });
+}
+
+const proc = (pid: number, ppid: number, name: string, cmd: string): ProcNode => ({ pid, ppid, name, cmd });
+
 describe("probeClients", () => {
   test("空目录 ⇒ 什么都没装，也不谎报已接入", () => {
     const s = sandbox();
     try {
-      const list = probeClients({ home: s.home, env: s.env });
+      const list = probe(s);
       expect(list.length).toBe(6);
       expect(list.every((c) => !c.installed)).toBe(true);
       expect(list.every((c) => c.via === null)).toBe(true);
@@ -69,7 +81,7 @@ describe("probeClients", () => {
     const s = sandbox();
     try {
       s.put(".cursor/mcp.json", JSON.stringify({ mcpServers: {} }));
-      const c = byId(probeClients({ home: s.home, env: s.env }), "cursor");
+      const c = byId(probe(s), "cursor");
       expect(c.installed).toBe(true);
       expect(c.configExists).toBe(true);
       expect(c.via).toBeNull();
@@ -86,7 +98,7 @@ describe("probeClients", () => {
         ".cursor/mcp.json",
         JSON.stringify({ mcpServers: { xiaobenben: { command: "npx", args: ["-y", "xiaobenben", "mcp"] } } }),
       );
-      const c = byId(probeClients({ home: s.home, env: s.env }), "cursor");
+      const c = byId(probe(s), "cursor");
       expect(c.via).toBe("npx");
       expect(c.entryName).toBe("xiaobenben");
       expect(c.commandPath).toBe("npx");
@@ -104,7 +116,7 @@ describe("probeClients", () => {
         ".config/opencode/opencode.json",
         JSON.stringify({ mcp: { xiaobenben: { type: "local", command: [exe, "mcp"], enabled: true } } }),
       );
-      const c = byId(probeClients({ home: s.home, env: s.env }), "opencode");
+      const c = byId(probe(s), "opencode");
       expect(c.installed).toBe(true);
       expect(c.via).toBe("desktop");
       expect(c.commandPath).toBe(exe);
@@ -133,7 +145,7 @@ describe("probeClients", () => {
           'followUpQueueMode = "steer"',
         ].join("\n"),
       );
-      const c = byId(probeClients({ home: s.home, env: s.env }), "codex");
+      const c = byId(probe(s), "codex");
       expect(c.installed).toBe(true);
       expect(c.via).toBe("npx");
       expect(c.entryName).toBe("xiaobenben");
@@ -151,11 +163,11 @@ describe("probeClients", () => {
           mcpServers: { xiaobenben: { command: join(s.home, ".xiaobenben", "bin", EXE), args: ["mcp"] } },
         }),
       );
-      const c = byId(probeClients({ home: s.home, env: s.env }), "cursor");
+      const c = byId(probe(s), "cursor");
       expect(c.via).toBe("desktop");
       expect(c.broken).toContain("已不存在");
       // 并计入「未接入」——客户端里看着有、实际连不上，不能算接入成功
-      const summary = connectSummary(probeClients({ home: s.home, env: s.env }));
+      const summary = connectSummary(probe(s));
       expect(summary).toContain("0/1");
       // 措辞必须区分「坏了」和「没配」：前者用户以为一切正常，最需要被点出来
       expect(summary).toContain("连不上");
@@ -172,7 +184,7 @@ describe("probeClients", () => {
         ".workbuddy/mcp.json",
         JSON.stringify({ mcpServers: { xiaobenben: { command: "npx", args: ["-y", "xiaobenben", "mcp"] } } }),
       );
-      const list = probeClients({ home: s.home, env: s.env });
+      const list = probe(s);
       expect(byId(list, "cursor").broken).toContain("JSON");
       // 一个坏文件不该影响别的客户端
       expect(byId(list, "workbuddy").via).toBe("npx");
@@ -245,16 +257,16 @@ describe("recommendedEntry", () => {
 });
 
 describe("renderConnect", () => {
-  test("未接入的客户端给出片段和它自己的配置路径", () => {
+  test("未检测到接入的客户端给出片段和它自己的配置路径", () => {
     const s = sandbox();
     try {
       s.put(".cursor/mcp.json", JSON.stringify({ mcpServers: {} }));
-      const list = probeClients({ home: s.home, env: s.env });
+      const list = probe(s);
       const text = renderConnect(list, recommendedEntry({ home: s.home, env: s.env }));
       expect(text).toContain("Cursor");
       expect(text).toContain(join(s.home, ".cursor", "mcp.json"));
       expect(text).toContain("mcpServers");
-      expect(text).toContain("还没接入的客户端");
+      expect(text).toContain("未检测到接入的客户端");
       expect(text).toContain("只读配置");
     } finally {
       s.done();
@@ -268,7 +280,7 @@ describe("renderConnect", () => {
         ".cursor/mcp.json",
         JSON.stringify({ mcpServers: { xiaobenben: { command: "npx", args: ["-y", "xiaobenben", "mcp"] } } }),
       );
-      const list = probeClients({ home: s.home, env: s.env });
+      const list = probe(s);
       const text = renderConnect(list, recommendedEntry({ home: s.home, env: s.env }));
       expect(text).toContain("无需操作");
       expect(text).not.toContain("还没接入的客户端");
@@ -282,7 +294,7 @@ describe("connectSummary", () => {
   test("没装任何客户端时说清楚，而不是报 0/0", () => {
     const s = sandbox();
     try {
-      const summary = connectSummary(probeClients({ home: s.home, env: s.env }));
+      const summary = connectSummary(probe(s));
       expect(summary).toContain("未检测到");
       expect(summary).not.toContain("0/0");
     } finally {
@@ -298,7 +310,7 @@ describe("connectSummary", () => {
         JSON.stringify({ mcpServers: { xiaobenben: { command: "npx", args: ["-y", "xiaobenben", "mcp"] } } }),
       );
       s.put(".cursor/mcp.json", JSON.stringify({ mcpServers: {} }));
-      const summary = connectSummary(probeClients({ home: s.home, env: s.env }));
+      const summary = connectSummary(probe(s));
       expect(summary).toContain("WorkBuddy");
       expect(summary).toContain("1/2");
     } finally {
@@ -312,7 +324,7 @@ describe("toJson", () => {
     const s = sandbox();
     try {
       s.put(".cursor/mcp.json", JSON.stringify({ mcpServers: {} }));
-      const raw = toJson(probeClients({ home: s.home, env: s.env }), recommendedEntry({ home: s.home, env: s.env }));
+      const raw = toJson(probe(s), recommendedEntry({ home: s.home, env: s.env }));
       const doc = JSON.parse(raw) as {
         recommended: { via: string };
         clients: Array<{ id: string; connected: boolean; snippet: string | null }>;
@@ -323,6 +335,251 @@ describe("toJson", () => {
       expect(cursor.snippet).toContain("xiaobenben");
       // 没装的客户端不给片段（给了也没用，先得装上）
       expect(doc.clients.find((c) => c.id === "claudedesktop")!.snippet).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+});
+
+/**
+ * 2026-11-16 用户反馈的回归锁。
+ *
+ * 反馈原文（v0.4.55 / Win11）：`xbb --version` 与 `xbb connect` 都显示「接入 0/3」，
+ * 但实际有 2 个 `xbb.exe mcp` 在跑、工具在两个客户端上都正常可用。
+ *
+ * 三个成因，每一条都会让用户去重配一个本来好用的客户端 —— 那比不告诉他更糟：
+ *   ① opencode 的配置是 `opencode.jsonc` + 新版 `mcp.servers` 结构；
+ *   ② Cursor 的项目级配置在 `<项目>/.cursor/mcp.json`；
+ *   ③ Claude Code 的**默认**作用域写在 `~/.claude.json` 的 `projects.<路径>.mcpServers`。
+ *
+ * 也正因为配置放哪由各家自己定，永远会有下一个我们不知道的位置 —— 所以必须有进程判据：
+ * 只要客户端连着，就一定有一个 `xbb mcp` 子进程。
+ */
+describe("反馈 2026-11-16：配置位置认全 + 进程兜底", () => {
+  test("opencode 用 .jsonc 且是新版 mcp.servers 结构 ⇒ 认得出", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.touch(join(".config", "opencode", ".keep"));
+      s.put(
+        join(".config", "opencode", "opencode.jsonc"),
+        `{
+  // 官方文档的示例就是这种结构
+  "mcp": {
+    "servers": {
+      "xiaobenben": { "type": "local", "command": [${JSON.stringify(exe)}, "mcp"] },
+    },
+  },
+}`,
+      );
+      const c = byId(probe(s), "opencode");
+      expect(c.via).toBe("desktop");
+      expect(c.entryName).toBe("xiaobenben");
+      expect(c.configPath.endsWith("opencode.jsonc")).toBe(true);
+      expect(c.broken).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+
+  test("opencode 的老结构 mcp.<name> 仍然认（两代都要兼容）", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.put(
+        join(".config", "opencode", "opencode.json"),
+        JSON.stringify({ mcp: { xiaobenben: { type: "local", command: [exe, "mcp"] } } }),
+      );
+      expect(byId(probe(s), "opencode").via).toBe("desktop");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("mcp.servers 这层包装不能被当成一个叫 servers 的服务器", () => {
+    const s = sandbox();
+    try {
+      s.touch(join(".config", "opencode", ".keep"));
+      s.put(join(".config", "opencode", "opencode.jsonc"), '{ "mcp": { "servers": {} } }');
+      expect(byId(probe(s), "opencode").via).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+
+  test("opencode.json 坏了但 .jsonc 是好的 ⇒ 用 .jsonc，不报 broken", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.put(join(".config", "opencode", "opencode.json"), '{ "mcp": { 坏 }');
+      s.put(
+        join(".config", "opencode", "opencode.jsonc"),
+        `{ "mcp": { "servers": { "xiaobenben": { "type": "local", "command": [${JSON.stringify(exe)}, "mcp"] } } } }`,
+      );
+      const c = byId(probe(s), "opencode");
+      expect(c.via).toBe("desktop");
+      expect(c.broken).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+
+  test("Claude Code 的默认作用域（projects.<路径>.mcpServers）⇒ 认得出", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      const project = join(s.home, "some-project");
+      s.put(
+        ".claude.json",
+        JSON.stringify({
+          projects: { [project]: { mcpServers: { xiaobenben: { type: "stdio", command: exe, args: ["mcp"] } } } },
+        }),
+      );
+      const c = byId(probe(s), "claudecode");
+      expect(c.via).toBe("desktop");
+      expect(c.entryName).toBe("xiaobenben");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("Claude Code 的 user 作用域（顶层 mcpServers）仍然认", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.put(".claude.json", JSON.stringify({ mcpServers: { xiaobenben: { command: exe, args: ["mcp"] } } }));
+      expect(byId(probe(s), "claudecode").via).toBe("desktop");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("Claude Code 的 project 作用域（当前目录 .mcp.json）⇒ 认得出", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.touch(join(".claude", ".keep"));
+      s.put(join("proj", ".mcp.json"), JSON.stringify({ mcpServers: { xiaobenben: { command: exe } } }));
+      expect(byId(probe(s, [], join(s.home, "proj")), "claudecode").via).toBe("desktop");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("Cursor 的项目级 .cursor/mcp.json ⇒ 认得出", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.touch(join(".cursor", ".keep"));
+      s.put(
+        join("proj", ".cursor", "mcp.json"),
+        JSON.stringify({ mcpServers: { xiaobenben: { command: exe, args: ["mcp"] } } }),
+      );
+      expect(byId(probe(s, [], join(s.home, "proj")), "cursor").via).toBe("desktop");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("配置一个都没找到，但有 MCP 子进程在跑 ⇒ 报「使用中」，不报未接入", () => {
+    const s = sandbox();
+    try {
+      const list = probe(s, [
+        proc(100, 50, "xbb.exe", "C:\\x\\xbb.exe mcp"),
+        proc(50, 1, "Cursor.exe", "Cursor.exe"),
+      ]);
+      const c = byId(list, "cursor");
+      expect(c.via).toBeNull();
+      expect(c.running).toBe(true);
+      expect(c.detectedBy).toBe("process");
+      // 目录都没有，但进程在跑 ⇒ 它确实是装着的（否则用户会以为要重装）
+      expect(c.installed).toBe(true);
+      expect(c.hostProcess).toBe("Cursor.exe");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("配置命中优先于进程：detectedBy 是 config，且带引擎形态", () => {
+    const s = sandbox();
+    try {
+      const exe = s.put(join(".xiaobenben", "bin", EXE), "");
+      s.put(
+        join(".config", "opencode", "opencode.json"),
+        JSON.stringify({ mcp: { xiaobenben: { type: "local", command: [exe, "mcp"] } } }),
+      );
+      const c = byId(
+        probe(s, [proc(100, 50, "xbb.exe", "C:\\x\\xbb.exe mcp"), proc(50, 1, "opencode.exe", "opencode.exe")]),
+        "opencode",
+      );
+      expect(c.detectedBy).toBe("config");
+      expect(c.running).toBe(true);
+    } finally {
+      s.done();
+    }
+  });
+
+  test("「使用中」的客户端不出现在待配置列表里 —— 否则会诱导用户重配一个能用的", () => {
+    const s = sandbox();
+    try {
+      const list = probe(s, [
+        proc(100, 50, "xbb.exe", "C:\\x\\xbb.exe mcp"),
+        proc(50, 1, "Cursor.exe", "Cursor.exe"),
+      ]);
+      const text = renderConnect(list, recommendedEntry({ home: s.home, env: s.env }));
+      expect(text).toContain("使用中");
+      expect(text).toContain("不要重新配置");
+      expect(text).not.toContain("把下面这段放进它自己的配置文件");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("--json 里「使用中」项不给片段，且带 detectedBy", () => {
+    const s = sandbox();
+    try {
+      const list = probe(s, [
+        proc(100, 50, "xbb.exe", "C:\\x\\xbb.exe mcp"),
+        proc(50, 1, "Cursor.exe", "Cursor.exe"),
+      ]);
+      const doc = JSON.parse(toJson(list, recommendedEntry({ home: s.home, env: s.env })));
+      const cursor = doc.clients.find((c: { id: string }) => c.id === "cursor");
+      expect(cursor.detectedBy).toBe("process");
+      expect(cursor.running).toBe(true);
+      expect(cursor.snippet).toBeNull();
+    } finally {
+      s.done();
+    }
+  });
+
+  test("真的什么都没有时，措辞是「未检测到」并自带「不等于没接入」的说明", () => {
+    const s = sandbox();
+    try {
+      s.touch(join(".cursor", ".keep"));
+      const list = probe(s);
+      const text = renderConnect(list, recommendedEntry({ home: s.home, env: s.env }));
+      expect(text).toContain("未检测到接入的客户端");
+      expect(text).toContain("不等于没接入");
+
+      const sum = connectSummary(list);
+      expect(sum).toContain("未检测到");
+      // 「均未接入」是旧文案：它把「没读到」说成了「没有」。这条锁死它不许回来。
+      expect(sum).not.toContain("均未接入");
+    } finally {
+      s.done();
+    }
+  });
+
+  test("认不出宿主的进程如实报出来，不硬塞给某个客户端", () => {
+    const s = sandbox();
+    try {
+      const procs = [
+        proc(100, 90, "xbb.exe", "C:\\x\\xbb.exe mcp"),
+        proc(90, 1, "Code.exe", "Code.exe"),
+      ];
+      const text = renderConnect(probe(s, procs), recommendedEntry({ home: s.home, env: s.env }), resolveHosts(procs));
+      expect(text).toContain("认不出是哪个客户端");
+      expect(text).toContain("Code.exe");
     } finally {
       s.done();
     }
