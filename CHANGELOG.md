@@ -9,6 +9,8 @@ minor 手工推进（体现语义化主次），patch 位由发版流水线保�
 
 ## [未发布]
 
+## [0.4.57] - 2026-11-19
+
 ### 修复
 
 - **23 个工具补上了行为标注（read-only / destructive / idempotent / open-world）。**
