@@ -23,6 +23,7 @@ import { localNow } from "./memory-write";
 import { MAX_ATTACHMENTS } from "./payloads";
 import { prepareNotice, type PendingUpdate } from "./update-notice";
 import { applyIngestMode, probeIngestMode, type IngestMode } from "./ingest-status";
+import { TOOL_ANNOTATIONS } from "./tool-annotations";
 
 // ── 写入静默检测（引擎唯一可信的"聊嗨未记"信号：
 //    只用调用序列+时钟，不接触对话内容。播种的默认约束第 7 条引用 memoryHint 字段。）
@@ -249,6 +250,7 @@ VISIBILITY (cloud org mode only): every memory is PRIVATE to its owner by defaul
         tags: z.array(z.string()).optional(),
       })).max(MAX_ATTACHMENTS).optional().describe(ATTACHMENTS_DOC),
     },
+    TOOL_ANNOTATIONS.write_memory,
     async (a) =>
       safe(async () => {
         if (!isLocal) {
@@ -385,6 +387,7 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
       limit: z.number().int().min(1).max(10).optional().describe("Default 5, max 10"),
       budget: z.number().int().optional().describe("Token budget, default 2000"),
     },
+    TOOL_ANNOTATIONS.search_memory,
     async (a) =>
       safe(async () => {
         if (!isLocal) {
@@ -427,6 +430,7 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
     "recall_topic",
     `Recall an entity's topic cluster ("what do we know about X"): all memories anchored to that entity, grouped by session, aliases included, chain heads guaranteed present.`,
     { entity: z.string().min(1), limit: z.number().int().optional() },
+    TOOL_ANNOTATIONS.recall_topic,
     async ({ entity, limit }) =>
       gen1(
         "recall_topic",
@@ -442,6 +446,7 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
     "recall_timeline",
     `Timeline recall: what happened in a date range ("what did we discuss in March"), optionally scoped to an entity.`,
     { from: z.string().min(1).describe("YYYY-MM-DD"), to: z.string().min(1), entity: z.string().optional(), limit: z.number().int().optional() },
+    TOOL_ANNOTATIONS.recall_timeline,
     async ({ from, to, entity, limit }) =>
       gen1(
         "recall_timeline",
@@ -457,6 +462,7 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
     "recall_session",
     `Replay a session by id: all memories from that conversation, chronological.`,
     { sessionId: z.string().min(1), limit: z.number().int().optional() },
+    TOOL_ANNOTATIONS.recall_session,
     async ({ sessionId, limit }) =>
       gen1(
         "recall_session",
@@ -473,6 +479,7 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
     `Fetch one memory in full by id: tags, entities, bidirectional links, and its full storyline chain.
 FILES: if the memory carries a payloads[] array it HAS attached files — {id, mime, bytes, description, ref, state}, never the bytes themselves. Call get_asset with that id only when you actually need to open a file.`,
     { id: z.string().min(1) },
+    TOOL_ANNOTATIONS.get_memory,
     async ({ id }) =>
       gen1(
         "get_memory",
@@ -488,6 +495,7 @@ FILES: if the memory carries a payloads[] array it HAS attached files — {id, m
     "get_related",
     `Explore neighbors of a memory id (1-hop, ranked by link strength) — nested exploration entry point.`,
     { id: z.string().min(1), limit: z.number().int().optional() },
+    TOOL_ANNOTATIONS.get_related,
     async ({ id, limit }) =>
       gen1(
         "get_related",
@@ -513,6 +521,7 @@ state tells you whether the file is still trustworthy: ok = unchanged since it w
       payloadId: z.string().min(1).describe("payload id from a recall hit's payloads[].id"),
       as: z.enum(["ref", "inline"]).optional().describe("'ref' (default) = a handle you read yourself (local absolute path / signed URL); 'inline' = the bytes as a resource block. Pick according to what YOU can consume — the server never guesses from the file type."),
     },
+    TOOL_ANNOTATIONS.get_asset,
     async ({ payloadId, as }) => {
       const mode = as ?? "ref";
       // inline 要把字节作为**独立的 resource block** 回传，而 safe() 只产出一个 text block
@@ -600,6 +609,7 @@ state tells you whether the file is still trustworthy: ok = unchanged since it w
     "recall_directives",
     `Session-startup ritual: call ONCE at the beginning of a new session. Returns everything in force for this session — long-term habits (full), in-window directives (soonest-expiring first), global constraints, the built-in default constraint code (behavior contract), and promotionReady directives (repeated across >=7 sessions — ask the user whether to distill them into a habit). The returned now is the engine's authoritative local clock — you have no reliable internal clock; base every time judgment on it. sessionId is this connection's auto session stamp; reuse it when continuing a prior conversation (see hint).`,
     { sessionId: z.string().optional().describe("Override session stamp (when continuing an older conversation, pass the sessionId from recalled hits)") },
+    TOOL_ANNOTATIONS.recall_directives,
     async (a) =>
       gen1(
         "recall_directives",
@@ -621,6 +631,7 @@ state tells you whether the file is still trustworthy: ok = unchanged since it w
 0 命中是正常结果：说明库里没有相关约束，直接继续任务。
 返回：matchedDomains（按域聚合，域分 = Σ 域内条分）＋ habits（习惯天生无域，单列）＋ hits（扁平派生视图）。`,
     { terms: z.array(z.string()).optional(), budget: z.number().int().optional() },
+    TOOL_ANNOTATIONS.recall_constraints,
     async ({ terms, budget }) =>
       gen1(
         "recall_constraints",
@@ -636,6 +647,7 @@ state tells you whether the file is still trustworthy: ok = unchanged since it w
     "reveal_secret",
     `Reveal a secret's plaintext by vault id ([[xbb_secret_id:N]] placeholder in recalled content). Explain the purpose to the user FIRST — this call is visible in the client UI. Never reveal unprompted.`,
     { id: z.number().int().min(1) },
+    TOOL_ANNOTATIONS.reveal_secret,
     async ({ id }) =>
       gen1("reveal_secret", async (d) => {
         const { revealSecret } = await import("./memory-tools");
@@ -660,6 +672,7 @@ Distilled memories can point back via sourceChunk.`,
         ),
       items: z.array(z.object({ role: z.enum(["user", "assistant", "system"]), content: z.string().min(1) })).min(1).max(50).describe("Dialogue turns in order"),
     },
+    TOOL_ANNOTATIONS.log_episodes,
     async (a) =>
       gen1(
         "log_episodes",
@@ -682,6 +695,7 @@ Use this when you already know a keyword. To walk a whole conversation / day / t
       ctx: z.number().int().min(0).max(3).optional().describe("Context chunks around each hit, default 1"),
       limit: z.number().int().min(1).max(20).optional(),
     },
+    TOOL_ANNOTATIONS.recall_episodes,
     async (a) =>
       gen1(
         "recall_episodes",
@@ -715,6 +729,7 @@ LOCAL ONLY. Not available in cloud mode.`,
       limit: z.number().int().min(1).max(100).optional().describe(`Turns per page, default ${40}`),
       maxChars: z.number().int().min(500).max(12000).optional().describe("Char budget per page, default 6000"),
     },
+    TOOL_ANNOTATIONS.recall_transcript,
     async (a) =>
       gen1(
         "recall_transcript",
@@ -730,6 +745,7 @@ LOCAL ONLY. Not available in cloud mode.`,
     "inbox",
     `List memories pending attention: (1) AI suggestions delivered with needsAck, (2) proactive pushes from conversation hooks. Check at turn start; items stay until acked.`,
     { limit: z.number().int().min(1).max(100).optional() },
+    TOOL_ANNOTATIONS.inbox,
     async ({ limit }) => safe(async () => ({ items: await backend.inbox(limit) })),
   );
 
@@ -737,6 +753,7 @@ LOCAL ONLY. Not available in cloud mode.`,
     "ack",
     `Confirm an inbox item by id. No-op if not pending.`,
     { id: z.string().min(1) },
+    TOOL_ANNOTATIONS.ack,
     async ({ id }) => safe(async () => ({ id, acked: await backend.ack(id) })),
   );
 
@@ -748,6 +765,7 @@ LOCAL ONLY. Not available in cloud mode.`,
       status: z.enum(["pending", "done", "all"]).optional()
         .describe("pending = 还有同事没签；done = 已全部签完；all = 全部（默认）"),
     },
+    TOOL_ANNOTATIONS.outbox,
     async ({ limit, status }) => safe(async () => await backend.outbox(limit, status)),
   );
 
@@ -755,6 +773,7 @@ LOCAL ONLY. Not available in cloud mode.`,
     "forget",
     `Forget a memory by id: append-only tombstone (audit chain keeps the trail), disappears from recall.`,
     { id: z.string().min(1) },
+    TOOL_ANNOTATIONS.forget,
     async ({ id }) => safe(async () => ({ id, forgotten: await backend.forget(id) })),
   );
 
@@ -762,6 +781,7 @@ LOCAL ONLY. Not available in cloud mode.`,
     "stats",
     `Inventory statistics: active/forgotten/pending counts, recent writes, tag/space distribution (local) or org summary (cloud).`,
     {},
+    TOOL_ANNOTATIONS.stats,
     async () => safe(async () => ({ ...(await backend.stats()) })),
   );
 
@@ -771,6 +791,7 @@ LOCAL ONLY. Not available in cloud mode.`,
     "list_members",
     `List the organization's members (colleagues). Call this BEFORE notifying or assigning anyone: it returns the authoritative id + name + space for each member. To deliver something for acknowledgement, take a name from here and pass it in write_memory's notify[]. Cloud org mode only — in local mode it returns an empty list with a note (a single-machine library has no colleagues). Only id/name/space/tags are exposed; phone numbers never are.`,
     {},
+    TOOL_ANNOTATIONS.list_members,
     async () => safe(async () => ({ ...(await backend.listMembers()) })),
   );
 
@@ -786,6 +807,7 @@ RULES: headId must be a live chain head (if it was already superseded, the error
       headId: z.string().min(1).describe("id of the memory that is the CURRENT truth (the newer entry) — must be a chain head"),
       supersededIds: z.array(z.string()).min(1).describe("ids of older memories this head replaces (each must currently be a chain head)"),
     },
+    TOOL_ANNOTATIONS.supersede,
     async (a) =>
       gen1(
         "supersede",
@@ -805,6 +827,7 @@ RULES: headId must be a live chain head (if it was already superseded, the error
     "list_spaces",
     `List the organization's spaces (company root / departments / sub-departments) with id, name, parentId and kind. Call this BEFORE widening a memory's visibility to a department: pass an id from here in write_memory's audience.spaces, or in set_memory_audience. The anchor must lie inside the owner's own subtree, or the whole write is rejected. Cloud org mode only — in local mode it returns an empty list with a note (a single-machine library has just one personal space).`,
     {},
+    TOOL_ANNOTATIONS.list_spaces,
     async () => safe(async () => ({ ...(await backend.listSpaces()) })),
   );
 
@@ -818,6 +841,7 @@ RULES: headId must be a live chain head (if it was already superseded, the error
         spaces: z.array(z.object({ spaceId: z.string(), includeDescendants: z.boolean().optional() })).optional(),
       }).describe("{org:true} whole org; {spaces:[{spaceId,includeDescendants}]} departments; {org:false,spaces:[]} revoke to owner-only"),
     },
+    TOOL_ANNOTATIONS.set_memory_audience,
     async (a) => safe(async () => ({ ...(await backend.setAudience(a.id, a.audience)) })),
   );
 

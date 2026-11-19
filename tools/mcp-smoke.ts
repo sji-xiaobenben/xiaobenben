@@ -110,8 +110,33 @@ try {
     "list_spaces", "set_memory_audience",
     // 取货（2026-10-15 文件记忆 V1：recall 只给提货单，取本体是独立动作）
     "get_asset",
+    // 原话回放（0.4.x 补入；此前这条超集断言一直漏着它）
+    "recall_transcript",
   ];
-  check("tools/list 22 工具超集", EXPECTED.every((t) => tools.includes(t)), tools);
+  check("tools/list 23 工具超集", EXPECTED.every((t) => tools.includes(t)), tools);
+
+  // ── 工具标注（2026-11-19）──
+  // 宿主就是靠这四个布尔值决定"要不要弹批准"。缺任意一个字段，宿主按规范取
+  // destructive=true 的默认值 ⇒ 每个读操作都变成危险操作，用户每轮都要点批准。
+  // 所以这里断言**全量布尔 + 逐个工具**，不是抽查；后面两条反向判据防止有人
+  // 图省事整表改成同一个值。
+  const rawList = (((list as never as { result?: { tools?: { name: string; annotations?: Record<string, unknown> }[] } })
+    ?.result?.tools) ?? []);
+  const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
+  const missing = rawList.filter((t) => HINTS.some((h) => typeof t.annotations?.[h] !== "boolean")).map((t) => t.name);
+  check(
+    `tools/list 23 工具全部带四个布尔 annotations（${rawList.length} 个）`,
+    rawList.length === 23 && missing.length === 0,
+    missing.length ? missing : rawList.length,
+  );
+  const destructive = rawList.filter((t) => t.annotations?.destructiveHint === true).map((t) => t.name).sort();
+  check(
+    "破坏型工具只有 forget / set_memory_audience",
+    JSON.stringify(destructive) === JSON.stringify(["forget", "set_memory_audience"]),
+    destructive,
+  );
+  const readOnly = rawList.filter((t) => t.annotations?.readOnlyHint === true).map((t) => t.name);
+  check(`只读工具 17 个（其余 6 个会写库）`, readOnly.length === 17, readOnly);
 
   // 出件箱（本地模式）：空清单 + 说明，**不报错**——AI 据此如实回答"单机库没有别人来签收"。
   const obResp = await request("tools/call", { name: "outbox", arguments: {} });
