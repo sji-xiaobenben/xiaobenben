@@ -537,11 +537,17 @@ export interface Backend {
   recallConstraints(terms: string[], budget?: number): Promise<Gen1Result>;
 }
 
-/** 工具在云端**真·不可用**的原因（仅剩三件——其余已由服务端直供）。
- *  这三件不是"还没做"，是**设计上不做**：情景层永不入云（隐私边界）、云端无保险箱。 */
-const GEN1_LOCAL_ONLY: Record<string, string> = {
+/** 工具在云端**真·不可用**的原因（四件——其余已由服务端直供）。
+ *  这四件不是"还没做"，是**设计上不做**：情景层永不入云（隐私边界）、云端无保险箱。
+ *
+ *  ⚠️ 这里是**唯一真源**：`gen1` 注册时不给 cloudFn 的工具必须在本表里。
+ *  曾经同一份清单散在三处（本表 / mcp.ts 握手指令那句「仅三类不可用」/ 官网文档），
+ *  加了 `recall_transcript` 之后只有注册处是对的，另两处还写着"三类"——
+ *  于是云端模式的 AI 被明确告知一个必然失败的工具可用。`tools/cloud-local-only.test.ts` 钉这条。 */
+export const GEN1_LOCAL_ONLY: Record<string, string> = {
   log_episodes: "情景层（原话逐字冷存档）是本地独占能力——设计上永不入云（隐私边界），云端无对应存储。",
   recall_episodes: "情景层（原话逐字冷存档）是本地独占能力——设计上永不入云（隐私边界），云端无对应存储。",
+  recall_transcript: "情景层按会话/日期/话题翻页追溯原话——原话在云上没有副本，故不可用。",
   reveal_secret: "云端没有本地那种保险箱（凭据在写入侧已被抹成占位符，库里根本不存在明文）——无密可取。",
 };
 

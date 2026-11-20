@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { Backend, CloudStamp } from "./cloud";
-import { gen1Unsupported, cloudStamp, bindingDriftMessage, loadCloudConfig } from "./cloud";
+import { gen1Unsupported, cloudStamp, bindingDriftMessage, loadCloudConfig, GEN1_LOCAL_ONLY } from "./cloud";
 import { createHash } from "node:crypto";
 import { VERSION } from "./build-meta";
 import { localNow } from "./memory-write";
@@ -101,8 +101,12 @@ export function createMcpServer(
   // 云端组织上下文（2026-10-04）：此前工具面零处提及组织，AI 无法回答「记忆写到哪个组织了」。
   // 组织名随【握手指令 + 每个工具响应】双通道下发——用户在任意时刻问，AI 都有权威答案。
   const cloud = backend.kind === "cloud" ? (backend as import("./cloud").CloudBackend).org : null;
+  // 不可用清单**现算**，不手写：这份名单曾经在「注册处 / 握手指令 / 官网文档」各写一份而漂移过，
+  // 代价是云端模式的 AI 被明确告知一个必然失败的工具可用（recall_transcript 漏在指令外）。
+  const localOnly = Object.keys(GEN1_LOCAL_ONLY);
+  const episodeTools = localOnly.filter((t) => t !== "reveal_secret");
   const orgRule = cloud
-    ? `\n【组织归属】本记忆库绑定云端组织「${cloud.name}」（orgId ${cloud.id}${cloud.kind ? `，kind=${cloud.kind}` : ""}）。所有工具响应的 org 字段是当前组织的权威来源：用户问「我的记忆写到哪个组织了」「是不是写到云端个人空间了」时，直接按该字段回答，不要猜测、不要答不知道。当前为云端模式——检索类工具（recall_topic / recall_timeline / recall_session / get_memory / get_related / recall_directives / recall_constraints）与 write_memory / search_memory / inbox / ack / forget / stats 均由云端服务端直供，正常可用。**仅三类不可用**：情景层 log_episodes / recall_episodes（原话逐字冷存档设计上永不入云）、reveal_secret（云端无保险箱——凭据在写入侧已被抹成占位符，库里不存在明文）。`
+    ? `\n【组织归属】本记忆库绑定云端组织「${cloud.name}」（orgId ${cloud.id}${cloud.kind ? `，kind=${cloud.kind}` : ""}）。所有工具响应的 org 字段是当前组织的权威来源：用户问「我的记忆写到哪个组织了」「是不是写到云端个人空间了」时，直接按该字段回答，不要猜测、不要答不知道。当前为云端模式——检索类工具（recall_topic / recall_timeline / recall_session / get_memory / get_related / recall_directives / recall_constraints）与 write_memory / search_memory / inbox / ack / forget / stats 均由云端服务端直供，正常可用。**仅 ${localOnly.length} 项不可用**：情景层 ${episodeTools.join(" / ")}（逐字原话永不入云——云端没有原话副本，捞原话与按会话/日期/话题翻页一并不可用）、reveal_secret（云端无保险箱——凭据在写入侧已被抹成占位符，库里不存在明文）。`
     : "";
   const server = new McpServer(
     { name: "xiaobenben", version: VERSION, title: "小本本 —— 你的 AI 记忆库" },
