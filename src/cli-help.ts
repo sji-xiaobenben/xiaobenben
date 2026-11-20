@@ -251,6 +251,20 @@ const STATS_HELP = `用法: xbb stats
               说明记的东西和用的时候对不上。
   原话 / 场次 自动采集的对话原话。只增不减，是库文件变大的主因。`;
 
+const LANG_HELP = `用法: xbb lang [zh|en]
+
+界面语言。不带参数 = 查看当前是什么、为什么是它。
+带参数 = 写进 config.json，从下一条命令起生效。
+
+判定优先级（高 → 低）：
+  XBB_LANG 环境变量 > config.json 的 lang > 系统 locale > 中文
+
+为什么带语言码就够：zh-CN、en_US、en-GB.UTF-8 都只取前面的语言码，
+所以脚本里写 XBB_LANG=en_US 也能用。
+
+只写本机配置文件，不联网、不改库、不影响记忆内容。
+管理窗口要多语言需重启（它只在启动时读一次）。`;
+
 const REGISTER_PROTOCOL_HELP = `用法: xbb register-protocol [exe 路径]
 
 注册 xubb:// 协议处理器（三平台），让控制台的「连接我的小本本」能唤起本机客户端。
@@ -316,6 +330,9 @@ ${DATA_LOCATION}
   xbb stats                   库规模与召回情况（只读，不起服务）
   xbb version                 版本横幅 + 构建指纹
 
+界面
+  xbb lang [zh|en]            界面语言（缺省 = 查看；写 config.json，不联网不改库）
+
 更新
   xbb update                  检查并应用更新（放行回滚黑名单）
   xbb update-status           自更新状态速览（源地址 / pending / 黑名单）
@@ -355,6 +372,8 @@ export function helpText(cmd: string, sub?: string): string {
       return VERIFY_HELP;
     case "stats":
       return STATS_HELP;
+    case "lang":
+      return LANG_HELP;
     case "register-protocol":
       return REGISTER_PROTOCOL_HELP;
     case "version":

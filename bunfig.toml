@@ -1,3 +1,8 @@
 # cli 仓与 core 同款：hoisted 布局保证 Node 生态工具链兼容
 [install]
 linker = "hoisted"
+
+# 测试进程固定界面语言为中文（见 src/test-preload.ts）。
+# 不钉的话，既有那批断言中文措辞的测试会在英文系统上集体变红 —— 而代码是对的。
+[test]
+preload = ["./src/test-preload.ts"]

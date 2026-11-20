@@ -25,6 +25,7 @@ import { join } from "node:path";
 
 import { detectRunningHosts, resolveHosts, type ProcNode, type RunningHost } from "./connect-proc";
 import { parseJsonc } from "./jsonc";
+import { dict } from "./i18n";
 
 export type { ClientId } from "./connect-proc";
 import type { ClientId } from "./connect-proc";
@@ -588,27 +589,27 @@ export function renderConnect(statuses: ClientStatus[], entry: Entry, hosts?: Ru
 
 /** `xbb version` 里的一行摘要 —— 让「接没接入」在任何时刻都能一眼看到 */
 export function connectSummary(statuses: ClientStatus[]): string {
+  const d = dict();
   const installed = statuses.filter((s) => s.installed);
-  if (!installed.length) return "接入: 未检测到本机 AI 客户端 · 运行 xbb connect 查看详情";
+  if (!installed.length) return d.connect.noneAtAll;
   const connected = installed.filter((s) => s.via && !s.broken);
   const broken = installed.filter((s) => s.broken);
   const runningOnly = installed.filter((s) => !s.via && s.running);
   // 「正在使用但配置没定位到」必须单独说，不能并进「已接入」，更不能并进「未接入」——
   // 前者会让用户以为配置没问题（其实没读到），后者会让他去重配一个能用的客户端。
-  const tail = runningOnly.length ? ` · 另 ${runningOnly.length} 个正在使用` : "";
+  const tail = runningOnly.length ? d.connect.tailInUse(runningOnly.length) : "";
   if (!connected.length) {
     // 「配了但坏了」和「压根没配」是两种处境：前者用户会以为一切正常（客户端里明明有这一条），
     // 后者他至少知道自己没接过。合并成一句会把前者藏起来 —— 而那正是
     // 「AI 突然没有记忆」最难自查的形态。
-    if (broken.length) {
-      return `接入: 0/${installed.length}（${broken.length} 个配置存在但连不上）${tail} · 运行 xbb connect 查看`;
-    }
+    if (broken.length) return d.connect.allBroken(installed.length, broken.length, tail);
     // 措辞是刻意的：这里给不出「没接入」这个结论，只说「没检测到」。
-    return `接入: 未检测到（${installed.length} 个客户端${tail}）· 运行 xbb connect 查看`;
+    // 英文同理：「not detected」而不是「not connected」—— 见 en.ts 顶部第 2 条。
+    return d.connect.noneConfigured(installed.length, tail);
   }
   const names = connected.map((s) => s.label).join(" / ");
-  const warn = broken.length ? ` · ${broken.length} 个配置异常` : "";
-  return `接入: ${names}（${connected.length}/${installed.length}）${tail}${warn} · 运行 xbb connect 查看全部`;
+  const warn = broken.length ? d.connect.warnBroken(broken.length) : "";
+  return d.connect.connected(names, connected.length, installed.length, tail, warn);
 }
 
 /** 给 `--json` 用：不含内部实现细节，字段名即语义 */

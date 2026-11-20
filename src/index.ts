@@ -5,7 +5,7 @@
  * xiaobenben — 个人客户端壳。
  * 本地库 SQLite 永远零登录；17630 端口；MCP stdio 工具面。
  */
-import { programDir, DbMissingError } from "./home";
+import { programDir, homeConfigPath, writeHomeConfig, DbMissingError } from "./home";
 import { runMcp } from "./mcp";
 import { PersonalStore, DbCorruptError } from "./store";
 import { ORG_PERSONAL, SchemaBusyError, SCHEMA_TARGET_VERSION } from "./schema";
@@ -20,6 +20,8 @@ import { runStartupRollback, confirmStartupSuccess } from "./update-rollback";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { helpText, helpTopic, isHelpRequest, overviewHelp } from "./cli-help";
+import { dict, formatNumber, formatTime, isLang, normalizeLang, resolveLang, currentLang, LANGS } from "./i18n";
+import { columnWidth, padTo } from "./i18n/width";
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "help";
@@ -700,30 +702,67 @@ if (cmd === "serve") {
   const { readUsageCounts } = await import("./home");
   const { defaultDbPath } = await import("./store");
   const { existsSync, statSync } = await import("node:fs");
+  const d = dict();
   const p = defaultDbPath();
   if (!existsSync(p)) {
     // 缺库时**不在这里补一个空库** —— 与开库判定闸同一口径：唯一建库入口是 home init --force。
-    console.error(`\n❌ 找不到记忆库：${p}\n`);
-    console.error("小本本不会在空目录里自动建库：空库比没有库更容易让人误以为「记忆丢了」。");
-    console.error("查它在哪：xbb home     扫盘找现成的库：xbb home find");
+    console.error(d.missingDb.notFound(p));
+    console.error(d.missingDb.noAutoCreate);
+    console.error(d.missingDb.howToFind);
     process.exit(2);
   }
   const u = readUsageCounts(p);
   const st = statSync(p);
-  const n = (v: number) => (v < 0 ? "读不到" : v.toLocaleString("zh-CN"));
-  console.log(`库文件  ${p}`);
-  console.log(`        ${(st.size / 1048576).toFixed(1)} MB · 最后写入 ${new Date(st.mtimeMs).toLocaleString("zh-CN", { hour12: false })}`);
+  const L = d.stats.labels;
+  // 列宽**现算**，不硬编码：中文标签占 6 列、英文占 8~11 列，同一套空格不可能同时对齐
+  // （改造前那 8 列是人数格子数出来的，换个语言必然错位 —— 见 i18n/width.ts 顶部）
+  const w = columnWidth([L.file, L.memories, L.recalled, L.links, L.transcripts]);
+  const row = (label: string, value: string) => console.log(`${padTo(label, w)}  ${value}`);
+  row(L.file, p);
+  console.log(`${" ".repeat(w + 2)}${d.stats.meta((st.size / 1048576).toFixed(1), formatTime(st.mtimeMs))}`);
   console.log();
-  console.log(`记忆    ${n(u.memories)} 条（含被取代 / 已遗忘的，它们只标记不删除）`);
-  console.log(`召回    被用过 ${n(u.used)} 条 · 累计 ${n(u.hits)} 次`);
-  console.log(`关联    ${n(u.links)} 条边`);
-  console.log(`原话    ${n(u.episodes)} 条 / ${n(u.sessions)} 场（自动采集，永不上云）`);
+  row(L.memories, d.stats.memories(formatNumber(u.memories)));
+  row(L.recalled, d.stats.recalled(formatNumber(u.used), formatNumber(u.hits)));
+  row(L.links, d.stats.links(formatNumber(u.links)));
+  row(L.transcripts, d.stats.transcripts(formatNumber(u.episodes), formatNumber(u.sessions)));
   console.log();
-  console.log("管理窗口 http://127.0.0.1:17630/ui  有同一组数和趋势。");
+  console.log(d.stats.adminHint("http://127.0.0.1:17630/ui"));
+} else if (cmd === "lang") {
+  // 界面语言：查看 / 切换。**只写本机配置文件，不联网、不改库**。
+  // 判定链见 i18n/index.ts —— XBB_LANG > config.json > 系统 locale > zh。
+  const d = dict();
+  const arg = args[1];
+  if (!arg) {
+    const r = resolveLang();
+    // 三行按列宽对齐：中英标签宽度不同（当前语言 4 列 / Current 7 列），
+    // 和 stats 同一个理由 —— 空格不能数，要算。
+    const kw = columnWidth([d.langCmd.current, d.langCmd.choices, d.langCmd.switchHint]);
+    const other = LANGS.find((l) => l !== r.lang) ?? "en";
+    console.log(`${padTo(d.langCmd.current, kw)}  ${r.lang}  (${d.langNames[r.lang]})`);
+    console.log(`${padTo(d.langCmd.choices, kw)}  ${LANGS.join(" / ")}`);
+    console.log(`${padTo(d.langCmd.switchHint, kw)}  xbb lang ${other}`);
+    console.log();
+    console.log(d.langCmd.storedAt(homeConfigPath()));
+    // 环境变量压着配置时必须说出来：否则用户敲完 `xbb lang en` 发现没变化，会怀疑命令坏了
+    const envRaw = process.env.XBB_LANG?.trim();
+    if (r.source === "env" && envRaw) console.log(d.langCmd.envActive(envRaw));
+    else console.log(d.langCmd.envOverride);
+  } else {
+    const target = normalizeLang(arg);
+    if (!target) {
+      console.error(d.langCmd.unknown(arg));
+      process.exit(2);
+    }
+    writeHomeConfig({ lang: target }, "cli.lang");
+    const envRaw = process.env.XBB_LANG?.trim();
+    // 写下去了，但环境变量会盖过它 —— 这是"看起来没生效"的唯一成因，必须直说
+    if (envRaw && normalizeLang(envRaw) !== target) console.log(d.langCmd.switchedButEnvWins(target, envRaw));
+    else console.log(d.langCmd.switched(target));
+  }
 } else if (cmd === "version" || cmd === "--version" || cmd === "-v") {
   // 版本横幅 + 构建指纹（版本核对用）
   const { banner } = await import("./build-meta");
-  console.log(banner());
+  console.log(banner(dict().banner));
   // 附一行接入状态：`npx xiaobenben --version` 往往是用户装完之后唯一会敲的命令，
   // 而「引擎装好了」和「已经接进某个客户端」是两件事 —— 不在这里说，用户就无从得知。
   // 纯本地文件探测，不发网络请求，不拖慢版本查询。

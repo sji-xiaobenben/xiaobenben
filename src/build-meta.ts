@@ -74,12 +74,21 @@ export function fingerprint(): string {
   return createHash("sha256").update(`${PRODUCT_EN}|${VERSION}|${BUILD_TIME}|${VENDOR}`).digest("hex").slice(0, 16);
 }
 
-/** 单行署名（页脚/日志用） */
-export function copyrightLine(): string {
-  return `© 2026 ${VENDOR} · 官方站点 ${OFFICIAL_SITE}`;
+/**
+ * 单行署名（页脚/日志用）。
+ *
+ * `site` 必填而不是带中文默认值：默认值等于给"忘了传"留了一条静默的中文泄漏路径 ——
+ * 英文用户敲 `xbb version` 看到半句英文半句中文，比整句都中文更像 bug。
+ */
+export function copyrightLine(site: string): string {
+  return `© 2026 ${VENDOR} · ${site} ${OFFICIAL_SITE}`;
 }
 
-/** 完整版本横幅（version/serve 启动日志用） */
-export function banner(): string {
-  return `${PRODUCT_NAME} (${PRODUCT_EN}) v${VERSION} · 构建 ${BUILD_TIME} · 指纹 ${fingerprint()}\n${copyrightLine()}`;
+/** 完整版本横幅（version/serve 启动日志用）。
+ *
+ * 产品名 `小本本 (xiaobenben)` 两种语言下**完全一致**，刻意不翻译：用户报 bug 时贴的就是
+ * 这一行，翻译它等于让人对不上号；品牌名本身也不是文案。
+ * 只把"构建 / 指纹 / 官方站点"这三个标签交给调用方，由当前语言决定。 */
+export function banner(labels: { built: string; fingerprint: string; site: string }): string {
+  return `${PRODUCT_NAME} (${PRODUCT_EN}) v${VERSION} · ${labels.built} ${BUILD_TIME} · ${labels.fingerprint} ${fingerprint()}\n${copyrightLine(labels.site)}`;
 }

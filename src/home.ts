@@ -24,19 +24,12 @@ import { join, resolve as pathResolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { Database } from "bun:sqlite";
+import { DB_FILENAME, programDir, homeConfigPath } from "./paths";
+import type { Lang } from "./i18n/types";
 
-export const DB_FILENAME = "memory.db";
-
-/** 程序目录 = 安装目录：exe、二进制依赖、托盘资源、更新包、cloud.json、config.json 都住这儿。
- *  **不是**数据目录 —— 混在一起正是这套改造要解开的那个结。 */
-export function programDir(): string {
-  return process.env.XBB_HOME ?? join(homedir(), ".xiaobenben");
-}
-
-/** 锚点：库该在哪，只有这个文件说了算。放程序目录，所以库丢了它也还在。 */
-export function homeConfigPath(): string {
-  return join(programDir(), "config.json");
-}
+// 路径基元下沉到 `paths.ts`（理由见该文件顶部注释：切断 i18n ↔ home 的循环依赖）。
+// 这里 re-export，调用方无需改任何一处 import。
+export { DB_FILENAME, programDir, homeConfigPath };
 
 export interface HomeConfig {
   /** 记忆库/模型等数据资产的所在目录（绝对路径）。缺省 = 程序目录。 */
@@ -51,6 +44,17 @@ export interface HomeConfig {
    * 这条是"默认开启"能成立的前提：没有它，用户关掉的开关会在下次启动被悄悄打开。
    */
   autostart?: "on" | "off";
+  /**
+   * 界面语言（`xbb lang en` 写入）。
+   *
+   * 缺省 = **没选过**，此时按系统 locale 判定、认不出回落中文。刻意不给默认值 "zh"：
+   * 「用户明确选了中文」和「从没选过」在排障时是两件事 —— 前者说明这是他的选择，
+   * 后者说明可能只是系统是中文。判定链见 `i18n/index.ts`。
+   *
+   * 放在锚点文件里而不是库里：语言是**这台机器的偏好**，换库、搬库都不该让它变回去。
+   * 类型是 `import type` 进来的，编译期擦除，不会和 i18n 形成运行时循环依赖。
+   */
+  lang?: Lang;
   /** 记录这份配置是谁、什么时候写的 —— 排障时"谁改的"比"改成什么"更难查 */
   updatedAt?: string;
   updatedBy?: string;
