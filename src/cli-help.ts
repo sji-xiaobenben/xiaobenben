@@ -240,6 +240,17 @@ const VERIFY_HELP = `用法: xbb verify
 审计自检：校验个人库的哈希链完整性（账不可改、只能增）。
 输出 chain OK / CHAIN BROKEN，退出码对应 0 / 1。`;
 
+const STATS_HELP = `用法: xbb stats
+
+只看数、不动库：库有多大、记了多少条、到底有没有被用上。
+**只读打开**（不建库、不迁移、不起服务、不联网），所以随时可以跑。
+
+三个数怎么看：
+  记忆条数    几百到几千是正常量级；上万条要么用了很久，要么记太碎。
+  被召回过    有多少条真的被 AI 用过，以及累计召回次数。长期几乎不动，
+              说明记的东西和用的时候对不上。
+  原话 / 场次 自动采集的对话原话。只增不减，是库文件变大的主因。`;
+
 const REGISTER_PROTOCOL_HELP = `用法: xbb register-protocol [exe 路径]
 
 注册 xubb:// 协议处理器（三平台），让控制台的「连接我的小本本」能唤起本机客户端。
@@ -302,6 +313,7 @@ ${DATA_LOCATION}
 采集与维护
   xbb ingest [on|off|--status|--dry-run|--source=…]   采集本机 AI 客户端会话原文
   xbb verify                  审计自检：个人库哈希链完整性
+  xbb stats                   库规模与召回情况（只读，不起服务）
   xbb version                 版本横幅 + 构建指纹
 
 更新
@@ -341,6 +353,8 @@ export function helpText(cmd: string, sub?: string): string {
       return UPDATE_STATUS_HELP;
     case "verify":
       return VERIFY_HELP;
+    case "stats":
+      return STATS_HELP;
     case "register-protocol":
       return REGISTER_PROTOCOL_HELP;
     case "version":

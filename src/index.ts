@@ -693,6 +693,33 @@ if (cmd === "serve") {
       console.log("累计：" + after.map((s) => `${s.source} ${s.episodes}`).join(" / "));
     }
   }
+} else if (cmd === "stats") {
+  // 只看数、不动库：**只读打开**，不建库、不迁移、不起服务、不联网。
+  // 文档的「用量查看」整页都在教用户敲这一条，所以它必须真的存在，且输出要能直接读。
+  // 读不到的数一律说「读不到」，绝不显示 0 —— 0 是「一条都没用过」这个结论，不是「不知道」。
+  const { readUsageCounts } = await import("./home");
+  const { defaultDbPath } = await import("./store");
+  const { existsSync, statSync } = await import("node:fs");
+  const p = defaultDbPath();
+  if (!existsSync(p)) {
+    // 缺库时**不在这里补一个空库** —— 与开库判定闸同一口径：唯一建库入口是 home init --force。
+    console.error(`\n❌ 找不到记忆库：${p}\n`);
+    console.error("小本本不会在空目录里自动建库：空库比没有库更容易让人误以为「记忆丢了」。");
+    console.error("查它在哪：xbb home     扫盘找现成的库：xbb home find");
+    process.exit(2);
+  }
+  const u = readUsageCounts(p);
+  const st = statSync(p);
+  const n = (v: number) => (v < 0 ? "读不到" : v.toLocaleString("zh-CN"));
+  console.log(`库文件  ${p}`);
+  console.log(`        ${(st.size / 1048576).toFixed(1)} MB · 最后写入 ${new Date(st.mtimeMs).toLocaleString("zh-CN", { hour12: false })}`);
+  console.log();
+  console.log(`记忆    ${n(u.memories)} 条（含被取代 / 已遗忘的，它们只标记不删除）`);
+  console.log(`召回    被用过 ${n(u.used)} 条 · 累计 ${n(u.hits)} 次`);
+  console.log(`关联    ${n(u.links)} 条边`);
+  console.log(`原话    ${n(u.episodes)} 条 / ${n(u.sessions)} 场（自动采集，永不上云）`);
+  console.log();
+  console.log("管理窗口 http://127.0.0.1:17630/ui  有同一组数和趋势。");
 } else if (cmd === "version" || cmd === "--version" || cmd === "-v") {
   // 版本横幅 + 构建指纹（版本核对用）
   const { banner } = await import("./build-meta");
