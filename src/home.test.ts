@@ -23,7 +23,24 @@ function tmp(prefix: string): string {
 }
 afterAll(
   () => {
-    for (const d of cleanups) rmSync(d, { recursive: true, force: true });
+    for (const d of cleanups) {
+      // Windows 上**刚写完就该删**的 SQLite 库会被 Defender / 句柄释放延迟短暂占住，`rm` 直接
+      // EBUSY（实测：干净的 close() 之后立刻 rm 一个只有 memory.db + -wal + -shm 的目录，
+      // 也会失败）。这不是被测代码的问题，更不该让整个测试套件红 —— 退避重试几次，
+      // 仍不行就把它留在系统临时目录里（那本来就是要被系统回收的地方）。
+      for (let i = 0; ; i++) {
+        try {
+          rmSync(d, { recursive: true, force: true });
+          break;
+        } catch (e) {
+          if (i >= 5) {
+            console.error(`[cleanup] 临时目录删不掉，已跳过（不影响结论）：${d} — ${(e as Error).message}`);
+            break;
+          }
+          Bun.sleepSync(50 * (i + 1));
+        }
+      }
+    }
   },
   // 显式放宽。这个文件是唯一会累积**几十个**临时目录的（`tmp()` 被调 41 次，每个里都有
   // 一个 SQLite 库），而 Windows 删刚写完的库要等 WAL/SHM 句柄释放、还要过一遍 Defender，
