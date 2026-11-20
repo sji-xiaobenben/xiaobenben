@@ -138,20 +138,20 @@ describe("根因证据：为什么迁移必须用立即事务", () => {
 });
 
 describe("initSchemaV2 的写锁行为", () => {
-  test("别人短暂持锁：等它释放后照常升级到 v10", async () => {
+  test("别人短暂持锁：等它释放后照常升级到目标版本", async () => {
     const p = freshPath("short");
     await makeV5(p);
     const child = holdLock(p, 600);
     await Bun.sleep(250); // 等子进程真的拿到锁
 
-    const { initSchemaV2, schemaVersion } = await import("./schema");
+    const { initSchemaV2, schemaVersion, SCHEMA_TARGET_VERSION } = await import("./schema");
     const db = new Database(p);
     db.exec("PRAGMA busy_timeout = 3000");
     const t = Date.now();
     initSchemaV2(db);
     const cost = Date.now() - t;
 
-    expect(schemaVersion(db)).toBe(10);
+    expect(schemaVersion(db)).toBe(SCHEMA_TARGET_VERSION);
     // 真的等过（否则说明没撞上锁，这条断言就失去意义）
     expect(cost).toBeGreaterThan(150);
     db.close();
@@ -190,7 +190,7 @@ describe("initSchemaV2 的写锁行为", () => {
     delete process.env.XBB_SCHEMA_RETRIES;
   });
 
-  test("正常路径：v5 老库升到 v10，结构版本只升不降", async () => {
+  test("正常路径：v5 老库升到目标版本，结构版本只升不降", async () => {
     const p = freshPath("plain");
     await makeV5(p);
     const { initSchemaV2, schemaVersion, SCHEMA_TARGET_VERSION } = await import("./schema");
@@ -198,7 +198,7 @@ describe("initSchemaV2 的写锁行为", () => {
     db.exec("PRAGMA busy_timeout = 3000");
     initSchemaV2(db);
     expect(schemaVersion(db)).toBe(SCHEMA_TARGET_VERSION);
-    // 幂等：再跑一次仍是 v10，且不抛
+    // 幂等：再跑一次仍是目标版本，且不抛
     initSchemaV2(db);
     expect(schemaVersion(db)).toBe(SCHEMA_TARGET_VERSION);
     db.close();

@@ -21,6 +21,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { PHRASE_MAX_TERMS, asOr, asPhrase, bigramTerms, bigramify } from "./bigram";
 
 /** 分块粒度（300-500 token；中文字符≈token，取 400 字符软上限，段落边界优先切断） */
 const CHUNK_SIZE = 400;
@@ -51,9 +52,15 @@ export function ingestDedupeKey(source: string, sessionId: string, externalId: s
   return createHash("sha256").update(`${source}\u0000${sessionId}\u0000${externalId}`).digest("hex");
 }
 
-/** 分块 + 灌 FTS（只对真正插入的行调用，重复行不该再产生一份倒排） */
+/** 分块 + 灌 FTS（只对真正插入的行调用，重复行不该再产生一份倒排）
+ *
+ *  两张索引并排写：`episode_chunks`（trigram，历史遗留 + 原文存储 + 邻块定位）
+ *  与 `episode_bigrams`（中文 bigram，实际检索走这张）。rowid 必须一致 ——
+ *  `memories.source_chunk` 存的是它，换了就对不上出处。
+ */
 function indexChunks(db: Database, sessionId: string, content: string): { first: number | null; count: number } {
   const ins = db.prepare("INSERT INTO episode_chunks (session_id, chunk_text, position) VALUES (?, ?, ?)");
+  const insBg = db.prepare("INSERT INTO episode_bigrams (rowid, session_id, body) VALUES (?, ?, ?)");
   let first: number | null = null;
   let count = 0;
   let pos = 0;
@@ -65,8 +72,11 @@ function indexChunks(db: Database, sessionId: string, content: string): { first:
       const cutAt = Math.max(win.lastIndexOf("\n"), win.lastIndexOf("。"), win.lastIndexOf("．"), win.lastIndexOf(". "));
       if (cutAt > CHUNK_SIZE / 2) size = cutAt + 1;
     }
-    const cr = ins.run(sessionId, rest.slice(0, size), pos);
-    if (first === null) first = Number(cr.lastInsertRowid);
+    const text = rest.slice(0, size);
+    const cr = ins.run(sessionId, text, pos);
+    const rid = Number(cr.lastInsertRowid);
+    insBg.run(rid, sessionId, bigramify(text));
+    if (first === null) first = rid;
     count++;
     pos += size;
     rest = rest.slice(size);
@@ -172,7 +182,16 @@ export interface EpisodeHit {
   context: Array<{ position: number; text: string }>;
 }
 
-/** 冷路径精确检索：FTS 定位原话块 → 取回上下文窗口（≤2k token 纪律靠 ctx+limit 控制） */
+/** 冷路径精确检索：FTS 定位原话块 → 取回上下文窗口（≤2k token 纪律靠 ctx+limit 控制）
+ *
+ *  两段式查询（2026-11-20 实测依据见 bigram.ts）：
+ *   ① 短语路 —— 把查询当"原文片段"，bigram 序列带顺序匹配，精确；
+ *   ② 降级 OR —— 短语 0 命中时说明这是"自然语言提问"，原文不会连续出现整句
+ *      （实测"向量检索怎么做的"连 LIKE 都是 0 命中），此时按 bigram 组合召回交给 bm25 排序。
+ *
+ *  之前是 `episode_chunks MATCH '"整句"'`：2 字词直接空（trigram 下限），长句也必然空，
+ *  于是 AI 只能反复换词重试 —— 用户感知是"搜原话要好久好久"，实际是一次都没搜对。
+ */
 export function findEpisodes(
   db: Database,
   query: string,
@@ -180,28 +199,67 @@ export function findEpisodes(
 ): { hits: EpisodeHit[]; note?: string } {
   const ctx = Math.min(opts.ctx ?? 1, 3);
   const limit = Math.min(opts.limit ?? 5, 20);
-  let rows: Array<{ rowid: number; session_id: string; chunk_text: string; position: number }>;
-  try {
-    const sql = opts.sessionId
-      ? `SELECT rowid, session_id, chunk_text, position FROM episode_chunks WHERE episode_chunks MATCH ? AND session_id = ? ORDER BY rank LIMIT ?`
-      : `SELECT rowid, session_id, chunk_text, position FROM episode_chunks WHERE episode_chunks MATCH ? ORDER BY rank LIMIT ?`;
-    rows = (opts.sessionId ? db.prepare(sql).all(`"${query.replace(/"/g, '""')}"`, opts.sessionId, limit) : db.prepare(sql).all(`"${query.replace(/"/g, '""')}"`, limit)) as typeof rows;
-  } catch {
-    return { hits: [], note: "非法查询表达式" };
+  const terms = bigramTerms(query);
+  if (!terms.length) return { hits: [], note: "查询为空" };
+
+  const match = (expr: string): Array<{ rowid: number }> | null => {
+    try {
+      const sql = opts.sessionId
+        ? `SELECT rowid FROM episode_bigrams WHERE episode_bigrams MATCH ? AND session_id = ? ORDER BY rank LIMIT ?`
+        : `SELECT rowid FROM episode_bigrams WHERE episode_bigrams MATCH ? ORDER BY rank LIMIT ?`;
+      const st = db.prepare(sql);
+      return (opts.sessionId ? st.all(expr, opts.sessionId, limit) : st.all(expr, limit)) as Array<{ rowid: number }>;
+    } catch {
+      return null;
+    }
+  };
+
+  let rows = match(asPhrase(terms));
+  if (rows === null) return { hits: [], note: "非法查询表达式" };
+
+  let note: string | undefined;
+  // 只有**够长的**查询才值得降级：短串（"记忆方案" 3 个 bigram）降级等于把短语拆散，
+  // 拿"记忆"和"方案"各自的命中冒充整体命中 —— 那是假阳性，不是召回。
+  // 门槛 6 个 bigram ≈ 7 字，正好是"自然语言短句"的起点（"向量检索怎么做的" = 7 个）。
+  if (!rows.length && terms.length >= PHRASE_MAX_TERMS) {
+    const orExpr = asOr(terms);
+    const loose = orExpr ? match(orExpr) : null;
+    if (loose && loose.length) {
+      rows = loose;
+      note = "未找到连续原文片段，以下按关键词组合召回（bm25 排序，可能含弱相关）";
+    }
   }
-  const hits: EpisodeHit[] = rows.map((h) => {
-    const neighbors = db.prepare(
-      `SELECT rowid, position, chunk_text FROM episode_chunks WHERE session_id = ? AND rowid BETWEEN ? AND ? ORDER BY position ASC`,
-    ).all(h.session_id, h.rowid - ctx, h.rowid + ctx) as Array<{ rowid: number; position: number; chunk_text: string }>;
-    return {
+  if (!rows.length) return { hits: [] };
+
+  // bm25 给的是顺序，IN 查询不保证顺序 ⇒ 按 rowid 回填后重排。
+  const order = rows.map((r) => r.rowid);
+  const ph = order.map(() => "?").join(",");
+  const detail = db
+    .prepare(`SELECT rowid, session_id, chunk_text, position FROM episode_chunks WHERE rowid IN (${ph})`)
+    .all(...order) as Array<{ rowid: number; session_id: string; chunk_text: string; position: number }>;
+  const byId = new Map(detail.map((d) => [d.rowid, d]));
+
+  const qNeighbors = db.prepare(
+    `SELECT rowid, position, chunk_text FROM episode_chunks WHERE session_id = ? AND rowid BETWEEN ? AND ? ORDER BY position ASC`,
+  );
+  const hits: EpisodeHit[] = [];
+  for (const id of order) {
+    const h = byId.get(id);
+    if (!h) continue; // 索引里有、正文已被清掉（历史脏数据），跳过而不是抛
+    const neighbors = qNeighbors.all(h.session_id, h.rowid - ctx, h.rowid + ctx) as Array<{
+      rowid: number;
+      position: number;
+      chunk_text: string;
+    }>;
+    hits.push({
       rowid: h.rowid,
       sessionId: h.session_id,
       chunk: h.chunk_text,
       // FTS rowid 与 episodes.id 是两套体系——context 给 position+text（文本连续性足够还原原话语境）
       context: neighbors.map((n) => ({ position: n.position, text: n.chunk_text })),
-    };
-  });
-  return { hits };
+    });
+  }
+  return note ? { hits, note } : { hits };
 }
 
 // ── 翻页回放（V7）────────────────────────────────────────────────────────────

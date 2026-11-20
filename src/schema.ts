@@ -7,6 +7,7 @@
  * 迁移：PRAGMA user_version 递增，additive-only（与 server 迁移检查器同一纪律）。
  */
 import type { Database } from "bun:sqlite";
+import { bigramify } from "./bigram";
 
 /** 个人租户固定 ID（kind=personal，树根） */
 export const ORG_PERSONAL = "00000000-0000-7000-8000-000000000001";
@@ -528,7 +529,53 @@ export function migrateV10(db: Database): void {
 }
 
 /** 目标结构版本：所有 migrateV* 收敛到的终点。healthz 靠它判断「服务活着但库还是旧的」。 */
-export const SCHEMA_TARGET_VERSION = 10;
+export const SCHEMA_TARGET_VERSION = 11;
+
+/**
+ * V11：原话层补 bigram 倒排。
+ *
+ * episode_chunks 用的是 FTS5 trigram，在中文上是错的分词粒度（实测见 bigram.ts 文件头）：
+ * 2 字词全索引为空（"记忆" 3,399 条 → MATCH 返回 0），长串又因跨列 AND 产生 28.9 倍假阳性。
+ *
+ * 这里**不动 episode_chunks**，只并排加一张 episode_bigrams：
+ *  · rowid 与 episode_chunks 一一对应 —— `memories.source_chunk` 存的是它，不能变；
+ *  · 旧版本回滚时看不到这张表也不会坏（旧代码只认 episode_chunks）；
+ *  · trigram 索引留待下个大版本摘除，避免一次迁移同时改结构又删数据。
+ *
+ * 回填是分批线性扫（不额外开事务 —— 外层 initSchemaV2 已经 BEGIN IMMEDIATE，
+ * 嵌套 transaction 会变成 savepoint，白加开销）。45,224 chunk 实测建索引 3 秒。
+ */
+export function migrateV11(db: Database): void {
+  db.exec(
+    `CREATE VIRTUAL TABLE IF NOT EXISTS episode_bigrams USING fts5(
+       session_id UNINDEXED,
+       body,
+       tokenize='unicode61'
+     )`,
+  );
+  const v = db.query("PRAGMA user_version").get() as { user_version: number };
+  if (v.user_version >= 11) return;
+
+  const chunkCount = (db.query("SELECT count(*) c FROM episode_chunks").get() as { c: number }).c;
+  const bgCount = (db.query("SELECT count(*) c FROM episode_bigrams").get() as { c: number }).c;
+  // 用 !== 而不是 <：如果 chunks 被重建过（行数变少但 bigram 还留着旧的），
+  // 索引里就是一批对不上 rowid 的孤儿 —— 那比没有索引更糟，会返回错的原话。
+  if (bgCount !== chunkCount) {
+    if (bgCount > 0) db.exec("DELETE FROM episode_bigrams");
+    const ins = db.prepare("INSERT INTO episode_bigrams(rowid, session_id, body) VALUES (?, ?, ?)");
+    const sel = db.prepare(
+      "SELECT rowid, session_id, chunk_text FROM episode_chunks WHERE rowid > ? ORDER BY rowid LIMIT 2000",
+    );
+    let last = 0;
+    for (;;) {
+      const rows = sel.all(last) as Array<{ rowid: number; session_id: string; chunk_text: string }>;
+      if (!rows.length) break;
+      for (const r of rows) ins.run(r.rowid, r.session_id, bigramify(r.chunk_text));
+      last = rows[rows.length - 1]!.rowid;
+    }
+  }
+  db.exec("PRAGMA user_version = 11");
+}
 
 /** 拿不到写锁时的总尝试次数。每次尝试内部还会各自等 `busy_timeout`（默认 3s）。
  *  读取时机放在调用时而非模块加载时：测试要能把重试压到 1 次而不必搞第二个模块实例。 */
@@ -634,6 +681,7 @@ export function initSchemaV2(db: Database): void {
         migrateV8(db);
         migrateV9(db);
         migrateV10(db);
+        migrateV11(db);
         db.exec("COMMIT");
       } catch (e) {
         try {
