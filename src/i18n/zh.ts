@@ -9,9 +9,12 @@
  * 只要中文一字不改，测试全绿就能证明"只是把字搬了个家，没有改行为"。
  */
 import type { Dict } from "./types";
+import { helpZh } from "./help/zh";
 
 export const zh: Dict = {
   langNames: { zh: "中文", en: "English" },
+
+  help: helpZh,
 
   banner: { built: "构建", fingerprint: "指纹", site: "官方站点" },
 

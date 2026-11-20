@@ -14,9 +14,12 @@
  *      用户报 bug 时贴的就是这一行，翻译它等于让人对不上号。
  */
 import type { Dict } from "./types";
+import { helpEn } from "./help/en";
 
 export const en: Dict = {
   langNames: { zh: "Chinese", en: "English" },
+
+  help: helpEn,
 
   banner: { built: "built", fingerprint: "fingerprint", site: "official site" },
 

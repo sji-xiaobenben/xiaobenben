@@ -16,11 +16,18 @@
  *   这些字符串本来也不会被 CAT 工具处理。
  */
 
+import type { HelpDict } from "./help/types";
+
+export type { HelpDict };
+
 export type Lang = "zh" | "en";
 
 export interface Dict {
   /** 语言名在**当前**语言下的写法（语言切换器要列自己，所以不能都写成中文） */
   langNames: Record<Lang, string>;
+
+  /** 帮助文案（判据见 `help/types.ts` 顶部：谁读它，不是"是不是字符串"） */
+  help: HelpDict;
 
   banner: {
     /** 版本行里「构建 <时刻>」的那个词 */

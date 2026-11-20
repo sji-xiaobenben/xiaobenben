@@ -29,6 +29,9 @@ import {
   resolveLang,
 } from "./i18n";
 import { columnWidth, displayWidth, padTo } from "./i18n/width";
+import { helpEn } from "./i18n/help/en";
+import { helpZh } from "./i18n/help/zh";
+import { helpText } from "./cli-help";
 import { writeHomeConfig } from "./home";
 
 type EnvKey = "XBB_LANG" | "XBB_HOME" | "LC_ALL" | "LC_MESSAGES" | "LANG";
@@ -210,6 +213,51 @@ describe("取词与格式化", () => {
     setEnv({ XBB_LANG: "en" });
     expect(a).toBe("2026-11-20 09:05:07");
     expect(formatTime(ms)).toBe(a);
+  });
+});
+
+describe("帮助文案 —— 27 条，两种语言都要在", () => {
+  // `HelpDict` 是显式接口、没有索引签名，所以按下标/entries 遍历要先摊平成 Record。
+  // 用 `as unknown as` 而不是 `as`：后者会被 tsc 判为「类型不够重叠」，那正是它在提醒
+  // 「你可能以为这里有索引签名」—— 这里确实需要，所以显式承认一次。
+  const zhMap = helpZh as unknown as Record<string, string>;
+  const enMap = helpEn as unknown as Record<string, string>;
+
+  test("每一条都非空，且两种语言的键完全对应", () => {
+    // 键的对应关系由 `HelpDict` 在编译期强制（tsc 会报缺键），这里守的是**运行时**
+    // 那一半：某条被写成空串或只剩空白，类型检查看不出来，用户看到的是「输入 --help 没反应」。
+    const zhKeys = Object.keys(zhMap).sort();
+    const enKeys = Object.keys(enMap).sort();
+    expect(enKeys).toEqual(zhKeys);
+    for (const k of zhKeys) {
+      expect({ k, v: zhMap[k]!.trim().length > 0 }).toEqual({ k, v: true });
+      expect({ k, v: enMap[k]!.trim().length > 0 }).toEqual({ k, v: true });
+    }
+  });
+
+  test("英文帮助里不许残留中文 —— 漏译 27 条里的一条，用户就看到一半中文", () => {
+    // 这是加语种时最容易犯的错：复制一份英文包，逐条改，改到第 19 条去接了个电话。
+    // 类型检查发现不了（每条都是非空字符串），只有真的扫一遍才能抓住。
+    // 允许名单必须**逐字精确**，宁可让测试红一次，也不要放一个宽泛的例外进来。
+    const ALLOWED = ['"小本本服务"']; // Windows 启动项的真实注册值名，翻了它启动项就对不上了
+    const CJK = /[\u4e00-\u9fff\u3000-\u303f\uff01-\uff60]/; // 汉字 + 中文标点 + 全角符号
+    const offenders: string[] = [];
+    for (const [key, raw] of Object.entries(enMap)) {
+      let text = raw;
+      for (const ok of ALLOWED) text = text.split(ok).join("");
+      const hit = text.match(CJK);
+      if (hit) offenders.push(`${key}: …${text.slice(Math.max(0, hit.index! - 20), hit.index! + 20).replace(/\n/g, "⏎")}…`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("helpText 跟着语言走，而不是只会说中文", () => {
+    setEnv({ XBB_LANG: "zh" });
+    expect(helpText("serve")).toContain("用法: xbb serve");
+    setEnv({ XBB_LANG: "en" });
+    expect(helpText("serve")).toContain("Usage: xbb serve");
+    // 未知命令一律给总览（查帮助不该报错），两种语言都一样
+    expect(helpText("nonesuch")).toContain("Usage: xbb <command>");
   });
 });
 
