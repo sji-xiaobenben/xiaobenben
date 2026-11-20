@@ -412,7 +412,10 @@ export class PersonalStore {
 
     return [...best.values()]
       .filter((c) => c.strong >= 1 || c.weak >= 2) // 门槛：≥1 强信号，或同一条记忆命中 ≥2 弱信号（单弱=今天/天气级噪声，宁缺勿滥）
-      .sort((a, b) => a.df - b.df || b.createdAt.localeCompare(a.createdAt))
+      // 比较器里**不能**用 `localeCompare`：不带 locale 参数时它按**宿主机系统语言**排，
+      // 同一份库在中文 Windows 和英文 CI runner 上会给出不同的并列次序 ——
+      // 检索结果不该取决于跑在哪台机器上。时间戳是 ISO 字符串，码位序即时间序，直接比。
+      .sort((a, b) => a.df - b.df || (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
       .slice(0, opts.limit ?? 3)
       .map(({ memoryId, content, createdAt, df }) => ({ memoryId, content, score: -df, createdAt }));
   }

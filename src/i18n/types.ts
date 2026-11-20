@@ -77,6 +77,22 @@ export interface Dict {
     howToFind: string;
   };
 
+  /**
+   * 锚点文件（config.json）损坏时的告警 —— 只在**要写**它的时候出现。
+   *
+   * 为什么必须说：坏掉的文件里可能还写着 `dataDir`，那是"库在哪"的唯一线索。
+   * 静默覆盖它，用户下次启动只会看到「找不到记忆库」，而没有人会想到
+   * 是自己刚敲了一句 `xbb lang en` 造成的。所以：先留证，再写入，并且明说。
+   */
+  config: {
+    /** 已把读不懂的原文件改名留存，附原路径与备份路径 */
+    corruptSaved: (path: string, backup: string) => string;
+    /** 备份成功之后：说明写进去了什么、以及可能需要补什么 */
+    corruptWhat: string;
+    /** 备份失败（只读盘 / 被别的进程占着）—— 此时**放弃写入**，绝不拿原内容冒险 */
+    corruptCantBackup: (path: string, reason: string) => string;
+  };
+
   connect: {
     /** 一个客户端都没装 */
     noneAtAll: string;

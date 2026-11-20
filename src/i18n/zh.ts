@@ -55,6 +55,15 @@ export const zh: Dict = {
     howToFind: "查它在哪：xbb home     扫盘找现成的库：xbb home find",
   },
 
+  config: {
+    corruptSaved: (path, backup) =>
+      `\n⚠️  配置文件读不懂（JSON 解析失败）：${path}\n    原文件已留存到：${backup}\n`,
+    corruptWhat:
+      "新配置已重新写入。如果原来在里面指定过库位置，用 xbb home set \"<目录>\" 重新指一次；\n然后 xbb home 确认它指向的是哪个库。",
+    corruptCantBackup: (path, reason) =>
+      `\n❌ 配置文件读不懂（${reason}），而备份也没做成：${path}\n   为了不把原内容冲掉，这次没有写入任何东西。\n   把那行手改的 JSON 修好、或先把这个文件挪走，然后再试。\n`,
+  },
+
   connect: {
     noneAtAll: "接入: 未检测到本机 AI 客户端 · 运行 xbb connect 查看详情",
     noneConfigured: (total, tail) => `接入: 未检测到（${total} 个客户端${tail}）· 运行 xbb connect 查看`,

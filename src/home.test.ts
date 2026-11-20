@@ -7,11 +7,11 @@
  * 这组测试守的是**一句话**：库不在预期位置时，程序必须**起不来**，而不是造一个空库继续跑。
  * 那条错误路径没有用户会发现——因为一切"看起来正常"，直到他某天问起半年前的事。
  */
-import { mkdtempSync, mkdirSync, existsSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import * as H from "./home";
 import { PersonalStore } from "./store";
 
@@ -199,6 +199,76 @@ describe("锚点：配置跟着程序走，不跟着库走", () => {
     writeFileSync(join(home, "config.json"), "{ 这不是 json", "utf8");
     expect(H.readHomeConfig()).toBeNull();
     expect(H.resolveDataDirWithSource().source).toBe("default");
+  });
+
+  /**
+   * 以下四条守的是**多语言带来的新入口**：`xbb lang en` 是用户心里最"无害"的命令
+   * （只是换个界面语言），而它恰恰会写这个锚点文件。坏文件里可能还写着 `dataDir`——
+   * 那是"库在哪"的唯一线索。静默覆盖它，用户下次启动只看到「找不到记忆库」，
+   * 而没有人会想到是自己刚改过语言。
+   */
+  test("★ 坏 JSON 上写配置：原文件先改名留证，绝不当场抹掉", () => {
+    const home = tmp("xbb-home-badwrite-");
+    useHome(home);
+    const p = join(home, "config.json");
+    const original = '{\n  "dataDir": "D:/my-memories",\n  "lang": "zh"\n';
+    writeFileSync(p, original, "utf8");
+
+    const spy = spyOn(console, "error");
+    try {
+      H.writeHomeConfig({ lang: "en" }, "cli.lang");
+      const backups = readdirSync(home).filter((f) => f.startsWith("config.json.corrupt-"));
+      expect(backups.length).toBe(1);
+      // 字节级原样保留 —— "留证"意味着用户能手改回来，不是"给你看一眼"
+      expect(readFileSync(join(home, backups[0]!), "utf8")).toBe(original);
+      // 备份文件名进得了 Windows 文件系统（`:` 在里面非法，ISO 时间戳必须换掉）
+      expect(backups[0]).not.toMatch(/[:*?"<>|]/);
+      // 必须**说出来**：静默备份等于用户永远不知道自己的库位置掉过
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+      expect(spy.mock.calls.flat().join(" ")).toContain(backups[0]!);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(H.readHomeConfig()?.lang).toBe("en"); // 目标确实生效了
+  });
+
+  test("★ 数组形状也算坏文件（`typeof [] === 'object'` 会骗过类型检查）", () => {
+    const home = tmp("xbb-home-arrayjson-");
+    useHome(home);
+    writeFileSync(join(home, "config.json"), '["not", "a", "config"]', "utf8");
+    const spy = spyOn(console, "error");
+    try {
+      H.writeHomeConfig({ lang: "en" }, "test");
+    } finally {
+      spy.mockRestore();
+    }
+    // 不认成坏文件的话，`{...cur}` 会展开成 {"0":"not","1":"a",...} 写回去 ——
+    // 一个看起来完全正常的文件，里面全是垃圾，而且 dataDir 悄悄没了
+    expect(readdirSync(home).some((f) => f.startsWith("config.json.corrupt-"))).toBe(true);
+    expect(H.readHomeConfig()?.lang).toBe("en");
+    expect(H.readHomeConfig()).not.toHaveProperty("0");
+  });
+
+  test("正常配置不产生备份（留证不能变成每次都留）", () => {
+    const home = tmp("xbb-home-nobak-");
+    useHome(home);
+    H.writeHomeConfig({ dataDir: "D:/x" }, "test");
+    H.writeHomeConfig({ lang: "en" }, "test");
+    expect(readdirSync(home).filter((f) => f.includes(".corrupt-")).length).toBe(0);
+    expect(H.readHomeConfig()?.dataDir).toBe("D:/x"); // 合并写仍然有效
+  });
+
+  test("clearDataDir 遇到坏文件同样留证（不是只有 writeHomeConfig 才守）", () => {
+    const home = tmp("xbb-home-clearbad-");
+    useHome(home);
+    writeFileSync(join(home, "config.json"), "{ broken", "utf8");
+    const spy = spyOn(console, "error");
+    try {
+      H.clearDataDir("test");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(readdirSync(home).filter((f) => f.includes(".corrupt-")).length).toBe(1);
   });
 
   test("clearDataDir 真的删掉字段（不是被合并写掩盖）", () => {

@@ -64,6 +64,15 @@ export const en: Dict = {
     howToFind: "Where is it: xbb home     scan the disk for an existing one: xbb home find",
   },
 
+  config: {
+    corruptSaved: (path, backup) =>
+      `\n⚠️  Config file is unreadable (invalid JSON): ${path}\n   The original was kept at: ${backup}\n`,
+    corruptWhat:
+      'The new config has been written. If it used to point at a database location, run xbb home set "<dir>" once\nagain, then xbb home to confirm which database it resolves to.',
+    corruptCantBackup: (path, reason) =>
+      `\n❌ Config file is unreadable (${reason}), and backing it up failed too: ${path}\n   Nothing was written — losing the original would lose any database path it still holds.\n   Fix the hand-edited JSON, or move the file away, then try again.\n`,
+  },
+
   connect: {
     noneAtAll: "Clients: none detected on this machine · run xbb connect for details",
     noneConfigured: (total, tail) =>

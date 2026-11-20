@@ -19,13 +19,16 @@
  * 解析优先级：XBB_DATA_DIR（企业分发/临时排障） > config.json 的 dataDir（用户设定） > 程序目录（默认）。
  * 默认回落保证向后兼容：没设过的老用户解析结果与旧版逐字节一致。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync, cpSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync, cpSync, rmSync, renameSync } from "node:fs";
 import { join, resolve as pathResolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { DB_FILENAME, programDir, homeConfigPath } from "./paths";
 import type { Lang } from "./i18n/types";
+// 运行时引 i18n 只为一句告警（配置损坏时）。方向仍然单向：i18n → paths、home → paths + i18n，
+// 不成环。i18n 在 import 期不求值、不读文件，所以这不会让 `xbb mcp` 的 stdout 多出任何东西。
+import { dict } from "./i18n";
 
 // 路径基元下沉到 `paths.ts`（理由见该文件顶部注释：切断 i18n ↔ home 的循环依赖）。
 // 这里 re-export，调用方无需改任何一处 import。
@@ -62,20 +65,74 @@ export interface HomeConfig {
 
 /** 读锚点。损坏/缺失一律返回 null（走默认位置），绝不因为一个坏 JSON 让程序起不来。 */
 export function readHomeConfig(): HomeConfig | null {
+  const probed = probeConfigFile();
+  return probed.state === "ok" ? probed.cfg : null;
+}
+
+type ConfigProbe = { state: "missing" } | { state: "ok"; cfg: HomeConfig } | { state: "corrupt" };
+
+/**
+ * 区分「没有这个文件」与「文件读不懂」。
+ *
+ * `readHomeConfig()` 把两者折成同一个 null —— 对"库该在哪"这个问题是对的（都回落默认位置），
+ * 但对"能不能覆盖这个文件"这个问题**是灾难**：读不懂的文件里可能还写着 `dataDir`，
+ * 那是"库在哪"的唯一线索，覆盖它等于把线索烧掉。用户下次启动只会看到「找不到记忆库」，
+ * 而没人会想到是自己刚敲了一句 `xbb lang en`。
+ */
+function probeConfigFile(): ConfigProbe {
   const p = homeConfigPath();
-  if (!existsSync(p)) return null;
+  if (!existsSync(p)) return { state: "missing" };
   try {
-    const raw = JSON.parse(readFileSync(p, "utf8")) as HomeConfig;
-    if (raw && typeof raw === "object") return raw;
-    return null;
+    const raw = JSON.parse(readFileSync(p, "utf8")) as unknown;
+    // `Array.isArray` 不能省：`typeof [] === "object"`，一个 `[1,2]` 会被当成合法配置，
+    // 之后 `{...cur}` 展开成 `{"0":1,"1":2}` 写回去 —— 看起来像正常文件，其实全是垃圾。
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) return { state: "ok", cfg: raw as HomeConfig };
+    return { state: "corrupt" };
   } catch {
-    return null;
+    return { state: "corrupt" };
   }
+}
+
+/** 配置损坏且连备份都做不成 —— 与其静默销毁，不如让这条命令失败一次。 */
+export class ConfigCorruptError extends Error {
+  readonly code = "XBB_CONFIG_CORRUPT";
+  constructor(
+    readonly path: string,
+    readonly backup: string,
+    reason: string,
+  ) {
+    super(dict().config.corruptCantBackup(path, reason));
+    this.name = "ConfigCorruptError";
+  }
+}
+
+/**
+ * 为「写」而读：损坏时**先把原文件改名留存**，再当作空配置继续写。
+ * 备份失败就抛错 —— 这是唯一一处"宁可不干活也不能写"的地方。
+ */
+function readConfigForWrite(): HomeConfig {
+  const probed = probeConfigFile();
+  if (probed.state === "ok") return probed.cfg;
+  if (probed.state === "missing") return {};
+
+  const p = homeConfigPath();
+  // 时间戳进文件名而不是内容：同一秒连坏两次也不会互相覆盖（`:` 与 `.` 在 Windows 文件名里非法）
+  const backup = `${p}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    renameSync(p, backup);
+  } catch (e) {
+    throw new ConfigCorruptError(p, backup, (e as Error).message);
+  }
+  const d = dict();
+  console.error(d.config.corruptSaved(p, backup));
+  console.error(d.config.corruptWhat);
+  console.error("");
+  return {};
 }
 
 /** 写锚点（合并写，不清掉不认识的字段）。目录不存在就建。 */
 export function writeHomeConfig(patch: HomeConfig, by = "cli"): HomeConfig {
-  const cur = readHomeConfig() ?? {};
+  const cur = readConfigForWrite();
   const next: HomeConfig = { ...cur, ...patch, updatedAt: new Date().toISOString(), updatedBy: by };
   const p = homeConfigPath();
   mkdirSync(dirname(p), { recursive: true });
@@ -88,7 +145,7 @@ export function writeHomeConfig(patch: HomeConfig, by = "cli"): HomeConfig {
 export function clearDataDir(by = "cli"): void {
   const p = homeConfigPath();
   if (!existsSync(p)) return;
-  const cur = readHomeConfig() ?? {};
+  const cur = readConfigForWrite();
   const { dataDir: _dropped, ...rest } = cur;
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify({ ...rest, updatedAt: new Date().toISOString(), updatedBy: by }, null, 2) + "\n", "utf8");

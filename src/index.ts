@@ -5,7 +5,7 @@
  * xiaobenben — 个人客户端壳。
  * 本地库 SQLite 永远零登录；17630 端口；MCP stdio 工具面。
  */
-import { programDir, homeConfigPath, writeHomeConfig, DbMissingError } from "./home";
+import { programDir, homeConfigPath, writeHomeConfig, DbMissingError, ConfigCorruptError } from "./home";
 import { runMcp } from "./mcp";
 import { PersonalStore, DbCorruptError } from "./store";
 import { ORG_PERSONAL, SchemaBusyError, SCHEMA_TARGET_VERSION } from "./schema";
@@ -753,9 +753,18 @@ if (cmd === "serve") {
       console.error(d.langCmd.unknown(arg));
       process.exit(2);
     }
-    writeHomeConfig({ lang: target }, "cli.lang");
-    const envRaw = process.env.XBB_LANG?.trim();
-    // 写下去了，但环境变量会盖过它 —— 这是"看起来没生效"的唯一成因，必须直说
+    try {
+      writeHomeConfig({ lang: target }, "cli.lang");
+    } catch (e) {
+      // 配置损坏且连备份都做不成时，home.ts 会**拒绝写入**（绝不拿原内容冒险）。
+      // 它给出的 message 已经是完整人话；再叠一层 Bun 堆栈，用户只会以为程序坏了。
+      if (e instanceof ConfigCorruptError) {
+        console.error(e.message);
+        process.exit(1);
+      }
+      throw e;
+    }
+    const envRaw = process.env.XBB_LANG?.trim();    // 写下去了，但环境变量会盖过它 —— 这是"看起来没生效"的唯一成因，必须直说
     if (envRaw && normalizeLang(envRaw) !== target) console.log(d.langCmd.switchedButEnvWins(target, envRaw));
     else console.log(d.langCmd.switched(target));
   }
