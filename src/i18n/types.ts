@@ -30,6 +30,16 @@ export interface Dict {
   /** 帮助文案（判据见 `help/types.ts` 顶部：谁读它，不是"是不是字符串"） */
   help: HelpDict;
 
+  /**
+   * 组织显示名。
+   *
+   * 服务端只下发 `orgKind`（personal / company），展示名是**客户端折出来的**——
+   * 所以它不是数据，是文案，会出现在 `xbb cloud`、托盘悬浮提示与管理页上。
+   */
+  org: {
+    personalSpace: string;
+  };
+
   /** 管理页（`xbb serve` 网页）文案 —— 含服务端渲染、API 错误与内联脚本三块 */
   admin: AdminDict;
 
@@ -188,6 +198,33 @@ export interface Dict {
       nothingToSwitch: string;
       statusNone: string[];
       status: (f: CloudStatusFields) => string[];
+      /**
+       * 绑定失败话术。`Error.message` 会带一个 ❌ 原样打到终端，所以与正常输出同等对待。
+       * 服务端给的 `code` / `message` 是数据，原样保留不翻。
+       */
+      bindErr: {
+        badLink: string;
+        badTicket: string;
+        bindFailed: (code: string, message: string) => string;
+        keyEmpty: string;
+        unreachable: (api: string, message: string) => string;
+        keyRejected: string;
+        verifyFailed: (code: string, message: string) => string;
+        /** 服务端返回了无法解析的响应体 */
+        readFailed: string;
+      };
+      /** `xbb register-protocol`：注册 `xubb://` 处理器的结果 */
+      protocol: {
+        devRun: (exe: string) => string;
+        unsupportedOs: (os: string) => string;
+        failed: (message: string) => string;
+        regFailed: (op: string, output: string) => string;
+        registeredWin: (exe: string) => string;
+        lsregisterFailed: string;
+        registeredMac: (app: string) => string;
+        xdgFailed: string;
+        registeredLinux: (desktop: string) => string;
+      };
       unknownSub: (sub: string) => string;
     };
     bindKey: {

@@ -24,6 +24,8 @@ export const en: Dict = {
 
   admin: adminEn,
 
+  org: { personalSpace: "Personal space" },
+
   banner: { built: "built", fingerprint: "fingerprint", site: "official site" },
 
   langCmd: {
@@ -271,6 +273,28 @@ export const en: Dict = {
         return lines;
       },
       unknownSub: (sub) => `Unknown subcommand: ${sub} (available: on / off / status)`,
+      bindErr: {
+        badLink: "Invalid xubb link",
+        badTicket: "Invalid bind ticket (expected 32-128 hex characters, single use, expires in 60 seconds — generate a new one in the console)",
+        bindFailed: (code, message) => `Binding failed ${code}: ${message}`,
+        keyEmpty: "The key cannot be empty",
+        unreachable: (api, message) => `Cannot reach ${api} (${message}) — check your network or the API address`,
+        keyRejected: "The key is invalid or has been revoked (the server refused authentication)",
+        verifyFailed: (code, message) => `Verification failed ${code}: ${message}`,
+        readFailed: "unreadable response",
+      },
+      protocol: {
+        devRun: (exe) =>
+          `This is a bun development run (${exe}) and cannot be registered as a protocol handler. Pass the compiled exe path: xbb register-protocol "C:\\path\\to\\xbb.exe"`,
+        unsupportedOs: (os) => `Unsupported platform: ${os}`,
+        failed: (message) => `Registration failed: ${message}`,
+        regFailed: (op, output) => `reg ${op} failed: ${output}`,
+        registeredWin: (exe) => `Registered HKCU\\Software\\Classes\\xubb → "${exe}" bind "%1" (takes effect immediately in browsers, no restart needed)`,
+        lsregisterFailed: "lsregister failed",
+        registeredMac: (app) => `Registered xubb:// → ${app} (if the first attempt does nothing, click "Connect my xiaobenben" once more)`,
+        xdgFailed: "xdg-mime failed (desktops other than GNOME/KDE may need to be associated by hand)",
+        registeredLinux: (desktop) => `Registered xubb:// → ${desktop}`,
+      },
     },
 
     bindKey: {

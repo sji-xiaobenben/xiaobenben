@@ -19,6 +19,8 @@ export const zh: Dict = {
 
   admin: adminZh,
 
+  org: { personalSpace: "个人空间" },
+
   banner: { built: "构建", fingerprint: "指纹", site: "官方站点" },
 
   langCmd: {
@@ -256,6 +258,28 @@ export const zh: Dict = {
         return lines;
       },
       unknownSub: (sub) => `未知子命令: ${sub}（可用: on / off / status）`,
+      bindErr: {
+        badLink: "xubb 链接格式无效",
+        badTicket: "绑定票无效（应为 32-128 位 hex，60 秒单用，过期请回管理台重新生成）",
+        bindFailed: (code, message) => `绑定失败 ${code}: ${message}`,
+        keyEmpty: "密钥不能为空",
+        unreachable: (api, message) => `连不上 ${api}（${message}）——请检查网络或 API 地址`,
+        keyRejected: "密钥无效或已被撤销（服务端拒绝认证）",
+        verifyFailed: (code, message) => `校验失败 ${code}：${message}`,
+        readFailed: "响应不可读",
+      },
+      protocol: {
+        devRun: (exe) =>
+          `当前是 bun 开发运行（${exe}），无法注册为协议处理器。请传编译后的 exe 路径：xbb register-protocol "C:\\path\\to\\xbb.exe"`,
+        unsupportedOs: (os) => `不支持的平台: ${os}`,
+        failed: (message) => `注册失败: ${message}`,
+        regFailed: (op, output) => `reg ${op} 失败: ${output}`,
+        registeredWin: (exe) => `已注册 HKCU\\Software\\Classes\\xubb → "${exe}" bind "%1"（浏览器唤起立即生效，无需重启）`,
+        lsregisterFailed: "lsregister 失败",
+        registeredMac: (app) => `已注册 xubb:// → ${app}（若首次唤起无反应，请再点一次「连接我的小本本」）`,
+        xdgFailed: "xdg-mime 失败（GNOME/KDE 之外的桌面可能需手动关联）",
+        registeredLinux: (desktop) => `已注册 xubb:// → ${desktop}`,
+      },
     },
 
     bindKey: {

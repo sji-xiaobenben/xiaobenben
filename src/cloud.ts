@@ -15,6 +15,9 @@ import { createHash } from "node:crypto";
 import { hostname, homedir, platform } from "node:os";
 import { join } from "node:path";
 import { hashFile, type AdmittedAttachment } from "./payloads";
+// 绑定失败 / 协议注册的结果会以 `❌ <message>` 原样打到终端，所以要走字典。
+// 方向仍是单向的：cloud → i18n → paths，不成环；dict() 懒求值，不在 import 期读文件。
+import { dict } from "./i18n";
 
 export const DEFAULT_API = "https://api.xiaobenben.net";
 
@@ -45,7 +48,7 @@ export interface CloudConfig {
  *  名字缺失时退回 orgId（降级可读，不谎报）。 */
 export function orgDisplayName(name?: string | null, kind?: string | null, fallbackId = ""): string {
   if (!name) return fallbackId;
-  return kind === "personal" ? "个人空间" : name;
+  return kind === "personal" ? dict().org.personalSpace : name;
 }
 
 const configPath = () =>
@@ -1110,7 +1113,7 @@ export async function bindFromTicket(input: string, deviceName?: string): Promis
     try {
       u = new URL(trimmed);
     } catch {
-      throw new BindError("xubb 链接格式无效");
+      throw new BindError(dict().cmd.cloud.bindErr.badLink);
     }
     ticket = u.searchParams.get("ticket");
     api = u.searchParams.get("api") ?? DEFAULT_API;
@@ -1118,7 +1121,7 @@ export async function bindFromTicket(input: string, deviceName?: string): Promis
     ticket = trimmed; // 裸票（手动粘贴）
   }
   if (!ticket || !/^[0-9a-f]{32,128}$/.test(ticket)) {
-    throw new BindError("绑定票无效（应为 32-128 位 hex，60 秒单用，过期请回管理台重新生成）");
+    throw new BindError(dict().cmd.cloud.bindErr.badTicket);
   }
   const res = await fetch(`${api}/auth/device/bind`, {
     method: "POST",
@@ -1140,7 +1143,7 @@ export async function bindFromTicket(input: string, deviceName?: string): Promis
     | null;
   if (!json?.ok) {
     const e = json && "error" in json ? json.error : { code: "E_HTTP", message: `HTTP ${res.status}` };
-    throw new BindError(`绑定失败 ${e.code}: ${e.message}`);
+    throw new BindError(dict().cmd.cloud.bindErr.bindFailed(e.code, e.message));
   }
   const cfg: CloudConfig = {
     apiBase: api,
@@ -1196,7 +1199,7 @@ export async function bindFromKey(
   apiBase: string = DEFAULT_API,
 ): Promise<{ cfg: CloudConfig; configPath: string; orgLabel: string; memberName: string | null }> {
   const key = keyInput.trim();
-  if (!key) throw new BindError("密钥不能为空");
+  if (!key) throw new BindError(dict().cmd.cloud.bindErr.keyEmpty);
   const api = (apiBase.trim() || DEFAULT_API).replace(/\/+$/, "");
 
   let res: Response;
@@ -1204,7 +1207,7 @@ export async function bindFromKey(
     res = await fetch(`${api}/v1/me/summary`, { headers: { authorization: `Bearer ${key}` } });
   } catch (e) {
     // 网络问题必须与"密钥不对"分开报——否则用户会拿着好 key 反复重试
-    throw new BindError(`连不上 ${api}（${e instanceof Error ? e.message : String(e)}）——请检查网络或 API 地址`);
+    throw new BindError(dict().cmd.cloud.bindErr.unreachable(api, e instanceof Error ? e.message : String(e)));
   }
 
   const json = (await res.json().catch(() => null)) as
@@ -1222,11 +1225,11 @@ export async function bindFromKey(
     | null;
 
   if (res.status === 401 || (json && "error" in json && json.error.code === "E_AUTH")) {
-    throw new BindError("密钥无效或已被撤销（服务端拒绝认证）");
+    throw new BindError(dict().cmd.cloud.bindErr.keyRejected);
   }
   if (!json?.ok) {
     const e = json && "error" in json ? json.error : null;
-    throw new BindError(`校验失败 ${e?.code ?? `HTTP ${res.status}`}：${e?.message ?? "响应不可读"}`);
+    throw new BindError(dict().cmd.cloud.bindErr.verifyFailed(e?.code ?? `HTTP ${res.status}`, e?.message ?? dict().cmd.cloud.bindErr.readFailed));
   }
 
   const d = json.data;
@@ -1265,19 +1268,16 @@ export async function bindFromKey(
 export function registerProtocol(exeOverride?: string): { ok: boolean; message: string } {
   const exe = exeOverride ?? process.execPath;
   if (/bun(\.exe)?$/i.test(exe)) {
-    return {
-      ok: false,
-      message: `当前是 bun 开发运行（${exe}），无法注册为协议处理器。请传编译后的 exe 路径：xbb register-protocol "C:\\path\\to\\xbb.exe"`,
-    };
+    return { ok: false, message: dict().cmd.cloud.protocol.devRun(exe) };
   }
   const os = platform();
   try {
     if (os === "win32") return { ok: true, message: registerWindows(exe) };
     if (os === "darwin") return { ok: true, message: registerMac(exe) };
     if (os === "linux") return { ok: true, message: registerLinux(exe) };
-    return { ok: false, message: `不支持的平台: ${os}` };
+    return { ok: false, message: dict().cmd.cloud.protocol.unsupportedOs(os) };
   } catch (e) {
-    return { ok: false, message: `注册失败: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: dict().cmd.cloud.protocol.failed(e instanceof Error ? e.message : String(e)) };
   }
 }
 
@@ -1285,7 +1285,7 @@ function registerWindows(exe: string): string {
   // HKCU 无需管理员；URL Protocol 空值键是协议注册的标志位
   const run = (args: string[]) => {
     const r = Bun.spawnSync(["reg", ...args], { stdout: "pipe", stderr: "pipe" });
-    if (r.exitCode !== 0) throw new Error(`reg ${args[0]} 失败: ${new TextDecoder().decode(r.stderr)}`);
+    if (r.exitCode !== 0) throw new Error(dict().cmd.cloud.protocol.regFailed(args[0], new TextDecoder().decode(r.stderr)));
   };
   run(["add", "HKCU\\Software\\Classes\\xubb", "/ve", "/d", "URL:xubb Protocol", "/f"]);
   run(["add", "HKCU\\Software\\Classes\\xubb", "/v", "URL Protocol", "/d", "", "/f"]);
@@ -1293,7 +1293,7 @@ function registerWindows(exe: string): string {
     "add", "HKCU\\Software\\Classes\\xubb\\shell\\open\\command",
     "/d", `"${exe}" bind "%1"`, "/f",
   ]);
-  return `已注册 HKCU\\Software\\Classes\\xubb → "${exe}" bind "%1"（浏览器唤起立即生效，无需重启）`;
+  return dict().cmd.cloud.protocol.registeredWin(exe);
 }
 
 function registerMac(exe: string): string {
@@ -1329,8 +1329,8 @@ function registerMac(exe: string): string {
     ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-f", app],
     { stdout: "pipe", stderr: "pipe" },
   );
-  if (r.exitCode !== 0) throw new Error("lsregister 失败");
-  return `已注册 xubb:// → ${app}（若首次唤起无反应，请再点一次「连接我的小本本」）`;
+  if (r.exitCode !== 0) throw new Error(dict().cmd.cloud.protocol.lsregisterFailed);
+  return dict().cmd.cloud.protocol.registeredMac(app);
 }
 
 function registerLinux(exe: string): string {
@@ -1345,6 +1345,6 @@ function registerLinux(exe: string): string {
     stdout: "pipe",
     stderr: "pipe",
   });
-  if (r.exitCode !== 0) throw new Error("xdg-mime 失败（GNOME/KDE 之外的桌面可能需手动关联）");
-  return `已注册 xubb:// → ${desktop}`;
+  if (r.exitCode !== 0) throw new Error(dict().cmd.cloud.protocol.xdgFailed);
+  return dict().cmd.cloud.protocol.registeredLinux(desktop);
 }
