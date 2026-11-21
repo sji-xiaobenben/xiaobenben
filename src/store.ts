@@ -12,6 +12,7 @@ import { eventHash, payloadHash, uuidv7, type MemoryRecord, type MemoryWrite, ty
 import { initSchemaV2, ORG_PERSONAL } from "./schema";
 import { tokenize } from "./tokenize";
 import { openGate, resolveDbPath, markInitialized } from "./home";
+import { dict } from "./i18n";
 
 const GENESIS = "GENESIS";
 
@@ -93,17 +94,7 @@ export class DbCorruptError extends Error {
     readonly file: string,
     readonly detail: string,
   ) {
-    super(
-      `小本本的记忆库打不开：这个文件已损坏（${detail}）。\n` +
-        `   文件：${file}\n` +
-        "   ⚠️ 先别删它 —— 原文件保持不动就还有抢救机会，覆盖或删除才是真的没了。\n" +
-        "   怎么处理：\n" +
-        "     ① 留证：把 memory.db 连同 memory.db-wal / -shm 一起复制一份到别处\n" +
-        "     ② 同目录若有历史备份，可以换上试：memory.db.bak-* / memory.db.gen1\n" +
-        "     ③ 确认要从零开始：先把它改名留存（memory.db → memory.db.corrupt），\n" +
-        "        再执行 xbb home init --force\n" +
-        "   排查：xbb home show        看库的位置、大小、最后写入时间",
-    );
+    super(dict().dbGate.corrupt(file, detail));
     this.name = "DbCorruptError";
   }
 }

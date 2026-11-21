@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { detectRunningHosts, resolveHosts, type ProcNode, type RunningHost } from "./connect-proc";
 import { parseJsonc } from "./jsonc";
 import { dict } from "./i18n";
+import { columnWidth, displayWidth, padTo } from "./i18n/width";
 
 export type { ClientId } from "./connect-proc";
 import type { ClientId } from "./connect-proc";
@@ -251,9 +252,12 @@ function scanJson(
     // 一份完全正常的配置判成「读不了」。（stripJsonc 对纯 JSON 是恒等变换）
     doc = parseJsonc(text);
   } catch (e) {
-    return { entries: [], problem: `配置不是合法 JSON（${e instanceof Error ? e.message : String(e)}）` };
+    return {
+      entries: [],
+      problem: dict().connect.badJson(e instanceof Error ? e.message : String(e)),
+    };
   }
-  if (!doc || typeof doc !== "object") return { entries: [], problem: "配置顶层不是对象" };
+  if (!doc || typeof doc !== "object") return { entries: [], problem: dict().connect.notObject };
   const entries: Array<{ name: string; obj: Record<string, unknown> }> = [];
   for (const path of containers) collectEntries(doc, path, entries);
   void opencodeStyle;
@@ -414,7 +418,7 @@ export function probeClients(
     // 配了但跑不起来 —— 这是最难自查的故障：客户端里看着有、AI 就是没有记忆。
     if (hitPath) {
       if (looksLikePath(base.commandPath) && !existsSync(base.commandPath)) {
-        base.broken = `配置指向的可执行文件已不存在：${base.commandPath}`;
+        base.broken = dict().connect.exeMissing(base.commandPath);
       }
     } else if (problem) {
       // 只有「真配了却读不出来」才算 broken。连文件都没有不是故障，是没配。
@@ -472,81 +476,80 @@ export function snippet(id: ClientId, entry: Entry): string {
   return JSON.stringify({ mcpServers: { xiaobenben: { command: entry.command, args: entry.args } } }, null, 2);
 }
 
-const VIA_LABEL: Record<EngineVia, string> = {
-  npx: "npx 包",
-  desktop: "桌面版",
-  pkg: "npm 缓存二进制",
-  other: "其他",
-};
-
-function pad(s: string, n: number): string {
-  // 中文按显示宽度算：一个汉字占两列，否则表格会歪
-  let w = 0;
-  for (const ch of s) w += /[\u4e00-\u9fff]/.test(ch) ? 2 : 1;
-  return s + " ".repeat(Math.max(0, n - w));
-}
+// `VIA_LABEL` 已并入字典（`dict().connect.engine`）：它出现的每一处都在用户屏幕上。
 
 export function renderConnect(statuses: ClientStatus[], entry: Entry, hosts?: RunningHost[]): string {
+  const c = dict().connect;
   const installed = statuses.filter((s) => s.installed);
   const connected = statuses.filter((s) => s.via && !s.broken);
   const runningOnly = statuses.filter((s) => !s.via && s.running);
   const unknown = (hosts ?? []).filter((h) => !h.client);
   const lines: string[] = [];
 
-  lines.push("小本本 · AI 客户端接入状态");
+  // 列宽现算，下限取改造前那套手敲的 16/10/12（中文布局逐字节不变），内容更宽就跟着长。
+  // 英文的 `Installed`（9 列）、`npm cache binary`（16 列）都超过中文时代的预留，硬编码必错位。
+  const wClient = Math.max(16, displayWidth(c.cols.client) + 2, columnWidth(statuses.map((s) => s.label)) + 2);
+  const wInst = Math.max(10, displayWidth(c.cols.installed) + 2);
+  // 状态列要按**值**算，不只按表头：英文 `not detected` 正好 12 列，只按表头算会与引擎列粘连
+  const wStat = Math.max(12, displayWidth(c.cols.status) + 2, columnWidth(Object.values(c.status)) + 2);
+  const wEngine = Math.max(displayWidth(c.cols.engine), columnWidth(Object.values(c.engine)));
+
+  lines.push(c.title);
   lines.push("");
-  lines.push(`  ${pad("客户端", 16)}${pad("已安装", 10)}${pad("接入", 12)}引擎`);
-  lines.push("  " + "─".repeat(52));
+  lines.push(
+    `  ${padTo(c.cols.client, wClient)}${padTo(c.cols.installed, wInst)}${padTo(c.cols.status, wStat)}${c.cols.engine}`,
+  );
+  lines.push("  " + "─".repeat(wClient + wInst + wStat + wEngine));
   for (const s of statuses) {
-    const inst = s.installed ? "是" : "否";
+    const inst = s.installed ? c.cell.yes : c.cell.no;
     // 「使用中」是进程层看到的事实、配置层没定位到。它与「是」的区别对用户很重要：
     // 前者不该再去动配置（很可能已经正确，只是我们没找到那个文件）。
     const conn = s.via
       ? s.broken
-        ? "异常"
-        : "是"
+        ? c.status.broken
+        : c.status.ok
       : s.running
-        ? "使用中"
+        ? c.status.inUse
         : s.installed
-          ? "未检测到"
-          : "—";
-    const via = s.via ? VIA_LABEL[s.via] : "—";
-    lines.push(`  ${pad(s.label, 16)}${pad(inst, 10)}${pad(conn, 12)}${via}`);
+          ? c.status.notDetected
+          : c.cell.dash;
+    const via = s.via ? c.engine[s.via] : c.cell.dash;
+    lines.push(`  ${padTo(s.label, wClient)}${padTo(inst, wInst)}${padTo(conn, wStat)}${via}`);
   }
   lines.push("");
   const bits: string[] = [];
-  bits.push(installed.length ? `检测到 ${installed.length} 个客户端` : "没有检测到本机安装任何 AI 客户端");
-  if (connected.length) bits.push(`${connected.length} 个已接入`);
-  if (runningOnly.length) bits.push(`${runningOnly.length} 个正在使用（配置未定位到）`);
-  lines.push("  " + bits.join("，") + "。");
+  bits.push(installed.length ? c.summaryFound(installed.length) : c.summaryNone);
+  if (connected.length) bits.push(c.summaryConnected(connected.length));
+  if (runningOnly.length) bits.push(c.summaryInUse(runningOnly.length));
+  lines.push(c.summary(bits));
 
   const broken = statuses.filter((s) => s.broken);
   if (broken.length) {
     lines.push("");
-    lines.push("  ⚠ 配置有问题（客户端里看着有，实际连不上）：");
+    lines.push(c.brokenTitle);
     for (const s of broken) {
       lines.push(`     ${s.label}: ${s.broken}`);
-      lines.push(`     配置：${s.configPath}`);
+      lines.push(c.brokenAt(s.configPath));
     }
   }
 
   if (runningOnly.length) {
     lines.push("");
-    lines.push("  正在使用、但没在常见位置找到配置的：");
+    lines.push(c.inUseTitle);
     for (const s of runningOnly) {
-      const who = s.hostProcess ? `（宿主进程 ${s.hostProcess}）` : "";
-      lines.push(`     ${s.label}${who} —— 有 xbb mcp 子进程在跑，说明它已经能用了。`);
+      const who = s.hostProcess ? c.inUseWho(s.hostProcess) : "";
+      lines.push(c.inUseLine(s.label, who));
     }
-    lines.push("     不要重新配置：这些客户端的配置可能放在项目目录或内部存储里。");
+    lines.push(c.inUseDontReconfigure);
   }
 
   const pending = installed.filter((s) => !s.via && !s.running);
   if (pending.length) {
     lines.push("");
-    lines.push("  未检测到接入的客户端 —— 把下面这段放进它自己的配置文件：");
+    lines.push(c.pendingTitle);
     for (const s of pending) {
       lines.push("");
-      lines.push(`  ── ${s.label} ──  ${s.configPath}`);
+      lines.push(c.pendingHead(s.label, s.configPath));
       lines.push(
         snippet(s.id, entry)
           .split("\n")
@@ -556,34 +559,29 @@ export function renderConnect(statuses: ClientStatus[], entry: Entry, hosts?: Ru
     }
   } else if (installed.length) {
     lines.push("");
-    lines.push("  所有已安装的客户端都能用了，无需操作。");
+    lines.push(c.allReady);
   }
 
   if (unknown.length) {
     lines.push("");
-    lines.push("  另有 MCP 进程在跑，但认不出是哪个客户端拉起的：");
+    lines.push(c.unknownTitle);
     for (const h of unknown) {
-      const who = h.hostName ? `挂在 ${h.hostName} 下` : "宿主已退出";
-      lines.push(`     pid ${h.pid} · ${who}${h.fromShell ? "（像是在终端里手动跑的）" : ""}`);
+      const who = h.hostName ? c.unknownHosted(h.hostName) : c.unknownHostGone;
+      lines.push(c.unknownLine(h.pid, who, h.fromShell ? c.unknownFromShell : ""));
     }
   }
 
-  // 「未检测到」必须自带这句话。否则用户会拿它当结论去重配一个本来好用的客户端 ——
+  // 「未检测到」必须自带这段说明。否则用户会拿它当结论去重配一个本来好用的客户端 ——
   // 这正是 2026-11-16 那条反馈里最要紧的一层。
   if (statuses.some((s) => s.installed && !s.via && !s.running)) {
     lines.push("");
-    lines.push("  说明：「未检测到」只代表本命令没在常见位置读到配置，不等于没接入。");
-    lines.push("        部分客户端把配置存在项目目录或内部数据库里，这里读不到但照样能用。");
-    lines.push("        确定自己在用的客户端，别照着上面的片段重配。");
+    lines.push(...c.noteNotDetected);
   }
 
   lines.push("");
-  if (entry.via === "npx") {
-    lines.push("  注意：npx 那一行必须带 -y。首次运行会问「Ok to proceed?」，");
-    lines.push("        而 MCP 下没人能回答，表现是客户端一直连不上而不是报错。");
-  }
-  lines.push("  改完配置要重启对应客户端才生效（它们只在启动时读一次）。");
-  lines.push("  本命令只读配置与进程，不修改任何文件。");
+  if (entry.via === "npx") lines.push(...c.noteNpxY);
+  lines.push(c.noteRestart);
+  lines.push(c.noteReadOnly);
   return lines.join("\n");
 }
 

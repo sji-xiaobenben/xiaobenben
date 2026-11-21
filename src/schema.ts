@@ -8,6 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { bigramify } from "./bigram";
+import { dict } from "./i18n";
 
 /** 个人租户固定 ID（kind=personal，树根） */
 export const ORG_PERSONAL = "00000000-0000-7000-8000-000000000001";
@@ -593,15 +594,7 @@ function busyAttempts(): number {
  */
 export class SchemaBusyError extends Error {
   constructor(detail: string) {
-    super(
-      "另一个小本本进程正在写库，结构升级没能拿到写锁。\n" +
-        `  底层原因：${detail}\n` +
-        "  怎么处理：把所有 xbb 进程停下，再重跑刚才的命令。最省事的是关掉正在使用小本本的\n" +
-        "            AI 客户端会话（每个会话各拉起一个进程），命令行里也可以：\n" +
-        "              xbb stop                  装过桌面版（PATH 里有 xbb）时用\n" +
-        "              npx -y xiaobenben stop    走 npx 接入、PATH 里没有 xbb 时用\n" +
-        "            升级完成后再启动 AI 客户端即可。库里的数据不会丢，升级是幂等的。",
-    );
+    super(dict().dbGate.busy(detail));
     this.name = "SchemaBusyError";
   }
 }

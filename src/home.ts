@@ -215,41 +215,16 @@ export class DbMissingError extends Error {
   }
 }
 
+/** 缺库话术 —— 全文在 i18n/zh.ts 与 i18n/en.ts 的 `dbGate.missing`。
+ *  留这个薄壳是为了让 `DbMissingError` 的构造点一行都不改。 */
 function explainMissing(d: DbMissingDetail): string {
-  const lines: string[] = [];
-  lines.push(`记忆库不在预期位置：${d.dbPath}`);
-  if (d.kind === "default-missing-but-installed") {
-    lines.push("   这里是默认安装目录，而且**程序痕迹都在**（bin / models / logs / cloud.json 之类）——");
-    lines.push("   说明这套安装用过，不是首次运行。库应该是被移动、重命名或误删了。");
-    lines.push("   所以这里拒绝启动：新建一个空库会让你以为记忆全丢了。");
-  } else if (d.kind === "env-missing") {
-    lines.push(`   位置来自环境变量 XBB_DATA_DIR（临时覆盖，不写盘）`);
-  } else {
-    lines.push(`   位置来自配置：${d.configPath}`);
-  }
-  if (d.kind === "configured-missing-but-legacy-exists") {
-    lines.push("");
-    lines.push(`⚠️ 但默认位置**有**库：${d.legacyDbPath}`);
-    lines.push("   这不是首次运行 —— 库还在，只是新配置指向的地方没有它。");
-    lines.push("   直接新建空库会让你以为记忆全丢了，所以这里拒绝启动。");
-  } else if (d.kind === "configured-missing" || d.kind === "env-missing") {
-    lines.push("");
-    lines.push("可能原因：① 该盘未挂载/已拔出　② 库被移动、重命名或误删　③ 配置指向了错误路径");
-  }
-  lines.push("");
-  lines.push(`排查：xbb home show        看程序与库的实际位置、大小、最后写入时间`);
-  lines.push(`      xbb home find        扫各盘找 memory.db（忘了当初放哪时用）`);
-  if (d.source === "env") {
-    // env 的优先级高于配置文件：这时候 move/set 写进去也没用，说清楚免得白折腾一趟
-    lines.push(`      ↳ 位置来自环境变量，它**优先于配置文件** —— 撤掉或改正 XBB_DATA_DIR 才会生效`);
-  } else if (d.kind === "configured-missing-but-legacy-exists") {
-    lines.push(`      xbb home move "${dirname(d.legacyDbPath)}"   把默认位置的库搬过去并校准配置`);
-    lines.push(`      xbb home reset       撤掉配置，回到默认位置（${d.legacyDbPath}）`);
-  } else if (d.kind === "default-missing-but-installed") {
-    lines.push(`      xbb home set "<某个 memory.db 所在的目录>"   找到它之后指过去`);
-  }
-  lines.push(`确认要从零开始：xbb home init --force（会新建空库，且必须显式指定 --force）`);
-  return lines.join("\n");
+  return dict().dbGate.missing({
+    kind: d.kind,
+    dbPath: d.dbPath,
+    source: d.source,
+    configPath: d.configPath,
+    legacyDbPath: d.legacyDbPath,
+  });
 }
 
 export interface DbGateResult {

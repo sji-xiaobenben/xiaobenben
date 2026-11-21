@@ -24,6 +24,7 @@
  * 采不到的（Trae 库加密、豆包/MiniMax 会话在云端）如实报 unavailable，不假装。
  */
 import { Database } from "bun:sqlite";
+import { dict } from "./i18n";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -518,7 +519,7 @@ function collectOpencodeV2(
   const empty = { turns: [], cursor: null, scanned: 0, suspects: 0, unparsed: 0, keySets: [], pending: 0, note: "" };
   if (!hasV2(src)) {
     // 上一轮还能读到 v2、这一轮读不到 —— 上游又改表了。不说一声就等于第二次静默断流。
-    return { ...empty, note: cur.v2 ? "⚠ 之前能读到 session_message，现在读不到了 —— 上游表结构又变了一次" : "" };
+    return { ...empty, note: cur.v2 ? dict().cmd.ingestNote.schemaTwice : "" };
   }
 
   // ① 切分线：v1 最后一条写入时刻。part 表缺失（纯 v2 环境）时退回 0。
@@ -636,7 +637,7 @@ function collectOpencodeV2(
     const maxTs = Number(m?.t ?? 0);
     if (maxTs && lastTs && maxTs - lastTs > OPEN_STALL_MS && turns.length === 0) {
       const h = Math.round((maxTs - lastTs) / 3600_000);
-      lagNote = `⚠ v2 最新数据比游标新 ${h} 小时，本轮零产出 —— 解析规则可能已失效`;
+      lagNote = dict().cmd.ingestNote.stalled(h);
     }
   } catch {
     lagNote = "";
@@ -743,8 +744,8 @@ function collectOpencode(
     if (v2.note) notes.push(v2.note);
     // 「最近新增 0」在 v2 时代必须是可解释的：要么真没说话，要么还在写（水位内）——
     // 把水位内待定的条数摆出来，静默断流就再也藏不住了。
-    if (v2.pending > 0) notes.push(`v2 水位内 ${v2.pending} 条待定`);
-    if (turns.length + v2.turns.length >= maxTurns) notes.push("达单轮上限，余下轮继续");
+    if (v2.pending > 0) notes.push(dict().cmd.ingestNote.v2Pending(v2.pending));
+    if (turns.length + v2.turns.length >= maxTurns) notes.push(dict().cmd.ingestNote.maxTurns);
     return {
       turns: turns.concat(v2.turns),
       cursor,
@@ -862,7 +863,9 @@ function collectCursor(
     return {
       turns,
       scanned,
-      note: parsedComposers ? `解析 ${parsedComposers} 条会话（${keys.length} 条总量）` : `${keys.length} 条会话均无变化`,
+      note: parsedComposers
+        ? dict().cmd.ingestNote.composerParsed(parsedComposers, keys.length)
+        : dict().cmd.ingestNote.composerUnchanged(keys.length),
       suspects,
       unparsed,
       keySets,
@@ -994,7 +997,7 @@ function collectJsonl(
     turns,
     scanned,
     files: touchedFiles.size,
-    note: touchedFiles.size ? `读取 ${touchedFiles.size} 个文件的增量` : "无新增内容",
+    note: touchedFiles.size ? dict().cmd.ingestNote.incrementalFiles(touchedFiles.size) : dict().cmd.ingestNote.noNew,
     suspects,
     unparsed,
     keySets,
@@ -1191,25 +1194,37 @@ export const ALL_SOURCES: SourceId[] = ["opencode", "cursor", "workbuddy", "clau
 function detect(source: SourceId, override?: string): { available: boolean; note: string; files: string[] } {
   if (source === "opencode") {
     const p = override ?? findOpencodeDb();
-    return { available: !!p, note: p ?? "未找到 opencode.db", files: [] };
+    return { available: !!p, note: p ?? dict().cmd.ingestNote.notFoundDb("opencode.db"), files: [] };
   }
   if (source === "cursor") {
     const p = override ?? findCursorDb();
-    return { available: !!p, note: p ?? "未找到 Cursor state.vscdb", files: [] };
+    return { available: !!p, note: p ?? dict().cmd.ingestNote.notFoundDb("Cursor state.vscdb"), files: [] };
   }
   if (source === "workbuddy") {
     const root = override ?? findWorkbuddyRoot();
     const files = root ? listFiles(root, (n) => n.endsWith(".jsonl")) : [];
-    return { available: !!root && files.length > 0, note: root ? `${files.length} 个会话文件` : "未找到 ~/.workbuddy/projects", files };
+    return {
+      available: !!root && files.length > 0,
+      note: root ? dict().cmd.ingestNote.sessionFiles(files.length) : dict().cmd.ingestNote.notFoundPath("~/.workbuddy/projects"),
+      files,
+    };
   }
   if (source === "claude") {
     const roots = override ? [override] : findClaudeRoots();
     const files = roots.flatMap((r) => listFiles(r, (n) => n.endsWith(".jsonl")));
-    return { available: files.length > 0, note: roots.length ? `${files.length} 个会话文件` : "未找到 ~/.claude", files };
+    return {
+      available: files.length > 0,
+      note: roots.length ? dict().cmd.ingestNote.sessionFiles(files.length) : dict().cmd.ingestNote.notFoundPath("~/.claude"),
+      files,
+    };
   }
   const root = override ?? findCodexRoot();
   const files = root ? listFiles(root, (n) => n.endsWith(".jsonl")) : [];
-  return { available: files.length > 0, note: root ? `${files.length} 个 rollout 文件` : "未找到 ~/.codex/sessions", files };
+  return {
+      available: files.length > 0,
+      note: root ? dict().cmd.ingestNote.rolloutFiles(files.length) : dict().cmd.ingestNote.notFoundPath("~/.codex/sessions"),
+      files,
+    };
 }
 
 /** 各源可用性（给 `xbb ingest --status` 用，不写库） */
@@ -1321,7 +1336,7 @@ export function collectClientSessions(db: Database, opts: CollectOptions = {}): 
         inserted: 0,
         skipped: 0,
         ms: Date.now() - t0,
-        note: `失败: ${msg}`,
+        note: dict().cmd.ingestNote.failed(msg),
         suspects: 0,
         unparsed: 0,
         fingerprint: "",
@@ -1331,7 +1346,7 @@ export function collectClientSessions(db: Database, opts: CollectOptions = {}): 
         saveSourceState(db, source, {
           available: true,
           inserted: 0,
-          note: `失败: ${msg}`,
+          note: dict().cmd.ingestNote.failed(msg),
           unparsed: 0,
           totalLines: 0,
         });

@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { helpText, helpTopic, isHelpRequest, overviewHelp } from "./cli-help";
 import { dict, formatNumber, formatTime, isLang, normalizeLang, resolveLang, currentLang, LANGS } from "./i18n";
-import { columnWidth, padTo } from "./i18n/width";
+import { columnWidth, displayWidth, padTo } from "./i18n/width";
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "help";
@@ -89,26 +89,16 @@ if (cmd === "serve") {
   try {
     store = PersonalStore.open();
   } catch (e) {
-    if (e instanceof DbMissingError) {
-      console.error("\n❌ 小本本未启动：记忆库不在预期位置\n");
-      console.error(e.message);
-      console.error("\n服务没有起来 —— 这是刻意的：宁可起不来，也不要在空库上继续用下去。\n");
-      process.exit(2);
-    }
+    const f = dict().cmd.serveFail;
+    const show = (lines: string[], code: number) => {
+      for (const l of lines) console.error(l);
+      process.exit(code);
+    };
+    if (e instanceof DbMissingError) show(f.missing(e.message), 2);
     // 结构升级拿不到写锁：给「怎么办」，不要给 Bun 堆栈
-    if (e instanceof SchemaBusyError) {
-      console.error("\n❌ 小本本未启动：数据库正在被别的进程写入\n");
-      console.error(e.message);
-      console.error("\n服务没有起来 —— 这是刻意的：结构没升级完就起服务，用户会以为升级已经生效。\n");
-      process.exit(3);
-    }
+    if (e instanceof SchemaBusyError) show(f.busy(e.message), 3);
     // 库文件损坏：**绝不能覆盖**（还有抢救价值），所以这里也拒绝起服务
-    if (e instanceof DbCorruptError) {
-      console.error("\n❌ 小本本未启动：记忆库文件已损坏\n");
-      console.error(e.message);
-      console.error("\n服务没有起来 —— 这是刻意的：在坏库上继续写只会让抢救更难。\n");
-      process.exit(4);
-    }
+    if (e instanceof DbCorruptError) show(f.corrupt(e.message), 4);
     throw e;
   }
   // 会话采集（V8）：AI 不一定每轮老实上报，所以引擎自己去读本机客户端库。
@@ -400,28 +390,25 @@ if (cmd === "serve") {
   await runMcp();
 } else if (cmd === "bind") {
   // 协议唤起：xubb://bind?ticket=…&api=…（console「连接我的小本本」唤起）或裸票手动绑定
+  const c = dict().cmd;
   const input = args[1];
   if (!input) {
-    console.error('用法: xbb bind "xubb://bind?ticket=…&api=…" 或 xbb bind <ticket>');
+    console.error(c.bind.usage);
     process.exit(1);
   }
   const { bindFromTicket } = await import("./cloud");
   try {
     const { cfg, configPath } = await bindFromTicket(input);
-    console.log("✅ 已绑定个人云端版");
-    console.log(`   API:     ${cfg.apiBase}`);
-    console.log(`   组织:    ${orgDisplayName(cfg.orgName, cfg.orgKind, cfg.orgId)}（${cfg.orgId}）`);
-    console.log(`   空间:    ${cfg.spaceId ?? "（首次写入时自动解析）"}`);
-    console.log(`   Key:     ${cfg.key.slice(0, 14)}…（明文只存本机 ${configPath}）`);
-    console.log("");
-    console.log("   ────────────────────────────────────────────────────────────");
-    console.log("   ⚠️  必须重启 AI 客户端才会生效");
-    console.log("       opencode / Cursor / WorkBuddy 等（或重新拉起 xbb mcp）");
-    console.log("");
-    console.log("       正在运行中的客户端仍以【本地模式】工作 —— 这期间新写入");
-    console.log("       的记忆会落在本地库，不会同步到你刚绑定的云端组织。");
-    console.log("       重启后新会话整体走云端（情景层 / 保险箱除外，只在本机）。");
-    console.log("   ────────────────────────────────────────────────────────────");
+    for (const l of c.bind.ok({
+      api: cfg.apiBase,
+      org: orgDisplayName(cfg.orgName, cfg.orgKind, cfg.orgId),
+      orgId: cfg.orgId,
+      member: null,
+      space: cfg.spaceId,
+      keyShort: cfg.key.slice(0, 14),
+      path: configPath,
+    }))
+      console.log(l);
   } catch (e) {
     console.error(`❌ ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
@@ -429,80 +416,61 @@ if (cmd === "serve") {
 } else if (cmd === "unbind") {
   const { clearCloudConfig } = await import("./cloud");
   const had = clearCloudConfig();
-  console.log(had ? "已解除云端绑定（本地库不受影响）" : "本无云端绑定");
-  if (had) {
-    console.log("");
-    console.log("   ────────────────────────────────────────────────────────────");
-    console.log("   ⚠️  必须重启 AI 客户端才会生效");
-    console.log("       正在运行中的客户端仍以【云端模式】工作，记忆会继续写入");
-    console.log("       原组织。重启后新会话即回到纯本地模式。");
-    console.log("");
-    console.log("   💡 只是想暂时用本地模式？用 `xbb cloud off` —— 它保留密钥，");
-    console.log("      随时 `xbb cloud on` 切回去，不必回控制台重新生成绑定票。");
-    console.log("      上面这条 unbind 会把密钥从本机删掉，不可恢复。");
-    console.log("   ────────────────────────────────────────────────────────────");
-  }
+  for (const l of dict().cmd.unbind(had)) console.log(l);
 } else if (cmd === "cloud") {
   // 本地 ⇄ 云端的模式开关（模式软开关）。缺省子命令 = status：**先看清现状再说**
+  const c = dict().cmd;
   const sub = args[1] ?? "status";
   if (sub === "on" || sub === "off") {
     const want = sub === "on";
     if (!loadCloudConfigRaw() && want) {
-      console.error("❌ 本机还没有云端密钥，无法切到云端。");
-      console.error("   两条路：① 控制台「连接我的小本本」生成绑定票 → `xbb bind <票>`");
-      console.error("           ② 已有长期密钥 → `xbb bind-key <xbb_live_…>`，或在管理页 http://127.0.0.1:17630/ui 填写");
+      for (const l of c.cloud.noKey) console.error(l);
       process.exit(1);
     }
     if (setCloudEnabled(want)) {
-      console.log(`✅ 已切换到${want ? "云端" : "本地"}模式（密钥保留，未删除）`);
-      console.log("");
-      console.log("   ⚠️  需重启 AI 客户端（opencode / Cursor / WorkBuddy 等）才对新会话生效；");
-      console.log("       在那之前，正在跑的客户端仍按原模式读写。");
+      for (const l of c.cloud.switched(want)) console.log(l);
     } else {
-      console.log("本机没有云端配置，无需切换（已经是纯本地模式）");
+      console.log(c.cloud.nothingToSwitch);
     }
   } else if (sub === "status") {
     const raw = loadCloudConfigRaw();
     const live = loadCloudConfig();
-    if (!raw) {
-      console.log("模式:     本地（仅本机）—— 尚未绑定任何云端组织");
-    } else {
-      const label = orgDisplayName(raw.orgName, raw.orgKind, raw.orgId);
-      console.log(`模式:     ${live ? "云端" : "本地（已关云端，密钥保留）"}`);
-      console.log(`组织:     ${label}${raw.orgId ? `（${raw.orgId}）` : ""}`);
-      console.log(`API:      ${raw.apiBase}`);
-      console.log(`密钥:     ${raw.key.slice(0, 14)}…（明文只在本机 ${join(programDir(), "cloud.json")}）`);
-    }
+    if (!raw) for (const l of c.cloud.statusNone) console.log(l);
+    else
+      for (const l of c.cloud.status({
+        cloud: !!live,
+        org: orgDisplayName(raw.orgName, raw.orgKind, raw.orgId),
+        orgId: raw.orgId,
+        api: raw.apiBase,
+        keyShort: raw.key.slice(0, 14),
+        path: join(programDir(), "cloud.json"),
+      }))
+        console.log(l);
   } else {
-    console.error(`未知子命令: ${sub}（可用: on / off / status）`);
+    console.error(c.cloud.unknownSub(sub));
     process.exit(1);
   }
 } else if (cmd === "bind-key") {
   // 手动填密钥（多机共用同一把 key 的快捷路径；也是误删配置后的恢复入口）
+  const c = dict().cmd;
   const input = args[1];
   if (!input) {
-    console.error("");
-    console.error("用法: xbb bind-key <xbb_live_…> [apiBase]");
-    console.error("");
-    console.error("  与 `xbb bind <票>` 的区别：绑定票 60 秒单用、必须回控制台现生成；");
-    console.error("  这里要的是**你手上已有的长期密钥**——多机共用、或误删配置后的恢复场景。");
-    console.error("  apiBase 缺省 https://api.xiaobenben.net（自建部署时显式给）。");
+    for (const l of c.bindKey.usage) console.error(l);
     process.exit(1);
   }
   const { bindFromKey } = await import("./cloud");
   try {
     const r = await bindFromKey(input, args[2]);
-    console.log("✅ 已绑定云端");
-    console.log(`   API:     ${r.cfg.apiBase}`);
-    console.log(`   组织:    ${r.orgLabel}${r.cfg.orgId ? `（${r.cfg.orgId}）` : ""}`);
-    if (r.memberName) console.log(`   成员:    ${r.memberName}`);
-    console.log(`   空间:    ${r.cfg.spaceId ?? "（首次写入时自动解析）"}`);
-    console.log(`   密钥:    ${r.cfg.key.slice(0, 14)}…（明文只存本机 ${r.configPath}）`);
-    console.log("");
-    console.log("   ────────────────────────────────────────────────────────────");
-    console.log("   ⚠️  必须重启 AI 客户端才会生效");
-    console.log("       opencode / Cursor / WorkBuddy 等（或重新拉起 xbb mcp）");
-    console.log("   ────────────────────────────────────────────────────────────");
+    for (const l of c.bindKey.ok({
+      api: r.cfg.apiBase,
+      org: r.orgLabel,
+      orgId: r.cfg.orgId,
+      member: r.memberName ?? null,
+      space: r.cfg.spaceId,
+      keyShort: r.cfg.key.slice(0, 14),
+      path: r.configPath,
+    }))
+      console.log(l);
   } catch (e) {
     console.error(`❌ ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
@@ -524,20 +492,14 @@ if (cmd === "serve") {
     setAutostartPref,
   } = await import("./autostart");
   const sub = args[1] ?? "status";
+  const c = dict().cmd;
 
   if (sub === "on") {
     const r = enableAutostart();
     // 只在实际写入成功后记意图：失败却记下 "on"，下次启动会以为"用户要、只是还没写成"，
     // 于是每次启动都重试一遍 —— 一条永远失败的写操作会一直出现在日志里。
     if (r.ok) setAutostartPref("on");
-    console.log(`${r.ok ? "✅" : "❌"} 开机自启${r.ok ? "已开启" : "开启失败"}\n   ${r.message}`);
-    if (r.ok) {
-      console.log("");
-      console.log("   登录后：常驻服务在后台无声启动 —— 无控制台窗口，也不弹管理页");
-      console.log("   管理页随时可开：http://127.0.0.1:17630/ui（或点托盘「打开管理窗口」）");
-      console.log("   ⚠️ 登录瞬间启动器会闪一下（约 0.2s）—— 真正的服务全程无窗口");
-      console.log("   想立刻体验：xbb serve --detach");
-    }
+    for (const l of c.autostart.onResult(r.ok, r.message)) console.log(l);
     process.exit(r.ok ? 0 : 1);
   }
 
@@ -546,13 +508,12 @@ if (cmd === "serve") {
     // **无论删除成功与否都记 off**：用户的意愿是"别开机启动我"。记下之后，下次启动时
     // `ensureAutostartDefault` 会再清一次残留 —— 比"这次删不掉就永远删不掉"好。
     setAutostartPref("off");
-    console.log(`${r.ok ? "✅" : "❌"} ${r.message}`);
-    if (r.ok) console.log("   之后不会再自动开启（xbb autostart on 可恢复）");
+    for (const l of c.autostart.offResult(r.ok, r.message)) console.log(l);
     process.exit(r.ok ? 0 : 1);
   }
 
   if (sub !== "status") {
-    console.error(`未知子命令: ${sub}（可用: on / off / status）`);
+    console.error(c.autostart.unknownSub(sub));
     process.exit(1);
   }
 
@@ -561,13 +522,15 @@ if (cmd === "serve") {
   if (!s.supported) {
     console.log(autostartUnsupportedMessage());
   } else {
-    const state = s.enabled ? "已开启" : s.present ? "已禁用（系统设置里关掉了）" : "未开启";
-    console.log(`开机自启: ${state}（${s.location}）`);
-    if (s.command) console.log(`  命令: ${s.command}`);
-    // 意图与现状不一致是排障时最容易卡住的一类：用户以为关了，系统里还留着。
-    if (pref === "off") console.log("  用户意图: 已关闭（serve 不再自动写入）");
-    else if (pref === "on") console.log("  用户意图: 已开启");
-    else console.log("  用户意图: 默认开启（没手动关过；启动项缺失或指向变了会自动补）");
+    // 三个状态词放这里而不是字典：字典里的 `status()` 是整块排版，
+    // 状态词要先算出来才能给它（`autostart.ts` 里那套判定不能搬）。
+    const zh = currentLang() === "zh";
+    const state = s.enabled
+      ? (zh ? "已开启" : "enabled")
+      : s.present
+        ? (zh ? "已禁用（系统设置里关掉了）" : "disabled (turned off in system settings)")
+        : (zh ? "未开启" : "not enabled");
+    for (const l of c.autostart.status({ state, location: s.location, command: s.command, pref: pref ?? null })) console.log(l);
   }
 } else if (cmd === "ingest") {
   // 客户端会话采集（V8）：应采尽采。
@@ -582,12 +545,11 @@ if (cmd === "serve") {
     // 加一段 Bun 内部堆栈（2026-11-11 官网反馈原文）。加锁重试已在 initSchemaV2 内做，
     // 走到这里说明锁被占了整整几轮 —— 只能明确告诉他要先停掉谁。
     if (e instanceof SchemaBusyError) {
-      console.error(`\n❌ 采集没能开始：${e.message}\n`);
+      for (const l of dict().cmd.ingest.busy(e.message)) console.error(l);
       process.exit(3);
     }
     if (e instanceof DbCorruptError) {
-      console.error(`\n❌ 采集没能开始：记忆库文件已损坏\n`);
-      console.error(e.message);
+      for (const l of dict().cmd.ingest.corrupt(e.message)) console.error(l);
       process.exit(4);
     }
     throw e;
@@ -599,49 +561,60 @@ if (cmd === "serve") {
   if (toggle === "on" || toggle === "off") {
     const { writeIngestEnabled } = await import("./ingest-job");
     writeIngestEnabled(toggle === "on");
-    console.log(
-      toggle === "on"
-        ? "已打开自动采集：常驻服务 30 秒内开始读本机会话"
-        : "已关闭自动采集：30 秒内停手，不再读取本机会话原文；已入库的原话保留，可用 xbb ingest --status 查看",
-    );
+    console.log(dict().cmd.ingest.toggled(toggle === "on"));
     process.exit(0);
   }
 
   if (args.includes("--status")) {
+    const c = dict().cmd.ingest;
     const probe = probeSources();
     const st = ingestStatus(store.db);
-    console.log("源           可用  已入档      会话   最近新增  解析率  最近运行          说明");
+    // 列宽统一：数字列与语言无关，所以两种语言共用同一套宽度；文字列左对齐、数字列右对齐。
+    // 手敲空格在这里必然失败 —— `最近新增` 是 8 列、`Sessions` 也是 8 列，但一个占 4 个字符。
+    const W = [12, 6, 8, 8, 8, 6, 18];
+    const RCOL = new Set([2, 3, 4, 5]);
+    const cell = (s: string, i: number) => {
+      const gap = Math.max(0, W[i]! - displayWidth(s));
+      return RCOL.has(i) ? " ".repeat(gap) + s : s + " ".repeat(gap);
+    };
+    const row = (cells: string[]) => cells.map((s, i) => (i === 7 ? s : cell(s, i))).join(" ");
+    console.log(row(c.statusCols));
     for (const p of probe) {
       const s = st.find((x) => x.source === p.source);
       const audio = p.available ? "✅" : "❌";
       const rate =
         s?.parseRate == null ? "  -  " : `${String(Math.round(s.parseRate * 100)).padStart(3)}%${s.parseRate < 0.8 ? "⚠" : " "}`;
-      const note = s?.unparsed ? `${s.note ?? p.note} [未解析 ${s.unparsed}/${s.totalLines}]` : (s?.note ?? p.note);
+      // 库里的 note 是**上一轮采集时**写下的字符串，语言跟着那一轮走。英文界面里若翻出中文，
+      // 说明那条是历史记录 —— 此时改用本次探测的 note（现算、必然跟随当前语言）。
+      // 不改成「note 存结构化」是因为那要动 schema，而这句话的价值只是解释「最近新增 0」。
+      const stored = s?.note ?? p.note;
+      const base = currentLang() === "zh" || !/[一-龥]/.test(stored) ? stored : p.note;
+      const note = s?.unparsed ? `${base}${c.unparsed(s.unparsed, s.totalLines)}` : base;
       console.log(
-        `${p.label.padEnd(12)} ${audio}   ${String(s?.episodes ?? 0).padStart(8)}  ${String(s?.sessions ?? 0).padStart(5)}  ${String(
-          s?.lastNew ?? 0,
-        ).padStart(7)}  ${rate}  ${(s?.lastRun ?? "-").padEnd(17)} ${note}`,
+        row([
+          p.label,
+          audio,
+          String(s?.episodes ?? 0),
+          String(s?.sessions ?? 0),
+          String(s?.lastNew ?? 0),
+          rate,
+          s?.lastRun ?? "-",
+          note,
+        ]),
       );
     }
     const total = store.db.query("SELECT count(*) c FROM episodes").get() as { c: number };
-    console.log(`\nepisodes 总计 ${total.c} 条（本机冷存档，永不上云）`);
+    console.log(c.statusTotal(total.c));
 
     const lb = layerBalance(store.db);
     if (lb.level === "idle") {
-      console.log("分层配比：原话层还是空的（未采集），比值无意义");
+      console.log(c.balanceIdle);
     } else {
       const ratio = `1:${Math.round(lb.perMemory ?? 0)}`;
       const tag =
-        lb.level === "healthy"
-          ? "✅ 健康"
-          : lb.level === "watch"
-            ? "⚠ 观察"
-            : "⚠ 摘要层可能在灌水";
-      console.log(`分层配比：摘要 ${lb.memories} : 原话 ${lb.episodes} ≈ ${ratio}  ${tag}`);
-      if (lb.level !== "healthy") {
-        console.log("  正常应 ≥1:50（原话是自动采集的，摘要只写结论）。比值塌下来通常是 AI 在复述对话而非提炼：");
-        console.log("  判据——这条记忆 3 个月后还有用吗？能从原话里直接翻到（\"用户问了X，我答了Y\"）就别写。");
-      }
+        lb.level === "healthy" ? c.balanceTags.healthy : lb.level === "watch" ? c.balanceTags.watch : c.balanceTags.flooding;
+      console.log(c.balance(lb.memories, lb.episodes, ratio, tag));
+      if (lb.level !== "healthy") for (const l of c.balanceAdvice) console.log(l);
     }
     process.exit(0);
   }
@@ -654,7 +627,7 @@ if (cmd === "serve") {
     : undefined;
   const unknown = sources?.filter((s) => !ALL_SOURCES.includes(s as never));
   if (unknown?.length) {
-    console.error(`未知来源: ${unknown.join(", ")}（可用: ${ALL_SOURCES.join(" / ")}）`);
+    console.error(dict().cmd.ingest.unknownSource(unknown.join(", "), ALL_SOURCES.join(" / ")));
     process.exit(1);
   }
 
@@ -665,34 +638,43 @@ if (cmd === "serve") {
     dryRun,
   });
 
-  console.log(`${dryRun ? "【预演，不写库】" : ""}客户端会话采集`);
-  console.log("源           可用  扫描      新增   跳过  解析    耗时    说明");
+  const c = dict().cmd.ingest;
+  const W = [12, 6, 8, 8, 8, 6, 8];
+  const RCOL = new Set([2, 3, 4, 5, 6]);
+  const cell = (s: string, i: number) => {
+    const gap = Math.max(0, W[i]! - displayWidth(s));
+    return RCOL.has(i) ? " ".repeat(gap) + s : s + " ".repeat(gap);
+  };
+  console.log(c.runTitle(dryRun));
+  console.log(c.runCols.map((s, i) => (i === 7 ? s : cell(s, i))).join(" "));
   for (const x of r.results) {
     const rate = x.suspects
       ? `${String(Math.round(((x.suspects - x.unparsed) / x.suspects) * 100)).padStart(3)}%${x.suspects && x.unparsed / x.suspects > 0.2 ? "⚠" : " "}`
       : "  -  ";
-    console.log(
-      `${x.label.padEnd(12)} ${x.available ? "✅" : "❌"}  ${String(x.scanned).padStart(6)}  ${String(x.inserted).padStart(7)}  ${String(
-        x.skipped,
-      ).padStart(5)}  ${rate}  ${String(x.ms + "ms").padStart(7)}  ${x.note}`,
-    );
+    const cells = [
+      x.label,
+      x.available ? "✅" : "❌",
+      String(x.scanned),
+      String(x.inserted),
+      String(x.skipped),
+      rate,
+      x.ms + "ms",
+      x.note,
+    ];
+    console.log(cells.map((s, i) => (i === 7 ? s : cell(s, i))).join(" "));
   }
   const drifted = r.results.filter((x) => x.fingerprintChanged);
   if (drifted.length) {
-    console.log("\n⚠ 结构指纹变化 —— 上游可能改版，字段集已不是上次那套：");
-    for (const x of drifted) {
-      console.log(`   ${x.label}: 新指纹 ${x.fingerprint}，本次未解析 ${x.unparsed}/${x.suspects}`);
-    }
-    console.log("   先看 --status 里的未解析行数；若在涨，说明现有解析规则已失效。");
+    console.log(c.driftTitle);
+    for (const x of drifted) console.log(c.driftLine(x.label, x.fingerprint, x.unparsed, x.suspects));
+    console.log(c.driftAdvice);
   }
   const total = store.db.query("SELECT count(*) c FROM episodes").get() as { c: number };
-  console.log(
-    `\n本次扫描 ${r.scanned} 条，${dryRun ? "将新增" : "新增"} ${r.inserted} 条，用时 ${Date.now() - t0}ms；episodes 现有 ${total.c} 条`,
-  );
+  console.log(c.runSummary(r.scanned, r.inserted, Date.now() - t0, total.c, dryRun));
   if (!dryRun) {
     const after = ingestStatus(store.db).filter((s) => s.episodes > 0);
     if (after.length) {
-      console.log("累计：" + after.map((s) => `${s.source} ${s.episodes}`).join(" / "));
+      console.log(c.cumulative(after.map((s) => `${s.source} ${s.episodes}`).join(" / ")));
     }
   }
 } else if (cmd === "stats") {
@@ -802,28 +784,27 @@ if (cmd === "serve") {
   const { resolveUpdateUrl, updateRoot, readBlocklist, isCompiledExe, pendingPath, CURRENT_VERSION } = await import("./updater");
   const { existsSync } = await import("node:fs");
   const { readPendingMarker, decideBootAction } = await import("./update-rollback");
+  const c = dict().cmd.updateStatus;
   const bl = readBlocklist();
-  console.log(`清单源:   ${resolveUpdateUrl() || "（已关闭：XBB_UPDATE_URL 为空）"}`);
-  console.log(`运行形态: ${isCompiledExe() ? "编译产物 exe" : "dev（未编译，自更新被禁用）"}`);
-  console.log(`工作目录: ${updateRoot()}`);
+  console.log(c.source(resolveUpdateUrl() || c.noSource));
+  console.log(c.form(isCompiledExe() ? c.formExe : c.formDev));
+  console.log(c.dir(updateRoot()));
   // ⚠️ 这句以前是写死的「有 —— 下次启动将回退上一版本」，**与实现不符**（2026-10-16 实测踩到）：
   //    pending 标记在「刚 swap 完、还没被 serve 确认」时也长这样（version=新版, attempts=0），
   //    而那种情况下的判定是 **adopt（放行首次引导）**，不是回退。照旧文案会把排障的人吓到
   //    （以为更新要丢），甚至去手动删 exe。唯一真源是 decideBootAction 的三态判定。
   if (!existsSync(pendingPath())) {
-    console.log(`pending:  无`);
+    console.log(c.pendingNone);
   } else {
     const pend = readPendingMarker();
     const decision = decideBootAction(pend, CURRENT_VERSION);
     console.log(
-      `pending:  ${
-        decision === "adopt"
-          ? `有（v${pend?.version} 首次引导）—— 下次启动会**放行**它，待 serve 健康检查通过后自动清除标记`
-          : `有（v${pend?.version}）—— 下次启动会**回退**上一版本并拉黑它（上次引导未走到确认点）`
-      }`,
+      decision === "adopt" ? c.pendingAdopt(pend?.version ?? "?") : c.pendingRollback(pend?.version ?? "?"),
     );
   }
-  console.log(`黑名单:   ${bl.length ? bl.map((e) => `${e.version}(${e.reason ?? "-"})`).join(", ") : "空"}`);
+  console.log(
+    c.blocklist(bl.length ? bl.map((e) => `${e.version}(${e.reason ?? "-"})`).join(", ") : c.blocklistEmpty),
+  );
 } else if (cmd === "home") {
   // ── 数据位置 ───────────────────────────────────────────────────────
   // 「程序在哪、库在哪、凭什么这么判断」必须任何时刻都能一眼答出来。
@@ -841,111 +822,98 @@ if (cmd === "serve") {
   }
 
   if (sub === "show") {
+    const c = dict().cmd.home;
     const { dir, source } = H.resolveDataDirWithSource();
     const p = H.dbPresence();
     const srcLabel =
-      source === "env"
-        ? "环境变量 XBB_DATA_DIR（临时覆盖，不写盘）"
-        : source === "config"
-          ? `配置文件 ${H.homeConfigPath()}`
-          : "默认位置（未配置，向后兼容）";
-    console.log(`程序目录  ${H.programDir()}   （exe / 更新包 / 托盘 / 配置）`);
-    console.log(`数据目录  ${dir}`);
-    console.log(`位置来源  ${srcLabel}`);
+      source === "env" ? c.srcEnv : source === "config" ? c.srcConfig(H.homeConfigPath()) : c.srcDefault;
+    console.log(c.progDir(H.programDir()));
+    console.log(c.dataDir(dir));
+    console.log(c.srcLabel(srcLabel));
     if (p.exists) {
       let extra = "";
       try {
-        const c = H.readDbCounts(p.dbPath);
-        extra = `\n          记忆 ${c.memories} / 原话 ${c.episodes} / 事件 ${c.events} · 完整性 ${c.integrity}`;
+        const n = H.readDbCounts(p.dbPath);
+        extra = c.dbCounts(n.memories, n.episodes, n.events, n.integrity);
         // 库比程序新 = 曾经用过更高版本（回滚 / 另一台机器）后拿旧程序开库。
         // 程序不拒开也不改结构，但这件事必须能在这里看见 —— 否则「为什么某个新字段读不到」
         // 只能靠翻 stderr，而 MCP 模式下的 stderr 用户根本看不到。
-        if (c.schema > SCHEMA_TARGET_VERSION) {
-          extra += `\n          ⚠️ 库结构 v${c.schema} 比当前程序支持的 v${SCHEMA_TARGET_VERSION} 新 —— 照常读写但不改结构，建议升级到最新版`;
-        }
+        if (n.schema > SCHEMA_TARGET_VERSION) extra += c.dbNewer(n.schema, SCHEMA_TARGET_VERSION);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        extra = `\n          ⚠️ 打不开：${msg}`;
+        extra = c.dbOpenFailed(msg);
         // 这是用户发现"库坏了"时最可能来的地方，不能只甩一句 file is not a database
-        if (/not a database|malformed/i.test(msg)) {
-          extra += "\n          ⚠️ 看起来是库文件损坏 —— 先把它连同 -wal / -shm 复制留存；别删、别覆盖";
-        }
+        if (/not a database|malformed/i.test(msg)) extra += c.dbCorruptHint;
       }
       const when = (p.mtime ?? "").slice(0, 16).replace("T", " ");
-      console.log(`记忆库    ${p.dbPath}`);
-      console.log(`          ${mb(p.sizeBytes)} · 最后写入 ${when}${extra}`);
+      console.log(c.dbPath(p.dbPath));
+      // 第二行带 extra 的多行结构（库比程序新 / 打不开），所以直接拼
+      console.log(`          ${mb(p.sizeBytes)}${c.lastWritten(when)}${extra}`);
     } else {
-      console.log(`记忆库    ${p.dbPath}`);
-      console.log(`          ⚠️ 不在位 —— 现在启动会被拒绝（这是刻意的：宁可起不来，也不要在空库上继续用）`);
+      console.log(c.dbPath(p.dbPath));
+      console.log(c.dbMissing);
       if (existsSync(join(H.programDir(), "memory.db")) && source !== "default") {
-        console.log(`          默认位置有库：${join(H.programDir(), "memory.db")} —— 用 xbb home move / reset 校准`);
+        console.log(c.dbElsewhere(join(H.programDir(), "memory.db")));
       }
     }
     const modelPath = H.modelsDir();
-    console.log(`模型目录  ${modelPath}${existsSync(modelPath) ? `   ${mb(H.dirUsage(modelPath))}` : "   （尚未下载）"}`);
-    console.log(`配置文件  ${H.homeConfigPath()}${existsSync(H.homeConfigPath()) ? "" : "   （不存在 = 用默认位置）"}`);
+    console.log(
+      c.models(modelPath, existsSync(modelPath) ? mb(H.dirUsage(modelPath)) : c.modelsNotDownloaded),
+    );
+    console.log(c.configFile(H.homeConfigPath()) + (existsSync(H.homeConfigPath()) ? "" : c.configAbsent));
     const cfg = H.readHomeConfig();
     if (cfg) console.log(`          ${JSON.stringify(cfg)}`);
     process.exit(p.exists ? 0 : 1);
   }
 
   if (sub === "set") {
+    const c = dict().cmd.home;
     // 「设置」不是「搬迁」。设一个空目录等于把自己送进下一次启动的报错里，所以默认拒绝。
     const target = args[2];
     if (!target) {
-      console.error('用法: xbb home set "<目录>" [--force]');
-      console.error("  目标目录里必须已经有 memory.db —— 想把库搬过去请用 `xbb home move`。");
+      for (const l of c.setUsage) console.error(l);
       process.exit(1);
     }
     const abs = await import("node:path").then((m) => m.resolve(target));
     const dbFile = join(abs, "memory.db");
     if (!existsSync(dbFile) && !args.includes("--force")) {
-      console.error(`❌ ${abs} 里没有 memory.db`);
-      console.error("   · 想把库搬过去：xbb home move \"" + abs + "\"（复制+校验+切配置，一步到位）");
-      console.error("   · 库在外接盘、现在没插：确认路径无误后加 --force 先写配置");
+      for (const l of c.setNoDb(abs)) console.error(l);
       process.exit(1);
     }
     // 源目录必须在写配置**之前**取：写完配置 resolveDataDir() 就指向新位置了
     const prevDataDir = H.resolveDataDir();
     H.writeHomeConfig({ dataDir: abs }, "xbb home set");
-    console.log(`✅ 已指向 ${abs}`);
-    console.log(`   ${existsSync(dbFile) ? `库已就位：${dbFile}` : "⚠️ 该位置当前无库，下次启动会拒绝启动（不会新建空库）"}`);
+    console.log(c.setOk(abs));
+    console.log(existsSync(dbFile) ? c.setDbReady(dbFile) : c.setDbMissing);
     // 模型不会自己跟过去。缺模型的后果是**静默降级为关键词检索**——用户只会觉得
     // 「好像变笨了」，永远不会想到是换了目录。所以换目录时顺手带过去（约 24MB）。
     const m = H.copyModelsInto(abs, prevDataDir);
     if (m.copied) {
-      console.log(`   模型已一并复制：${m.from}  →  ${join(abs, "models")}（${(m.bytes! / 1048576).toFixed(1)} MB）`);
+      console.log(c.setModelsCopied(m.from ?? "", join(abs, "models"), `${(m.bytes! / 1048576).toFixed(1)} MB`));
     } else if (!existsSync(join(abs, "models"))) {
-      console.log("   ⚠️  该位置没有语义检索模型，本机也找不到可复制的副本：");
-      console.log("       检索会降级为关键词匹配。联网后重启一次会自动重新下载。");
+      for (const l of c.setNoModels) console.log(l);
     }
-    console.log("");
-    console.log("   ⚠️  必须重启 AI 客户端（opencode / Cursor / WorkBuddy）与 xbb serve 才会生效；");
-    console.log("       正在运行的进程仍拿着旧路径。");
+    for (const l of c.setRestart) console.log(l);
     process.exit(0);
   }
 
   if (sub === "move") {
+    const c = dict().cmd.home;
     const target = args[2];
     if (!target) {
-      console.error('用法: xbb home move "<目录>" [--cleanup] [--force]');
-      console.error("  复制 → 校验（完整性 + 行数逐项比对）→ 才切配置。校验不过不切，原库不动。");
-      console.error("  --cleanup 校验通过后删除旧位置的数据（默认保留，确认新位置能用后自己删）。");
-      console.error("  --force   跳过「库是否被占用」检查（已自行确认无进程时用；校验照样执行）。");
+      for (const l of c.moveUsage) console.error(l);
       process.exit(1);
     }
     try {
-      console.log("迁移中（先复制、再校验、最后才切配置）…");
+      console.log(c.moving);
       const r = H.moveDataDir(target, { cleanup: args.includes("--cleanup"), force: args.includes("--force") });
-      console.log(`✅ 已迁移：${r.from}  →  ${r.to}`);
-      console.log(`   搬了 ${r.entries.join(" / ")}，共 ${mb(r.bytes)}`);
-      console.log(
-        `   校验：完整性 ${r.verify?.integrity} · 记忆 ${r.verify?.memories} / 原话 ${r.verify?.episodes} / 事件 ${r.verify?.events}（与源库逐项一致）`,
-      );
-      console.log(`   配置：${r.configPath}`);
+      console.log(c.moveOk(r.from, r.to));
+      console.log(c.moveEntries(r.entries.join(" / "), mb(r.bytes)));
+      console.log(c.moveVerify(r.verify?.integrity ?? "?", r.verify?.memories ?? 0, r.verify?.episodes ?? 0, r.verify?.events ?? 0));
+      console.log(c.moveConfig(r.configPath));
       console.log("");
-      console.log("   ⚠️  重启 xbb serve 和所有 AI 客户端才会用新位置。");
-      if (!args.includes("--cleanup")) console.log(`   旧位置的数据仍在 ${r.from}，确认新位置工作正常后自行删除。`);
+      console.log(c.moveRestart);
+      if (!args.includes("--cleanup")) console.log(c.moveKeepOld(r.from));
     } catch (e) {
       console.error(`❌ ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -955,95 +923,79 @@ if (cmd === "serve") {
 
   if (sub === "find") {
     // 忘了当初放哪时唯一的救命绳。按记忆条数排序 —— 同名空库到处都是，条数才能分出哪个是真的。
+    const c = dict().cmd.home;
     const deep = args.includes("--deep");
-    console.log(deep ? "全盘深扫（可能几分钟）…" : "扫描中（各盘根+家目录，深度 4，预算 15 秒）…");
+    console.log(deep ? c.findDeepScanning : c.findScanning);
     const found = H.findDatabases({ deep });
     if (!found.length) {
-      console.log("没找到任何 memory.db。若库在外接盘，请先插上再扫；或用 --deep 全盘深扫。");
+      console.log(c.findNone);
       process.exit(1);
     }
     const cur = H.resolveDbPath().toLowerCase();
     console.log("");
-    console.log("记忆数   大小      最后写入          路径");
+    console.log(c.findCols);
     for (const f of found) {
-      const mark = f.path.toLowerCase() === cur ? " ← 当前" : "";
+      const mark = f.path.toLowerCase() === cur ? c.findCurrent : "";
       console.log(
         `${String(f.memories ?? "?").padStart(6)}  ${mb(f.bytes).padStart(9)}  ${f.mtime.slice(0, 16).replace("T", " ")}  ${f.path}${mark}`,
       );
     }
-    console.log(`\n共 ${found.length} 个。换过去：xbb home set "<路径的目录>"`);
+    console.log(c.findTotal(found.length));
     process.exit(0);
   }
 
   if (sub === "init") {
+    const c = dict().cmd.home;
     // 唯一允许"在配置位置新建空库"的入口 —— 而它必须带 --force。
     if (!args.includes("--force")) {
       const p = H.dbPresence();
-      console.error(`拒绝执行：新建空库是一个**不可逆的判断**（用户会以为记忆全丢了）。`);
-      console.error(`   当前位置：${p.dbPath}${p.exists ? "（有库，无需 init）" : "（无库）"}`);
-      console.error("   确认要从零开始，加 --force：xbb home init --force");
-      console.error("   更可能想要的是：xbb home show / xbb home find / xbb home reset");
+      for (const l of c.initRefused(p.dbPath, p.exists)) console.error(l);
       process.exit(1);
     }
     const store = PersonalStore.open(undefined, { force: true });
     const p = H.dbPresence();
     store.db.close();
-    console.log(`✅ 已在 ${p.dbPath} 建了一个空库`);
-    console.log("   ⚠️  这是一个全新的空库 —— 旧记忆不在里面。");
+    for (const l of c.initOk(p.dbPath)) console.log(l);
     process.exit(0);
   }
 
   if (sub === "reset") {
+    const c = dict().cmd.home;
     // 撤掉指向，回到默认位置（老库通常就在那儿）
     H.clearDataDir("xbb home reset");
     const p = H.dbPresence();
-    console.log(`✅ 已撤掉数据目录配置，回到默认位置：${p.dbPath}`);
-    console.log(`   ${p.exists ? "库在位。" : "⚠️ 该位置没有库 —— 用 xbb home find 找一下。"}`);
+    for (const l of c.resetOk(p.dbPath, p.exists)) console.log(l);
     process.exit(p.exists ? 0 : 1);
   }
 
-  console.error(`未知子命令: ${sub}（可用: show / set / move / find / init / reset）`);
+  console.error(dict().cmd.home.unknownSub(sub));
   process.exit(1);
 } else if (cmd === "stop") {
   // 没有这条命令时，`serve --detach` 在托盘没开的情况下只能去任务管理器里杀（2026-11-04 用户反馈）。
   const H = await import("./home");
+  const c = dict().cmd.stop;
   const keepMcp = args.includes("--keep-mcp");
   const procs = H.runningProcs();
   if (!procs.length) {
-    console.log("没有在跑的 xbb 进程。");
+    console.log(c.none);
     process.exit(0);
   }
-  console.log(`发现 ${procs.length} 个 xbb 进程：${procs.map((p) => `PID ${p.pid} ${p.name}`).join("、")}`);
+  // 分隔符跟着语言走：中文用「、」，英文用 ", "
+  const sep = currentLang() === "zh" ? "、" : ", ";
+  console.log(c.found(procs.map((p) => `PID ${p.pid} ${p.name}`).join(sep), procs.length));
   const r = H.stopAll({ keepMcp });
-  for (const p of r.stopped) console.log(`  ✅ 已停止 PID ${p.pid} ${p.name}`);
+  for (const p of r.stopped) console.log(c.stopped(p.pid, p.name));
   for (const p of r.kept) {
-    const why = !p.cmd ? "拿不到命令行，保守跳过" : H.isMcpCommand(p.cmd) ? "mcp，当前会话仍在用" : "mcp";
-    console.log(`  ⏭  已保留 PID ${p.pid} ${p.name}（${why}）`);
+    const why = !p.cmd ? c.keptWhyNoCmd : H.isMcpCommand(p.cmd) ? c.keptWhyMcpBusy : c.keptWhyMcp;
+    console.log(c.kept(p.pid, p.name, why));
   }
-  for (const f of r.failed) console.log(`  ❌ 停不掉 PID ${f.pid} ${f.name}：${f.err}`);
-  if (r.failed.length) {
-    console.log("\n  停不掉的通常是权限问题：Windows 用管理员身份重试，Unix 检查进程属主。");
-  }
-  if (r.undecidable.length) {
-    console.log(
-      `\n  ⚠️ ${r.undecidable.length} 个进程的启动参数取不到（系统限制了进程查询），已全部保守跳过 ——` +
-        "\n     宁可少停一个 serve，也不误杀正在给你供记忆的 mcp。要全停就去掉 --keep-mcp。",
-    );
-  }
+  for (const f of r.failed) console.log(c.failed(f.pid, f.name, f.err));
+  if (r.failed.length) console.log(c.failedHint);
+  if (r.undecidable.length) for (const l of c.undecidable(r.undecidable.length)) console.log(l);
 
   // 这两段不能省。不说清楚，用户会以为 stop 坏了，然后反复执行、反复看到进程回来。
-  if (r.kept.some((p) => p.cmd)) {
-    console.log("");
-    console.log("  --keep-mcp 保留了 mcp：当前会话的记忆工具不受影响，serve 已停。");
-    console.log("  但 mcp 仍连着库，所以现在跑 xbb home move 还是会报「库被占用」。");
-    console.log("  搬家前请先关掉 AI 客户端，再执行一次不带 --keep-mcp 的 xbb stop。");
-  }
-  if (r.stopped.length) {
-    console.log("");
-    console.log("  注意：Cursor / opencode / WorkBuddy 拉起的 mcp 会被这些客户端自动重启。");
-    console.log("  要彻底停干净，先关掉这些客户端，再执行一次 xbb stop。");
-    console.log("  后台服务停了要重新起来：xbb serve --detach（或点托盘「打开管理窗口」先 xbb serve）");
-  }
+  if (r.kept.some((p) => p.cmd)) for (const l of c.keptMcp) console.log(l);
+  if (r.stopped.length) for (const l of c.stoppedHint) console.log(l);
   process.exit(r.failed.length ? 1 : 0);
 } else if (cmd === "verify") {
   // 审计自检：哈希链完整性（账不可改只能增）
@@ -1058,14 +1010,15 @@ if (cmd === "serve") {
   const craw = loadCloudConfigRaw();
   const clive = loadCloudConfig();
   const cLabel = craw ? orgDisplayName(craw.orgName, craw.orgKind, craw.orgId) : "";
+  const P = dict().cmd.plain;
   const cloudLine = !craw
-    ? "模式: 本地（仅本机）—— 尚未绑定云端"
+    ? P.cloudLocalOnly
     : clive
-      ? `模式: 云端 · ${cLabel}  @ ${craw.apiBase}`
-      : `模式: 本地（已关云端，密钥保留）· 随时可切回 ${cLabel}`;
+      ? P.cloudLive(cLabel, craw.apiBase)
+      : P.cloudOff(cLabel);
 
   if (cmd !== "help") {
-    console.error(`未知命令: ${cmd}（运行 xbb --help 看全部命令）`);
+    console.error(P.unknownCommand(cmd));
     console.error("");
     console.error(overviewHelp());
     process.exit(1);
@@ -1087,21 +1040,17 @@ if (cmd === "serve") {
     const r = await ensureServeRunning();
     if (!r.healthy) {
       // 不健康时说"已启动"就是撒谎 —— 用户会去找一个永远不会出现的图标。
-      console.log(`常驻服务: 未就绪${r.portBusy ? ` — 端口 ${SERVE_PORT} 被别的程序占着` : " — 看 logs/serve.log"}`);
+      console.log(P.serveNotReady(r.portBusy ? P.portBusy(SERVE_PORT) : P.seeLog));
     } else {
       // 只在**真的把服务拉起来**（或确认它在跑）之后才通知。
       // 已在运行时也发：双击图标的人要的正是"它在不在"这个回答，静默等于没反应。
       ensureToastAppId();
       showToast({
-        title: r.already ? "小本本已经在运行" : "小本本 AI 记忆已启动",
-        body: "托盘图标在右下角。看不到就点开 ^ 拖到任务栏。",
+        title: r.already ? P.toastAlreadyTitle : P.toastStartedTitle,
+        body: P.toastBody,
         url: `http://127.0.0.1:${SERVE_PORT}/ui`,
       });
-      console.log(
-        r.already
-          ? `常驻服务: 运行中（127.0.0.1:${SERVE_PORT}）`
-          : `常驻服务: 已启动并就绪（${r.waitedMs}ms）`,
-      );
+      console.log(r.already ? P.serveRunning(SERVE_PORT) : P.serveStarted(r.waitedMs));
     }
     console.log("");
   }
