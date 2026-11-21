@@ -15,7 +15,7 @@
 | `fast-uri` | 3.1.8 | BSD-3-Clause | 打包进 exe |
 | `json-schema-traverse` | 1.0.0 | MIT | 打包进 exe |
 | `systray2` | 2.1.4 | MIT | 打包进 exe |
-| `zod` | 3.25.76 | MIT | 打包进 exe |
+| `zod` | 4.6.7 | MIT | 打包进 exe |
 | `zod-to-json-schema` | 3.25.2 | ISC | 打包进 exe |
 | `onnxruntime-node` | 1.31.1 | MIT | 运行时旁路加载（外置 node_modules） |
 | `onnxruntime-common` | 1.31.1 | MIT | 运行时旁路加载（外置 node_modules） |
@@ -220,7 +220,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### zod 3.25.76 — MIT
+### zod 4.6.7 — MIT
 
 ```text
 MIT License
