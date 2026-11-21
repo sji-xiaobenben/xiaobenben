@@ -200,6 +200,14 @@ export interface Dict {
       offResult: (ok: boolean, message: string) => string[];
       unknownSub: (sub: string) => string;
       status: (f: AutostartFields) => string[];
+      /**
+       * 底层自启实现的**结果话术**（Windows 注册表 / launchd / XDG）。
+       *
+       * 它们不直接打印，而是被塞进 `onResult` / `offResult` 的第二行 —— 所以不能因为
+       * 「不是自己 println 的」就当成内部字符串。`xbb autostart on` 在英文界面下若冒出中文，
+       * 冒出来的正是这几个。
+       */
+      msg: AutostartMsg;
     };
 
     /** `xbb ingest` 表格「说明」列里的短语 —— 出现在终端上，所以要翻 */
@@ -290,6 +298,23 @@ export interface Dict {
       moveConfig: (path: string) => string;
       moveRestart: string;
       moveKeepOld: (from: string) => string;
+      /**
+       * 迁移中途的**阻塞话术** —— 这些会以 `Error.message` 原样打到终端，属于用户界面的
+       * 最后一块，所以与正常输出同等对待。连"再试一次该敲什么"也一起翻：
+       * 提示里的命令是给中文用户看的句子，不是可执行语法。
+       */
+      moveErrSamePath: (to: string) => string;
+      /** `list` 是「PID 1234 xbb.exe」这样的条目，分隔符由各语言决定，所以在字典里拼 */
+      moveErrProcs: (list: string[]) => string;
+      moveErrBusy: (srcDb: string) => string;
+      moveErrTargetHasDb: (dstDb: string, to: string) => string;
+      moveErrNothing: (from: string) => string;
+      moveErrNoVerify: (dstDb: string) => string;
+      moveErrIntegrity: (integrity: string, dstDb: string, srcDb: string) => string;
+      moveErrDstMissing: (dstDb: string) => string;
+      moveErrRowMismatch: (key: string, src: number, dst: number, srcDb: string) => string;
+      /** 库空闲探测「本身失败」——刻意与「被占用」分开：前者要找我们，后者去关进程 */
+      lockProbeFailed: (dbPath: string, msg: string) => string;
       findScanning: string;
       findDeepScanning: string;
       findNone: string;
@@ -310,6 +335,8 @@ export interface Dict {
       keptWhyNoCmd: string;
       keptWhyMcpBusy: string;
       keptWhyMcp: string;
+      /** 作为 `err` 传给 `failed(...)`：信号发出去了但进程没走 */
+      signalTimeout: string;
       failed: (pid: number, name: string, err: string) => string;
       failedHint: string;
       undecidable: (n: number) => string[];
@@ -403,4 +430,34 @@ export interface AutostartFields {
   location: string;
   command: string | null;
   pref: "on" | "off" | null;
+}
+
+/** `xbb autostart` 底层实现的话术（三种承载各自的措辞差异全部收在这里） */
+export interface AutostartMsg {
+  /** 注册表接口被调到了非 Windows 上 —— 是我们自己的 bug，但会以 message 形式露给用户 */
+  winOnly: (op: "write" | "remove", platform: string) => string;
+  writeFailed: (code: number, out: string) => string;
+  readbackMismatch: (expected: string, actual: string | null) => string;
+  absentValue: (valueName: string) => string;
+  deleteFailed: (code: number, out: string) => string;
+  stillPresentPolicy: string;
+  removedValue: (valueName: string, before: string) => string;
+  /** 文件承载（launchd / XDG）写、删失败 */
+  fileWriteFailed: (msg: string) => string;
+  fileDeleteFailed: (msg: string) => string;
+  stillPresentFile: string;
+  absentFile: (path: string) => string;
+  removedFile: (path: string) => string;
+  /** `<路径>` + `命令: …` 的两行体；三种承载共用 */
+  fileWithCommand: (path: string, command: string) => string;
+  bootstrapPending: (out: string) => string;
+  bootoutNonZero: (out: string) => string;
+  /** 状态里 `命令:` 那行的尾注 —— launchd 托管的进程命令行不是用户能直接复制的 */
+  launchdHosted: (exe: string) => string;
+  launchdLocation: (path: string, label: string) => string;
+  xdgLocation: (path: string) => string;
+  noMechanism: (platform: string) => string;
+  notCompiled: (exe: string) => string;
+  winNeedsExe: (exe: string) => string;
+  unsupported: (platform: string) => string;
 }

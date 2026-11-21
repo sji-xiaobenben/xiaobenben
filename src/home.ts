@@ -604,7 +604,7 @@ export function stopAll(
   const stuck = waitGone(stopped.map((p) => p.pid), opts.waitMs ?? 3000);
   const stillStopped: ProcInfo[] = [];
   for (const p of stopped) {
-    if (stuck.has(p.pid)) failed.push({ ...p, err: "已发出退出信号，但 3 秒内没有退出" });
+    if (stuck.has(p.pid)) failed.push({ ...p, err: dict().cmd.stop.signalTimeout });
     else stillStopped.push(p);
   }
   return { stopped: stillStopped, kept: keep, undecidable, failed };
@@ -634,12 +634,7 @@ export function dbLocked(dbPath: string): boolean {
   } catch (e) {
     const msg = String((e as { message?: string })?.message ?? e);
     if (/SQLITE_BUSY|SQLITE_LOCKED|database is locked|table is locked/i.test(msg)) return true;
-    throw new Error(
-      `无法确认库是否空闲：${dbPath}\n` +
-        `  原因：${msg}\n` +
-        `  这不是「被占用」，而是这项检查本身失败了——请把上面这行原文发给我们。\n` +
-        `  确认没有 xbb 进程在跑时，可以跳过检查：xbb home move "<目录>" --force`,
-    );
+    throw new Error(dict().cmd.home.lockProbeFailed(dbPath, msg));
   } finally {
     try {
       db?.close();
@@ -680,7 +675,8 @@ interface MoveDeps {
 export function moveDataDir(target: string, opts: { cleanup?: boolean; force?: boolean } & MoveDeps = {}): MoveReport {
   const { dir: from } = resolveDataDirWithSource();
   const to = absFrom(process.cwd(), target);
-  if (pathResolve(from) === pathResolve(to)) throw new Error(`目标就是当前位置：${to}`);
+  const h = dict().cmd.home;
+  if (pathResolve(from) === pathResolve(to)) throw new Error(h.moveErrSamePath(to));
 
   const srcDb = join(from, DB_FILENAME);
 
@@ -689,35 +685,20 @@ export function moveDataDir(target: string, opts: { cleanup?: boolean; force?: b
   if (!opts.force) {
     const procs = (opts.procs ?? runningProcs)();
     if (procs.length) {
-      throw new Error(
-        `还有 xbb 进程在跑：${procs.map((p) => `PID ${p.pid} ${p.name}`).join("、")}\n` +
-          `  迁移会丢 WAL 里尚未落盘的写入。先停掉：xbb stop\n` +
-          `  （托盘菜单退出也可以；Cursor / opencode / WorkBuddy 会各自拉起一个 xbb mcp，` +
-          `关掉客户端后它们才会消失，被杀掉会被立刻重新拉起。）\n` +
-          `  确认这些进程都不在了，但仍被拦住：xbb home move "<目录>" --force`,
-      );
+      throw new Error(h.moveErrProcs(procs.map((p) => `PID ${p.pid} ${p.name}`)));
     }
     if ((opts.locked ?? dbLocked)(srcDb)) {
-      throw new Error(
-        `库被占用，现在搬会丢掉尚未写盘的数据：${srcDb}\n` +
-          `  · 先试：xbb stop（停掉后台服务），并关掉开着小本本的 AI 客户端\n` +
-          `  · 仍然报这一句：xbb home move "<目录>" --force（跳过这项检查，校验照做）`,
-      );
+      throw new Error(h.moveErrBusy(srcDb));
     }
   }
 
   const dstDb = join(to, DB_FILENAME);
   if (existsSync(dstDb) && statSync(dstDb).size > 0) {
-    throw new Error(
-      `目标位置已有库：${dstDb}\n` +
-        `   为避免覆盖别人的记忆，这里不继续。\n` +
-        `   · 想用这份现成的：xbb home set "${to}"（先确认它是你要的那一份）\n` +
-        `   · 想换个地方：换一个空目录`,
-    );
+    throw new Error(h.moveErrTargetHasDb(dstDb, to));
   }
 
   const entries = dataEntries(from);
-  if (!entries.length) throw new Error(`当前位置没有可搬的数据：${from}`);
+  if (!entries.length) throw new Error(h.moveErrNothing(from));
   mkdirSync(to, { recursive: true });
   let bytes = 0;
   for (const name of entries) {
@@ -729,9 +710,9 @@ export function moveDataDir(target: string, opts: { cleanup?: boolean; force?: b
   }
 
   const verify = verifyCopy(srcDb, dstDb);
-  if (!verify) throw new Error(`复制后校验未产生结果：${dstDb}`);
+  if (!verify) throw new Error(h.moveErrNoVerify(dstDb));
   if (verify.integrity !== "ok") {
-    throw new Error(`复制后完整性校验失败（${verify.integrity}）：${dstDb}\n   未切换配置，原库完好：${srcDb}`);
+    throw new Error(h.moveErrIntegrity(verify.integrity, dstDb, srcDb));
   }
 
   const cfg = writeHomeConfig({ dataDir: to }, "xbb home move");
@@ -812,11 +793,11 @@ export function readDbCounts(p: string): DbCounts {
 
 /** 复制后校验：完整性 + 关键表行数。**行数才是"搬全了没有"的硬证据**，integrity_check 只证明页没错乱。 */
 export function verifyCopy(srcDb: string, dstDb: string): MoveReport["verify"] {
-  if (!existsSync(dstDb)) throw new Error(`复制后目标库不存在：${dstDb}`);
+  if (!existsSync(dstDb)) throw new Error(dict().cmd.home.moveErrDstMissing(dstDb));
   const a = readDbCounts(srcDb);
   const b = readDbCounts(dstDb);
   for (const k of ["memories", "episodes", "events"] as const) {
-    if (a[k] !== b[k]) throw new Error(`复制后行数不一致（${k}: 源 ${a[k]} / 目标 ${b[k]}）——未切换配置，原库完好：${srcDb}`);
+    if (a[k] !== b[k]) throw new Error(dict().cmd.home.moveErrRowMismatch(k, a[k], b[k], srcDb));
   }
   return b;
 }

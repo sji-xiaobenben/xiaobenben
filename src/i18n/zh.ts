@@ -312,6 +312,33 @@ export const zh: Dict = {
         else lines.push("  用户意图: 默认开启（没手动关过；启动项缺失或指向变了会自动补）");
         return lines;
       },
+      msg: {
+        winOnly: (op, platform) =>
+          `${op === "write" ? "writeAutostartEntry" : "removeAutostartEntry"} 只用于 Windows 注册表（当前 ${platform}）`,
+        writeFailed: (code, out) => `写入失败（reg 退出码 ${code}）：${out}`,
+        readbackMismatch: (expected, actual) => `回读不一致 —— 期望 ${expected}，实际 ${actual ?? "（无）"}`,
+        absentValue: (valueName) => `本就没有「${valueName}」，无需处理`,
+        deleteFailed: (code, out) => `删除失败（reg 退出码 ${code}）：${out}`,
+        stillPresentPolicy: "删除后回读仍存在（可能被组策略重新写回）",
+        removedValue: (valueName, before) => `已移除「${valueName}」（原值 ${before}）`,
+        fileWriteFailed: (msg) => `写入失败：${msg}`,
+        fileDeleteFailed: (msg) => `删除失败：${msg}`,
+        stillPresentFile: "删除后文件仍存在（权限不足？）",
+        absentFile: (path) => `本就没有 ${path}，无需处理`,
+        removedFile: (path) => `已移除 ${path}`,
+        fileWithCommand: (path, command) => `${path}\n   命令: ${command}`,
+        bootstrapPending: (out) => `\n   （launchctl bootstrap 未即时生效，文件已就位，下次登录生效：${out}）`,
+        bootoutNonZero: (out) => `\n   （launchctl bootout 非零退码，可能本就未加载：${out}）`,
+        launchdHosted: (exe) => `${exe} serve --no-open（launchd 托管）`,
+        launchdLocation: (path, label) => `${path}（launchd · ${label}）`,
+        xdgLocation: (path) => `${path}（XDG 自启项）`,
+        noMechanism: (platform) => `${platform} 无已知自启机制`,
+        notCompiled: (exe) => `拒绝写入：当前不是编译产物（${exe}）。请用安装后的 xbb 执行本命令。`,
+        winNeedsExe: (exe) => `拒绝写入：Windows 启动项必须指向 .exe（当前 ${exe}）`,
+        unsupported: (platform) =>
+          `${platform} 暂不支持自动配置开机自启（已落地 Windows / macOS / Linux）。\n` +
+          "  其它平台：用系统自带的服务管理器指向 `xbb serve --no-open`。",
+      },
     },
 
     ingestNote: {
@@ -431,6 +458,34 @@ export const zh: Dict = {
       moveConfig: (path) => `   配置：${path}`,
       moveRestart: "   ⚠️  重启 xbb serve 和所有 AI 客户端才会用新位置。",
       moveKeepOld: (from) => `   旧位置的数据仍在 ${from}，确认新位置工作正常后自行删除。`,
+      moveErrSamePath: (to) => `目标就是当前位置：${to}`,
+      moveErrProcs: (list) =>
+        `还有 xbb 进程在跑：${list.join("、")}\n` +
+        `  迁移会丢 WAL 里尚未落盘的写入。先停掉：xbb stop\n` +
+        `  （托盘菜单退出也可以；Cursor / opencode / WorkBuddy 会各自拉起一个 xbb mcp，` +
+        `关掉客户端后它们才会消失，被杀掉会被立刻重新拉起。）\n` +
+        `  确认这些进程都不在了，但仍被拦住：xbb home move "<目录>" --force`,
+      moveErrBusy: (srcDb) =>
+        `库被占用，现在搬会丢掉尚未写盘的数据：${srcDb}\n` +
+        `  · 先试：xbb stop（停掉后台服务），并关掉开着小本本的 AI 客户端\n` +
+        `  · 仍然报这一句：xbb home move "<目录>" --force（跳过这项检查，校验照做）`,
+      moveErrTargetHasDb: (dstDb, to) =>
+        `目标位置已有库：${dstDb}\n` +
+        `   为避免覆盖别人的记忆，这里不继续。\n` +
+        `   · 想用这份现成的：xbb home set "${to}"（先确认它是你要的那一份）\n` +
+        `   · 想换个地方：换一个空目录`,
+      moveErrNothing: (from) => `当前位置没有可搬的数据：${from}`,
+      moveErrNoVerify: (dstDb) => `复制后校验未产生结果：${dstDb}`,
+      moveErrIntegrity: (integrity, dstDb, srcDb) =>
+        `复制后完整性校验失败（${integrity}）：${dstDb}\n   未切换配置，原库完好：${srcDb}`,
+      moveErrDstMissing: (dstDb) => `复制后目标库不存在：${dstDb}`,
+      moveErrRowMismatch: (key, src, dst, srcDb) =>
+        `复制后行数不一致（${key}: 源 ${src} / 目标 ${dst}）——未切换配置，原库完好：${srcDb}`,
+      lockProbeFailed: (dbPath, msg) =>
+        `无法确认库是否空闲：${dbPath}\n` +
+        `  原因：${msg}\n` +
+        `  这不是「被占用」，而是这项检查本身失败了——请把上面这行原文发给我们。\n` +
+        `  确认没有 xbb 进程在跑时，可以跳过检查：xbb home move "<目录>" --force`,
       findScanning: "扫描中（各盘根+家目录，深度 4，预算 15 秒）…",
       findDeepScanning: "全盘深扫（可能几分钟）…",
       findNone: "没找到任何 memory.db。若库在外接盘，请先插上再扫；或用 --deep 全盘深扫。",
@@ -459,6 +514,7 @@ export const zh: Dict = {
       keptWhyNoCmd: "拿不到命令行，保守跳过",
       keptWhyMcpBusy: "mcp，当前会话仍在用",
       keptWhyMcp: "mcp",
+      signalTimeout: "已发出退出信号，但 3 秒内没有退出",
       failed: (pid, name, err) => `  ❌ 停不掉 PID ${pid} ${name}：${err}`,
       failedHint: "\n  停不掉的通常是权限问题：Windows 用管理员身份重试，Unix 检查进程属主。",
       undecidable: (n) => [

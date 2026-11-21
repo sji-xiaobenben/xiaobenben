@@ -348,14 +348,14 @@ if (cmd === "serve") {
   // 的另一半：不是记忆层无感，是**启动这一步本身无感**。
   const { ensureServeRunning, serveLogPath, SERVE_PORT } = await import("./autostart");
   const { showToast } = await import("./notify");
+  const P = dict().cmd.plain;
   const r = await ensureServeRunning();
   if (!r.healthy) {
-    console.error(`[xbb] 服务没能在 ${Math.round(r.waitedMs / 1000)} 秒内就绪`);
-    console.error(
-      r.portBusy
-        ? `      端口 ${SERVE_PORT} 已被占用 —— 先看是谁：netstat -ano | findstr ${SERVE_PORT}`
-        : `      进程没起来，看日志：${serveLogPath()}`,
-    );
+    // 与裸调用共用同一套话术：这条命令和「双击图标」是同一件事的两个入口。
+    // 仍然走 stderr —— 这条路径是「失败」，脚本里 `2>/dev/null` 应当能吞掉它。
+    console.error(P.serveNotReady(r.portBusy ? P.portBusy(SERVE_PORT) : P.seeLog));
+    if (r.portBusy) console.error(`[xbb] netstat -ano | findstr ${SERVE_PORT}`);
+    else console.error(`[xbb] logs/serve.log → ${serveLogPath()}`);
     process.exit(1);
   }
   // AUMID 必须先注册，否则 Windows 上这条通知会被静默丢弃（不是显示不出来，是压根没投递）
@@ -364,14 +364,13 @@ if (cmd === "serve") {
   //   · url 让**点通知＝直接进管理页**，这是不依赖托盘的备用路径；
   //   · 后半句是给 Windows 那座"隐藏的图标"区的：首次安装的图标默认被折叠，
   //     用户会以为没启动——这是「无感」在启动环节的翻版。
-  const body = "托盘图标在右下角。看不到就点开 ^ 拖到任务栏。";
   const uiUrl = `http://127.0.0.1:${SERVE_PORT}/ui`;
   if (r.already) {
-    showToast({ title: "小本本已经在运行", body, url: uiUrl });
-    console.log(`[xbb] 常驻服务已在运行（127.0.0.1:${SERVE_PORT}）`);
+    showToast({ title: P.toastAlreadyTitle, body: P.toastBody, url: uiUrl });
+    console.log(`[xbb] ${P.serveRunning(SERVE_PORT)}`);
   } else {
-    showToast({ title: "小本本 AI 记忆已启动", body, url: uiUrl });
-    console.log(`[xbb] 已启动并就绪（${r.waitedMs}ms${r.pid ? ` · PID ${r.pid}` : ""}）`);
+    showToast({ title: P.toastStartedTitle, body: P.toastBody, url: uiUrl });
+    console.log(`[xbb] ${P.serveStarted(r.waitedMs)}${r.pid ? ` · PID ${r.pid}` : ""}`);
   }
   if (args.includes("--open") || args.includes("-o")) openInBrowser(uiUrl);
 

@@ -329,6 +329,33 @@ export const en: Dict = {
         else lines.push("  Your intent: on by default (never turned off; a missing or changed entry is repaired automatically)");
         return lines;
       },
+      msg: {
+        winOnly: (op, platform) =>
+          `${op === "write" ? "writeAutostartEntry" : "removeAutostartEntry"} only applies to the Windows registry (currently ${platform})`,
+        writeFailed: (code, out) => `write failed (reg exit code ${code}): ${out}`,
+        readbackMismatch: (expected, actual) => `read-back does not match — expected ${expected}, got ${actual ?? "(none)"}`,
+        absentValue: (valueName) => `"${valueName}" was not there to begin with, nothing to do`,
+        deleteFailed: (code, out) => `delete failed (reg exit code ${code}): ${out}`,
+        stillPresentPolicy: "still present on read-back after deletion (group policy may have written it back)",
+        removedValue: (valueName, before) => `removed "${valueName}" (previous value ${before})`,
+        fileWriteFailed: (msg) => `write failed: ${msg}`,
+        fileDeleteFailed: (msg) => `delete failed: ${msg}`,
+        stillPresentFile: "the file is still there after deletion (missing permissions?)",
+        absentFile: (path) => `${path} was not there to begin with, nothing to do`,
+        removedFile: (path) => `removed ${path}`,
+        fileWithCommand: (path, command) => `${path}\n   Command: ${command}`,
+        bootstrapPending: (out) => `\n   (launchctl bootstrap did not take effect immediately; the file is in place and loads at next login: ${out})`,
+        bootoutNonZero: (out) => `\n   (launchctl bootout returned non-zero; it may simply not have been loaded: ${out})`,
+        launchdHosted: (exe) => `${exe} serve --no-open (supervised by launchd)`,
+        launchdLocation: (path, label) => `${path} (launchd · ${label})`,
+        xdgLocation: (path) => `${path} (XDG autostart entry)`,
+        noMechanism: (platform) => `${platform} has no known autostart mechanism`,
+        notCompiled: (exe) => `Refusing to write: this is not a compiled build (${exe}). Run this command with an installed xbb.`,
+        winNeedsExe: (exe) => `Refusing to write: a Windows startup entry must point at a .exe (currently ${exe})`,
+        unsupported: (platform) =>
+          `${platform} does not support configuring start-at-login yet (Windows / macOS / Linux are covered).\n` +
+          "  Elsewhere: point your platform's own service manager at `xbb serve --no-open`.",
+      },
     },
 
     ingestNote: {
@@ -456,6 +483,34 @@ export const en: Dict = {
       moveConfig: (path) => `   Config: ${path}`,
       moveRestart: "   ⚠️  Restart xbb serve and all AI clients before the new location is used.",
       moveKeepOld: (from) => `   The old copy is still at ${from}; delete it once the new location is confirmed working.`,
+      moveErrSamePath: (to) => `That is already the current location: ${to}`,
+      moveErrProcs: (list) =>
+        `xbb processes are still running: ${list.join(", ")}\n` +
+        `  Moving now would lose writes that are still sitting in the WAL. Stop them first: xbb stop\n` +
+        `  (quitting from the tray menu works too; Cursor / opencode / WorkBuddy each spawn their own xbb mcp,` +
+        ` and those only disappear once the client is closed — killing one gets it respawned immediately.)\n` +
+        `  If you are sure none of them are left but you are still blocked: xbb home move "<dir>" --force`,
+      moveErrBusy: (srcDb) =>
+        `The database is in use; moving it now would lose writes that have not hit disk yet: ${srcDb}\n` +
+        `  · First try: xbb stop (stops the background service), and close any AI client with xiaobenben open\n` +
+        `  · Still seeing this message: xbb home move "<dir>" --force (skips this check, verification still runs)`,
+      moveErrTargetHasDb: (dstDb, to) =>
+        `There is already a database at the target: ${dstDb}\n` +
+        `   To avoid overwriting someone else's memories, this stops here.\n` +
+        `   · Want to use that one: xbb home set "${to}" (make sure it is the one you mean)\n` +
+        `   · Want somewhere else: pick an empty directory`,
+      moveErrNothing: (from) => `There is nothing to move at the current location: ${from}`,
+      moveErrNoVerify: (dstDb) => `Verification after copying produced no result: ${dstDb}`,
+      moveErrIntegrity: (integrity, dstDb, srcDb) =>
+        `Integrity check failed after copying (${integrity}): ${dstDb}\n   Config was not switched, the original database is intact: ${srcDb}`,
+      moveErrDstMissing: (dstDb) => `The target database does not exist after copying: ${dstDb}`,
+      moveErrRowMismatch: (key, src, dst, srcDb) =>
+        `Row counts differ after copying (${key}: source ${src} / target ${dst}) — config was not switched, the original database is intact: ${srcDb}`,
+      lockProbeFailed: (dbPath, msg) =>
+        `Could not confirm the database is idle: ${dbPath}\n` +
+        `  Reason: ${msg}\n` +
+        `  This is not "in use" — the check itself failed. Please send us that line verbatim.\n` +
+        `  Once you have confirmed no xbb process is running you can skip the check: xbb home move "<dir>" --force`,
       findScanning: "Scanning (drive roots + home, depth 4, 15 second budget)…",
       findDeepScanning: "Deep scanning the whole disk (may take minutes)…",
       findNone: "No memory.db found. If it lives on an external disk, plug it in and scan again; or use --deep.",
@@ -487,6 +542,7 @@ export const en: Dict = {
       keptWhyNoCmd: "no command line available, skipped to be safe",
       keptWhyMcpBusy: "mcp, this session is still using it",
       keptWhyMcp: "mcp",
+      signalTimeout: "exit signal sent, but it did not exit within 3 seconds",
       failed: (pid, name, err) => `  ❌ Could not stop PID ${pid} ${name}: ${err}`,
       failedHint: "\n  Processes that will not stop are usually a permissions problem: retry as administrator on Windows, check the owner on Unix.",
       undecidable: (n) => [

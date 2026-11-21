@@ -59,6 +59,12 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { connect } from "node:net";
 import { isCompiledExe } from "./updater";
+// 结果话术要双语：`xbb autostart on|off` 会把它原样打在终端上。方向仍是单向的
+// （i18n → paths，autostart → home + i18n），且 dict() 是懒求值，不读文件。
+import { dict } from "./i18n";
+
+/** 让下面的模板字面量短一点：这些函数体内只用到这一丛话术。 */
+const M = () => dict().cmd.autostart.msg;
 
 /** HKCU 启动项：免管理员，且是"当前用户登录即启"的既有机制。 */
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -228,15 +234,15 @@ function readRegistry(o: AutostartOpts): AutostartStatus {
  */
 export function writeAutostartEntry(command: string, o: AutostartOpts = {}): AutostartResult {
   if (platformOf(o) !== "win32") {
-    return { ok: false, message: `writeAutostartEntry 只用于 Windows 注册表（当前 ${platformOf(o)}）` };
+    return { ok: false, message: M().winOnly("write", platformOf(o)) };
   }
   const valueName = o.valueName ?? AUTOSTART_VALUE;
   const r = (o.run ?? regRun)(["add", RUN_KEY, "/v", valueName, "/t", "REG_SZ", "/d", command, "/f"]);
-  if (r.code !== 0) return { ok: false, message: `写入失败（reg 退出码 ${r.code}）：${r.out.trim()}` };
+  if (r.code !== 0) return { ok: false, message: M().writeFailed(r.code, r.out.trim()) };
 
   const back = readRegistry({ ...o, valueName });
   if (!back.present || back.command !== command) {
-    return { ok: false, message: `回读不一致 —— 期望 ${command}，实际 ${back.command ?? "(无)"}` };
+    return { ok: false, message: M().readbackMismatch(command, back.command) };
   }
   return { ok: true, message: `${valueName} = ${command}` };
 }
@@ -244,17 +250,17 @@ export function writeAutostartEntry(command: string, o: AutostartOpts = {}): Aut
 /** 底层删除（Windows 专用）。已经不存在也算成功（幂等），但会如实说明。 */
 export function removeAutostartEntry(o: AutostartOpts = {}): AutostartResult {
   if (platformOf(o) !== "win32") {
-    return { ok: false, message: `removeAutostartEntry 只用于 Windows 注册表（当前 ${platformOf(o)}）` };
+    return { ok: false, message: M().winOnly("remove", platformOf(o)) };
   }
   const valueName = o.valueName ?? AUTOSTART_VALUE;
   const before = readRegistry({ ...o, valueName });
-  if (!before.present) return { ok: true, message: `本就没有「${valueName}」，无需处理` };
+  if (!before.present) return { ok: true, message: M().absentValue(valueName) };
 
   const r = (o.run ?? regRun)(["delete", RUN_KEY, "/v", valueName, "/f"]);
-  if (r.code !== 0) return { ok: false, message: `删除失败（reg 退出码 ${r.code}）：${r.out.trim()}` };
+  if (r.code !== 0) return { ok: false, message: M().deleteFailed(r.code, r.out.trim()) };
   const after = readRegistry({ ...o, valueName });
-  if (after.present) return { ok: false, message: "删除后回读仍存在（可能被组策略重新写回）" };
-  return { ok: true, message: `已移除「${valueName}」（原值 ${before.command ?? "-"}）` };
+  if (after.present) return { ok: false, message: M().stillPresentPolicy };
+  return { ok: true, message: M().removedValue(valueName, before.command ?? "-") };
 }
 
 // ── macOS：LaunchAgent plist ──────────────────────────────────────
@@ -321,7 +327,7 @@ export function parsePlistProgramArguments(xml: string): string | null {
 
 function readLaunchAgent(o: AutostartOpts): AutostartStatus {
   const p = launchAgentPath(o);
-  const location = `${p}（launchd · ${LAUNCH_AGENT_LABEL}）`;
+  const location = M().launchdLocation(p, LAUNCH_AGENT_LABEL);
   if (!existsSync(p)) return emptyStatus(location);
   let xml = "";
   try {
@@ -334,7 +340,7 @@ function readLaunchAgent(o: AutostartOpts): AutostartStatus {
     supported: true,
     present: true,
     enabled: true,
-    command: exe ? `${exe} serve --no-open（launchd 托管）` : null,
+    command: exe ? M().launchdHosted(exe) : null,
     exePath: exe,
     location,
   };
@@ -359,12 +365,12 @@ function writeLaunchAgent(exePath: string, o: AutostartOpts): AutostartResult {
     writeFileSync(p, launchAgentPlist(exePath, log), "utf8");
     chmodSync(p, 0o644); // launchd 对 0644 之外的世界可写 plist 会拒收
   } catch (e) {
-    return { ok: false, message: `写入失败：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: M().fileWriteFailed(e instanceof Error ? e.message : String(e)) };
   }
 
   const back = readLaunchAgent(o);
   if (!back.present || !back.exePath || !samePath(back.exePath, exePath, "darwin")) {
-    return { ok: false, message: `回读不一致 —— 期望 ${exePath}，实际 ${back.exePath ?? "(无)"}` };
+    return { ok: false, message: M().readbackMismatch(exePath, back.exePath) };
   }
 
   // 立刻生效，不必等下次登录。**bootstrap 失败不算失败**：文件已就位、下次登录总会加载，
@@ -372,16 +378,13 @@ function writeLaunchAgent(exePath: string, o: AutostartOpts): AutostartResult {
   const run = o.sh ?? shellRun;
   run("launchctl", ["bootout", launchctlDomain(), p]); // 幂等；未加载时非零，忽略
   const boot = run("launchctl", ["bootstrap", launchctlDomain(), p]);
-  const note =
-    boot.code === 0
-      ? ""
-      : `\n   （launchctl bootstrap 未即时生效，文件已就位，下次登录生效：${boot.out.trim().slice(0, 200)}）`;
-  return { ok: true, message: `${p}\n   命令: ${startupArgv("darwin", exePath).join(" ")}${note}` };
+  const note = boot.code === 0 ? "" : M().bootstrapPending(boot.out.trim().slice(0, 200));
+  return { ok: true, message: `${M().fileWithCommand(p, startupArgv("darwin", exePath).join(" "))}${note}` };
 }
 
 function removeLaunchAgent(o: AutostartOpts): AutostartResult {
   const p = launchAgentPath(o);
-  if (!existsSync(p)) return { ok: true, message: `本就没有 ${p}，无需处理` };
+  if (!existsSync(p)) return { ok: true, message: M().absentFile(p) };
 
   // 先卸再删：只删文件不 unload，plist 已登记的作业会一直活到本次登录结束
   const run = o.sh ?? shellRun;
@@ -389,11 +392,11 @@ function removeLaunchAgent(o: AutostartOpts): AutostartResult {
   try {
     rmSync(p);
   } catch (e) {
-    return { ok: false, message: `删除失败：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: M().fileDeleteFailed(e instanceof Error ? e.message : String(e)) };
   }
-  if (existsSync(p)) return { ok: false, message: "删除后文件仍存在（权限不足？）" };
-  const note = out.code === 0 ? "" : `\n   （launchctl bootout 非零退码，可能本就未加载：${out.out.trim().slice(0, 160)}）`;
-  return { ok: true, message: `已移除 ${p}${note}` };
+  if (existsSync(p)) return { ok: false, message: M().stillPresentFile };
+  const note = out.code === 0 ? "" : M().bootoutNonZero(out.out.trim().slice(0, 160));
+  return { ok: true, message: `${M().removedFile(p)}${note}` };
 }
 
 // ── Linux：XDG autostart ─────────────────────────────────────────
@@ -457,7 +460,7 @@ export function parseDesktopExec(exec: string): string | null {
 
 function readXdg(o: AutostartOpts): AutostartStatus {
   const p = xdgAutostartPath(o);
-  const location = `${p}（XDG 自启项）`;
+  const location = M().xdgLocation(p);
   if (!existsSync(p)) return emptyStatus(location);
   let txt = "";
   try {
@@ -486,25 +489,25 @@ function writeXdgEntry(exePath: string, o: AutostartOpts): AutostartResult {
     writeFileSync(p, xdgDesktopEntry(exePath), { encoding: "utf8", mode: 0o644 });
     chmodSync(p, 0o644); // 0600 的 desktop 文件部分桌面环境读不到
   } catch (e) {
-    return { ok: false, message: `写入失败：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: M().fileWriteFailed(e instanceof Error ? e.message : String(e)) };
   }
   const back = readXdg(o);
   if (!back.present || !back.enabled || !back.exePath || !samePath(back.exePath, exePath, "linux")) {
-    return { ok: false, message: `回读不一致 —— 期望 ${exePath}，实际 ${back.exePath ?? "(无)"}` };
+    return { ok: false, message: M().readbackMismatch(exePath, back.exePath) };
   }
-  return { ok: true, message: `${p}\n   命令: ${startupArgv("linux", exePath).join(" ")}` };
+  return { ok: true, message: M().fileWithCommand(p, startupArgv("linux", exePath).join(" ")) };
 }
 
 function removeXdgEntry(o: AutostartOpts): AutostartResult {
   const p = xdgAutostartPath(o);
-  if (!existsSync(p)) return { ok: true, message: `本就没有 ${p}，无需处理` };
+  if (!existsSync(p)) return { ok: true, message: M().absentFile(p) };
   try {
     rmSync(p);
   } catch (e) {
-    return { ok: false, message: `删除失败：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: M().fileDeleteFailed(e instanceof Error ? e.message : String(e)) };
   }
-  if (existsSync(p)) return { ok: false, message: "删除后文件仍存在（权限不足？）" };
-  return { ok: true, message: `已移除 ${p}` };
+  if (existsSync(p)) return { ok: false, message: M().stillPresentFile };
+  return { ok: true, message: M().removedFile(p) };
 }
 
 // ── 平台分发 ────────────────────────────────────────────────────
@@ -519,7 +522,7 @@ export function readAutostart(o: AutostartOpts = {}): AutostartStatus {
     case "linux":
       return readXdg(o);
     default:
-      return emptyStatus(`${platformOf(o)} 无已知自启机制`, false);
+      return emptyStatus(M().noMechanism(platformOf(o)), false);
   }
 }
 
@@ -541,16 +544,13 @@ export function enableAutostart(o: AutostartOpts = {}): AutostartResult {
   // 连 `import.meta.dir` 都不指向仓库）。宁可拒绝，也不能写一条开机即败的坏项。
   // 用的就是自更新那道同源保命闸：**只有编译产物才允许改"以后怎么启动自己"**。
   if (!(o.compiled ?? isCompiledExe())) {
-    return {
-      ok: false,
-      message: `拒绝写入：当前不是编译产物（${exe}）。请用安装后的 xbb 执行本命令。`,
-    };
+    return { ok: false, message: M().notCompiled(exe) };
   }
   // Windows 的 Run 值必须指向 .exe：写个无后缀路径 Explorer 也不认。
   // POSIX **不能**套这条 —— macOS/Linux 的编译产物本来就叫 `xbb`，加了这个判断会把两个平台
   // 全部拒掉（真事：这条曾让 POSIX 的 enableAutostart 永远返回"不是编译产物"）。
   if (platform === "win32" && !/\.exe$/i.test(exe)) {
-    return { ok: false, message: `拒绝写入：Windows 启动项必须指向 .exe（当前 ${exe}）` };
+    return { ok: false, message: M().winNeedsExe(exe) };
   }
 
   switch (platform) {
@@ -578,10 +578,7 @@ export function disableAutostart(o: AutostartOpts = {}): AutostartResult {
 }
 
 export function autostartUnsupportedMessage(platform: string = process.platform): string {
-  return (
-    `${platform} 暂不支持自动配置开机自启（已落地 Windows / macOS / Linux）。\n` +
-    "  其它平台：用系统自带的服务管理器指向 `xbb serve --no-open`。"
-  );
+  return M().unsupported(platform);
 }
 
 // ── 用户意图（默认开启 / 永久关闭）──────────────────────────────────
