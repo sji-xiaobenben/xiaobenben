@@ -6,6 +6,7 @@
  * 工具面合并后版本：断言 20 工具超集（含 episodes、成员目录、补链、可见范围）。
  * 用法：bun run tools/mcp-smoke.ts（隔离 XBB_HOME，不碰真实个人库）
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";

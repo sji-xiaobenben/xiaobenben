@@ -16,10 +16,11 @@
  *
  * 三条断言（前两条查根因、第三条查症状）：
  *  1. 模板里所有反斜杠必须「双写」——单写即被模板吃掉；
- *  2. 模板里的 `${...}` 只能是**裸标识符**插值（复杂表达式一律人工确认，防误伤）；
+ *  2. 模板里的 `${...}` 只能是**裸标识符**或一级成员访问（复杂表达式一律人工确认，防误伤）；
  *  3. 求值出真实 HTML 后：内联 <script> 必须能通过语法检查，且每个 `onclick="fn(...)"`
  *     引用的函数都必须在脚本里有 `function fn(` 声明（本次事故的用户可见症状）。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,14 +46,16 @@ function fail(msg: string): void {
 const src = readFileSync(SRC, "utf8");
 
 // ── 抠出模板字面量正文 ────────────────────────────────────────────────
-const START = "const ADMIN_HTML = `";
+// 锚点只用「反引号 + <!DOCTYPE html>」：模板外面套着哪个函数、变量叫什么名字
+// 都不该影响本闸 —— 2026-11-22 把它从 `const ADMIN_HTML =` 改成 `function adminHtml()`
+// 时，旧锚点直接找不到起点；用页面自己的第一行当锚点就不会再因为重构而失效。
+const MARK = "`<!DOCTYPE html>";
 const END = "</html>`;";
-const s = src.indexOf(START);
-if (s < 0) {
-  console.error(`✗ ${SRC} 里找不到 ADMIN_HTML 模板起点`);
+const openTick = src.indexOf(MARK);
+if (openTick < 0) {
+  console.error(`✗ ${SRC} 里找不到模板起点（${MARK}）`);
   process.exit(1);
 }
-const openTick = s + START.length - 1;
 const e = src.indexOf(END, openTick);
 if (e < 0) {
   console.error("✗ 找不到 ADMIN_HTML 模板终点 </html>");
@@ -99,25 +102,38 @@ console.log(`模板   : 第 ${startLine} 行起，${body.length} 字符`);
   if (bad.size === 0) console.log("✓ 反斜杠全部双写");
 }
 
-// ── 断言 2：插值只能是裸标识符 ───────────────────────────────────────
-const ids: string[] = [];
+// ── 断言 2：插值只能是裸标识符或「标识符.标识符」链 ─────────────────
+// 文案搬进语言包之后，骨架里出现的插值形如 ${a.html.docTitle}。允许一级成员访问
+// 是因为它同样**不可能**藏着反引号、引号或换行；而调用、下标、运算、三元一律不放行
+// —— 那些才是真正需要人工过目的东西（本闸认不出来的表达式会被误伤成"模板坏了"）。
+const roots: string[] = [];
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+const MEMBER = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
 {
   for (const m of body.matchAll(/\$\{([^}]*)\}/g)) {
     const expr = m[1].trim();
-    if (/^[A-Za-z_$][\w$]*$/.test(expr)) {
-      if (!ids.includes(expr)) ids.push(expr);
+    if (IDENT.test(expr) || MEMBER.test(expr)) {
+      const root = expr.split(".")[0]!;
+      if (!roots.includes(root)) roots.push(root);
     } else {
-      fail(`第 ${lineOf(m.index!)} 行插值 \${${expr}} 不是裸标识符 ⇒ 请人工确认（本闸只认裸变量）`);
+      fail(`第 ${lineOf(m.index!)} 行插值 \${${expr}} 不是裸标识符 ⇒ 请人工确认（本闸只认裸变量与一级成员访问）`);
     }
   }
-  console.log(`✓ 插值共 ${ids.length} 个：${ids.join(", ") || "（无）"}`);
+  console.log(`✓ 插值共 ${roots.length} 个根标识符：${roots.join(", ") || "（无）"}`);
 }
 
 // ── 求值出真实 HTML ─────────────────────────────────────────────────
+// 占位值不能给空串：${a.html.docTitle} 在空串上会变成 "".html.docTitle ⇒ 抛 TypeError，
+// 闸门会以"模板坏了"的面目红一次。给一个「什么属性都有、转成字符串是 x」的桩，
+// 插值就能全部求值出可读的占位文字。
+const stub = new Proxy(function () {} as unknown as object, {
+  get: (_t, prop) => (prop === "toString" || prop === Symbol.toPrimitive ? () => "x" : stub),
+}) as Record<string, unknown>;
+
 let html: string;
 try {
-  const fn = new Function(...ids, `return \`${body}\`;`);
-  html = fn(...ids.map(() => ""));
+  const fn = new Function(...roots, `return \`${body}\`;`);
+  html = fn(...roots.map(() => stub));
 } catch (err) {
   fail(`模板字面量求值失败：${(err as Error).message}`);
   process.exit(1);

@@ -13,6 +13,7 @@
  *  - **幂等要单验**：第二次调用必须是 `exists` 且**不刷新** mtime。每次重写会把「最近添加」
  *    刷成广告位，而这件事从代码上看不出来。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

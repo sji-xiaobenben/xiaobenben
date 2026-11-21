@@ -18,6 +18,7 @@
  *
  * 真机起托盘（屏幕上会真的出现一个图标）需显式 `XBB_TRAY_E2E=1`：CI 无显示环境，不能默认跑。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";

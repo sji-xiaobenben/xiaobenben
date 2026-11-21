@@ -25,6 +25,7 @@
  *
  * 用法：`bun run tools/admin-ui-check.ts`（设 `CHROME` 环境变量可指定浏览器路径）
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -57,6 +58,9 @@ rmSync(HOME, { recursive: true, force: true });
 mkdirSync(HOME, { recursive: true });
 
 const child = spawn(bun, [`${root}src/index.ts`, "serve", "--headless", "--no-open"], {
+  // 本闸断言的是**中文**文案（三态各一句）。语言由文件顶部的 `./lib/locale` 钉成 zh，
+  // 子进程继承同一个 process.env —— 不钉的话 CI 跑在英文 runner 上会因为"页面是英文"而红，
+  // 而代码是对的。要验英文页面，改 `src/i18n.test.ts` 那几条，别把两种语言混进同一组断言。
   env: { ...process.env, XBB_HOME: HOME, PORT: String(PORT) },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -156,6 +160,12 @@ async function main() {
   if (!bar.includes("切到本地（保留密钥）")) fail("② 软切按钮缺失");
   if (!bar.includes("解除绑定")) fail("② 解绑按钮缺失");
   if (bar.includes("未绑定云端组织")) fail("② 云端态却渲染了未绑定文案");
+  // 文案搬进语言包之后，这里最容易出的错是**占位符没被填上**：页面会原样显示
+  // `记忆写入组织 <b>{org}</b>`，或者某个键拼错成 undefined。两者都不报错、也不白屏，
+  // 只是难看地摆在最显眼的位置 —— 静态分析看不出来，只有渲染后才看得见。
+  if (bar.includes("undefined") || /\{[a-zA-Z]+\}/.test(bar)) {
+    fail(`② cloudbar 里有没替换掉的占位符或 undefined：${bar.slice(0, 240)}`);
+  }
   console.log("✓ ② 云端态：模式 + 组织名 +「切到本地（保留密钥）」+「解除绑定」");
 
   // ③ 已绑定·软关态 —— 与 ① 必须可区分（这正是"两态塌陷"回归）

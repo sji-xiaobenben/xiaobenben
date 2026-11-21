@@ -20,6 +20,7 @@
  *   bun run tools/ort-path-smoke.ts                # 非 Windows 打印 SKIPPED 并退出 0
  *   bun run tools/ort-path-smoke.ts --require-win  # 非 Windows 直接 FAIL（本机/Windows CI 用）
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { findBundledOrtDir, loadOrtFromPkg, pinBundledOrt } from "../src/embedder";

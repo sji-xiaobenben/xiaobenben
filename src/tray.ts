@@ -42,6 +42,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { ensureTrayBin, trayIconBase64 } from "./tray-assets";
+import { dict } from "./i18n";
 
 export interface TrayHandle {
   onOpenWindow(cb: () => void): void;
@@ -126,37 +127,41 @@ interface TrayEntry {
   enabled: (s: TrayState) => boolean;
 }
 
-/** 模式行的措辞（三态各不相同，别混成一句"已绑定"） */
+/** 模式行的措辞（三态各不相同，别混成一句"已绑定"）。文案在 `dict().tray`。 */
 function modeLine(s: TrayState): string {
-  if (s.cloudEnabled) return `模式：云端 · ${s.orgLabel || "已绑定"}`;
-  return s.cloudConfigured ? "模式：本地（已关云端，密钥保留）" : "模式：本地（仅本机）";
+  const t = dict().tray;
+  if (s.cloudEnabled) return t.modeCloud(s.orgLabel || t.bound);
+  return s.cloudConfigured ? t.modeLocalKeep : t.modeLocalOnly;
 }
 
 const TRAY_ENTRIES: TrayEntry[] = [
-  { kind: "open", title: () => "打开管理窗口", enabled: () => true },
+  { kind: "open", title: () => dict().tray.openWindow, enabled: () => true },
   { kind: "separator", title: () => TRAY_SEPARATOR, enabled: () => true },
   { kind: "label", title: modeLine, enabled: () => false },
-  { kind: "label", title: () => "切换后需重启 AI 客户端才生效", enabled: () => false },
+  { kind: "label", title: () => dict().tray.switchHint, enabled: () => false },
   {
     kind: "to-cloud",
-    title: (s) => (s.cloudConfigured ? `切换到云端模式 · ${s.orgLabel || "已绑定"}` : "切换到云端模式…"),
+    title: (s) => {
+      const t = dict().tray;
+      return s.cloudConfigured ? t.toCloudBound(s.orgLabel || t.bound) : t.toCloudUnbound;
+    },
     enabled: (s) => !s.cloudEnabled,
   },
-  { kind: "to-local", title: () => "切换到本地模式（保留密钥）", enabled: (s) => s.cloudEnabled },
-  { kind: "bind-key", title: () => "填写云端密钥…", enabled: () => true },
+  { kind: "to-local", title: () => dict().tray.toLocal, enabled: (s) => s.cloudEnabled },
+  { kind: "bind-key", title: () => dict().tray.bindKey, enabled: () => true },
   { kind: "separator", title: () => TRAY_SEPARATOR, enabled: () => true },
-  { kind: "verify", title: () => "校验哈希链", enabled: () => true },
-  { kind: "report", title: () => "导出诊断报告", enabled: () => true },
-  { kind: "update", title: () => "检查更新", enabled: () => true },
+  { kind: "verify", title: () => dict().tray.verify, enabled: () => true },
+  { kind: "report", title: () => dict().tray.report, enabled: () => true },
+  { kind: "update", title: () => dict().tray.update, enabled: () => true },
   {
     // 既然默认就开着，用户必须能在**看得见的地方**关掉 —— 否则"默认开启"就成了偷装。
     // 标题直接写现状（每次现读系统），不写"点此开启/关闭"那种要用户先猜状态的说法。
     kind: "autostart",
-    title: (s) => `开机自启：${s.autostartOn ? "已开" : "已关"}`,
+    title: (s) => dict().tray.autostart(s.autostartOn),
     enabled: (s) => s.autostartSupported,
   },
   { kind: "separator", title: () => TRAY_SEPARATOR, enabled: () => true },
-  { kind: "exit", title: () => "退出", enabled: () => true },
+  { kind: "exit", title: () => dict().tray.exit, enabled: () => true },
 ];
 
 /** 全部动作名（冒烟据此断言"每个动作都有落点"，不依赖标题文案） */
@@ -190,8 +195,8 @@ export function trayMenu(iconBase64: string, state: TrayState = TRAY_STATE_LOCAL
     tooltip:
       tooltip ??
       (state.cloudEnabled
-        ? `小本本 · 云端模式 · ${state.orgLabel || "已绑定"}`
-        : "小本本 · 本地模式 (127.0.0.1:17630)"),
+        ? dict().tray.tipCloud(state.orgLabel || dict().tray.bound)
+        : dict().tray.tipLocal),
     items: TRAY_ENTRIES.map((e, i) => ({
       title: e.title(state),
       tooltip: "",

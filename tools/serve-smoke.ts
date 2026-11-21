@@ -5,6 +5,7 @@
  * serve 协议级冒烟：headless 拉起 → healthz/stats/verify/ui 四断言 → 收杀。
  * 原理同 mcp-smoke：CI 三平台真跑，不 mock。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";

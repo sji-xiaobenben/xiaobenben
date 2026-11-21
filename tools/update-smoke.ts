@@ -11,6 +11,7 @@
  *   - 版本比较必须是数值语义（0.4.10 > 0.4.9，不是字典序）
  *   - 源地址三态语义：未设=默认开、空串=关、设值=私有镜像
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { generateKeyPairSync, sign as nodeSign } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

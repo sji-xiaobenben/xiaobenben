@@ -10,11 +10,14 @@
  */
 import type { Dict } from "./types";
 import { helpZh } from "./help/zh";
+import { adminZh } from "./admin/zh";
 
 export const zh: Dict = {
   langNames: { zh: "中文", en: "English" },
 
   help: helpZh,
+
+  admin: adminZh,
 
   banner: { built: "构建", fingerprint: "指纹", site: "官方站点" },
 
@@ -490,5 +493,25 @@ export const zh: Dict = {
       cloudOff: (org) => `模式: 本地（已关云端，密钥保留）· 随时可切回 ${org}`,
       unknownCommand: (cmd) => `未知命令: ${cmd}（运行 xbb --help 看全部命令）`,
     },
+  },
+
+  tray: {
+    bound: "已绑定",
+    openWindow: "打开管理窗口",
+    modeCloud: (org) => `模式：云端 · ${org}`,
+    modeLocalKeep: "模式：本地（已关云端，密钥保留）",
+    modeLocalOnly: "模式：本地（仅本机）",
+    switchHint: "切换后需重启 AI 客户端才生效",
+    toCloudBound: (org) => `切换到云端模式 · ${org}`,
+    toCloudUnbound: "切换到云端模式…",
+    toLocal: "切换到本地模式（保留密钥）",
+    bindKey: "填写云端密钥…",
+    verify: "校验哈希链",
+    report: "导出诊断报告",
+    update: "检查更新",
+    autostart: (on) => `开机自启：${on ? "已开" : "已关"}`,
+    exit: "退出",
+    tipCloud: (org) => `小本本 · 云端模式 · ${org}`,
+    tipLocal: "小本本 · 本地模式 (127.0.0.1:17630)",
   },
 };

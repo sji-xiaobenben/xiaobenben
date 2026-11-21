@@ -15,11 +15,14 @@
  */
 import type { Dict } from "./types";
 import { helpEn } from "./help/en";
+import { adminEn } from "./admin/en";
 
 export const en: Dict = {
   langNames: { zh: "Chinese", en: "English" },
 
   help: helpEn,
+
+  admin: adminEn,
 
   banner: { built: "built", fingerprint: "fingerprint", site: "official site" },
 
@@ -518,5 +521,25 @@ export const en: Dict = {
       cloudOff: (org) => `Mode: local (cloud switched off, key kept) · switch back to ${org} anytime`,
       unknownCommand: (cmd) => `Unknown command: ${cmd} (run xbb --help for the full list)`,
     },
+  },
+
+  tray: {
+    bound: "bound",
+    openWindow: "Open admin window",
+    modeCloud: (org) => `Mode: cloud · ${org}`,
+    modeLocalKeep: "Mode: local (cloud off, key kept)",
+    modeLocalOnly: "Mode: local (this machine only)",
+    switchHint: "Restart your AI client for the switch to take effect",
+    toCloudBound: (org) => `Switch to cloud · ${org}`,
+    toCloudUnbound: "Switch to cloud…",
+    toLocal: "Switch to local (keep key)",
+    bindKey: "Enter a cloud key…",
+    verify: "Verify hash chain",
+    report: "Export diagnostics",
+    update: "Check for updates",
+    autostart: (on) => `Start at login: ${on ? "on" : "off"}`,
+    exit: "Exit",
+    tipCloud: (org) => `xiaobenben · cloud mode · ${org}`,
+    tipLocal: "xiaobenben · local mode (127.0.0.1:17630)",
   },
 };

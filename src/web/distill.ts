@@ -25,6 +25,9 @@
  * （见 admin.ts 的 distillRender）。
  */
 
+/** 文案全部来自 `dict().admin.distill` —— 判定是纯逻辑，措辞是语言包的事。 */
+import { dict } from "../i18n";
+
 export interface DistillInput {
   /** 最近一条记忆的写入时间（ISO UTC，带 Z）。空库传 null。 */
   lastMemoryAt: string | null;
@@ -59,11 +62,11 @@ export function distillHint(i: DistillInput): DistillHint | null {
   if (!i.lastMemoryAt) {
     // 空库：只有真的攒下原话才提，否则新装用户一打开就看到警告
     if (since <= 0) return null;
+    const d = dict().admin.distill;
     return {
       tone: "tip",
-      title: `还没有任何记忆，已攒下 ${since} 条原话`,
-      detail:
-        "原话是逐字存档，AI 日常检索不会翻它。让 AI 把值得留下的部分整理成记忆，下次问它才想得起来。",
+      title: d.emptyTitle(since),
+      detail: d.emptyDetail,
       ageDays: null,
     };
   }
@@ -78,13 +81,11 @@ export function distillHint(i: DistillInput): DistillHint | null {
   if (since <= 0) return null;
   if (ageDays < 7 && since < 30) return null;
 
+  const d = dict().admin.distill;
   return {
     tone: "warn",
-    title: `记忆层已 ${ageDays} 天没有新增`,
-    detail:
-      `这期间采集到 ${since} 条原话，但记忆始终是 ${i.memoryTotal} 条。` +
-      "AI 日常检索只翻记忆层、不翻原话，所以这期间说的事它不会自己想起来。" +
-      "让 AI 把值得留的整理成记忆，或直接让它翻原文。",
+    title: d.staleTitle(ageDays),
+    detail: d.staleDetail(since, i.memoryTotal),
     ageDays,
   };
 }

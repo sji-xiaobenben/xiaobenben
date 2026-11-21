@@ -15,6 +15,7 @@
  *  - **默认开启不能变成关不掉**：`off` 之后 `ensureAutostartDefault` 必须不再写回 —— 这条
  *    单独断言，它比"能开"更重要。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

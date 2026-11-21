@@ -20,6 +20,7 @@
  *
  * 跑法：bun tools/events-smoke.ts
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { startEvents, type OrgEvent } from "../src/events";
 
 const PORT = 17642; // 冒烟专用端口

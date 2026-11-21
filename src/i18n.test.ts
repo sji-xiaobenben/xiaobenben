@@ -31,6 +31,10 @@ import {
 import { columnWidth, displayWidth, padTo } from "./i18n/width";
 import { helpEn } from "./i18n/help/en";
 import { helpZh } from "./i18n/help/zh";
+import { en } from "./i18n/en";
+import { adminEn } from "./i18n/admin/en";
+import { adminZh } from "./i18n/admin/zh";
+import { adminHtml } from "./web/admin";
 import { helpText } from "./cli-help";
 import { writeHomeConfig } from "./home";
 
@@ -261,7 +265,168 @@ describe("帮助文案 —— 27 条，两种语言都要在", () => {
   });
 });
 
+describe("管理页文案 —— 200 多条，键要对齐、英文里不许有中文", () => {
+  /** 把嵌套字典摊成「路径 + 是不是函数」，用来比两边的**形状**是否一致 */
+  function shapeOf(v: unknown, path = ""): string[] {
+    if (typeof v === "function") return [path + "()"];
+    if (v && typeof v === "object") {
+      return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => shapeOf(x, path + "." + k));
+    }
+    return [path];
+  }
+  /** 取出所有可比较的值（函数取 `zh` 包闭包里的? 不行 —— 只比形状与字符串） */
+  function leaves(v: unknown, path = ""): Array<[string, unknown]> {
+    if (v && typeof v === "object") {
+      return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => leaves(x, path + "." + k));
+    }
+    return [[path, v]];
+  }
+  const CJK = /[\u4e00-\u9fff\u3000-\u303f\uff01-\uff60]/;
+
+  test("两种语言的键路径与函数位完全对应", () => {
+    // 少一个键，页面上就是一处 `undefined`；多一个函数位，序列化进页面的 JSON 就会少一句。
+    // 类型检查已经守了一半（AdminDict 是显式接口），这里守另一半：运行时真的对得上。
+    expect(shapeOf(adminEn).sort()).toEqual(shapeOf(adminZh).sort());
+  });
+
+  test("每个字符串都有内容 —— 漏填的键在页面上是一块空白，肉眼最难发现", () => {
+    // 唯一的例外：英文把量词吃进上一句（"Page [3]"），`pageJumpUnit` 必须为空。
+    const ALLOW_EMPTY = new Set([".js.pageJumpUnit"]);
+    for (const [k, v] of leaves(adminZh)) {
+      if (typeof v !== "string") continue;
+      expect({ k, zh: v.trim().length > 0 }).toEqual({ k, zh: true });
+    }
+    for (const [k, v] of leaves(adminEn)) {
+      if (typeof v !== "string" || ALLOW_EMPTY.has(k)) continue;
+      expect({ k, en: v.trim().length > 0 }).toEqual({ k, en: true });
+    }
+  });
+
+  test("英文包里不许残留中文 —— 含中文标点与全角符号", () => {
+    // 这段 200 多条是本次改造里最容易漏的地方：一边对照原文件一边改，
+    // 改到第 150 条去接个电话，回来就接着写了。类型检查对此完全无感。
+    const offenders: string[] = [];
+    for (const [k, v] of leaves(adminEn)) {
+      if (typeof v !== "string") continue;
+      const hit = v.match(CJK);
+      if (hit) offenders.push(`${k}: …${v.slice(Math.max(0, hit.index! - 16), hit.index! + 16)}…`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("英文页面里唯一的汉字是品牌名", () => {
+    // 这条是端到端的：直接渲染整页，扫一遍真实产物。
+    // 骨架里漏一句没接字典的中文，只有这里能抓到（字典测试看不见模板正文）。
+    //
+    // ⚠️ 扫之前必须**去掉注释**：内联 CSS/JS 里的中文注释是有意保留的（判据是
+    // 「谁读它」—— 注释的读者是维护者，不是用户），它们随页面一起发出去但人看不见。
+    // 不去掉就会把「注释是中文」误报成「漏翻」。
+    setEnv({ XBB_LANG: "en" });
+    const html = adminHtml();
+    expect(html).toContain('<html lang="en">');
+    // 两处刻意保留中文：
+    //  · 品牌名「小本本」不译（用户报 bug 时贴的就是这行，翻了就对不上号）；
+    //  · `"小本本默认约束"` 是**库里存着的域名**，是数据不是文案 —— 它是筛选条件，
+    //    翻译它等于让英文用户看不到默认约束的统计，而且会悄悄改变行为。
+    const DATA_LITERALS = ['"小本本默认约束"'];
+    let text = html;
+    for (const lit of DATA_LITERALS) text = text.split(lit).join("");
+    const stripped = text
+      .split("小本本").join("")
+      .replace(/\/\*[\s\S]*?\*\//g, "") // CSS 块注释
+      // JS 行注释：只认「行首或空白之后的 //」，所以 `http://` 这类 URL 不会被误剪
+      .replace(/(^|\s)\/\/[^\n]*/gm, "");
+    const hit = stripped.match(CJK);
+    expect(hit ? stripped.slice(Math.max(0, hit.index! - 40), hit.index! + 40) : null).toBeNull();
+  });
+
+  test("中文页面与改造前一模一样：标题、页签、危险区通行词都在", () => {
+    setEnv({ XBB_LANG: "zh" });
+    const html = adminHtml();
+    expect(html).toContain('<html lang="zh-CN">');
+    expect(html).toContain("<title>小本本 · 记忆管理</title>");
+    expect(html).toContain(">短期叮嘱</button>");
+    expect(html).toContain("危险区 · 批量物理删除（不可恢复，默认约束不受影响）");
+    // 通行词必须同时出现在页面与服务端校验里，否则「清空全部」永远删不掉
+    expect(html).toContain("键入：清空全部记忆");
+  });
+
+  test("内联脚本拿到的是能 JSON.parse 的字典，且不是空的", () => {
+    setEnv({ XBB_LANG: "en" });
+    const html = adminHtml();
+    const m = html.match(/<script type="application\/json" id="xbb-i18n">([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    const parsed = JSON.parse(m![1]!) as Record<string, unknown>;
+    expect(Object.keys(parsed).length).toBeGreaterThan(100);
+    expect(parsed.kindMemory).toBe("Memories");
+    // `<` 必须被转义成 \u003c：否则文案里一旦出现 `</script` 就会提前结束脚本元素
+    expect(m![1]!).not.toContain("<");
+  });
+});
+
+describe("整本英文字典都不许有中文", () => {
+  test("除了品牌名，一个汉字都不该有", () => {
+    // 这条是兜底网：`admin` 段自己有更细的检查，但 `tray` / `cmd` / `stats` 这些段
+    // 一直靠"改造时看一遍"来保证 —— 加一个新段、复制中文包改一半，谁都不会发现。
+    // 允许名单里的每一项都要有理由：
+    //  · `"小本本服务"` 是 Windows 启动项的**真实注册值名**，翻了启动项就对不上；
+    //  · 「小本本」是品牌名，不译（用户报 bug 时贴的就是这行）。
+    // 长的写前面：先剥整串，再剥品牌，否则会剩下半截「服务」被误判成漏译。
+    const ALLOWED = ['"小本本服务"', "小本本"];
+    const CJK = /[\u4e00-\u9fff\u3000-\u303f\uff01-\uff60]/;
+    const offenders: string[] = [];
+    // 函数型文案要真跑一遍才有意义（跳过等于整段没查）。入参用一个"什么都能当"的代理：
+    // 转成字符串是 x、参与三目是真值、`.join()` 返回 x —— 覆盖了字典里那几种写法。
+    const anyArg = new Proxy(["x"] as unknown as Record<string | symbol, unknown>, {
+      get(_t, p) {
+        if (p === "join") return () => "x";
+        if (p === "length") return 1;
+        if (p === Symbol.toPrimitive || p === "toString") return () => "x";
+        return "x";
+      },
+    });
+    const walk = (v: unknown, path: string): void => {
+      if (typeof v === "string") {
+        let text = v;
+        for (const ok of ALLOWED) text = text.split(ok).join("");
+        const hit = text.match(CJK);
+        if (hit) offenders.push(`${path}: …${text.slice(Math.max(0, hit.index! - 16), hit.index! + 16)}…`);
+        return;
+      }
+      if (typeof v === "function") {
+        try {
+          const out = (v as (...a: unknown[]) => unknown)(anyArg, anyArg, anyArg);
+          // 有几种话术是整块多行（`string[]`），逐行查，别整块跳过
+          if (typeof out === "string") walk(out, path + "(…)");
+          else if (Array.isArray(out)) out.forEach((line, i) => walk(line, `${path}(…)[${i}]`));
+          else offenders.push(`${path}: 函数没有返回字符串，本闸查不到它的措辞`);
+        } catch (e) {
+          offenders.push(`${path}: 调用抛错 ${(e as Error).message}`);
+        }
+        return;
+      }
+      if (v && typeof v === "object") {
+        for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, path + "." + k);
+      }
+    };
+    walk(en, "");
+    expect(offenders).toEqual([]);
+  });
+
+  test("tray 与 admin 的措辞确实换过语言，不是把中文复制过来", () => {
+    setEnv({ XBB_LANG: "zh" });
+    expect(dict().tray.openWindow).toBe("打开管理窗口");
+    expect(dict().tray.autostart(true)).toBe("开机自启：已开");
+    expect(dict().admin.html.btnSearch).toBe("搜索");
+    setEnv({ XBB_LANG: "en" });
+    expect(dict().tray.openWindow).toBe("Open admin window");
+    expect(dict().tray.autostart(true)).toBe("Start at login: on");
+    expect(dict().admin.html.btnSearch).toBe("Search");
+  });
+});
+
 describe("终端显示宽度", () => {
+
   test("汉字占两列，ASCII 占一列", () => {
     expect(displayWidth("")).toBe(0);
     expect(displayWidth("Database")).toBe(8);

@@ -11,6 +11,7 @@
  *
  * 所以把它变成一条会响的断言。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 

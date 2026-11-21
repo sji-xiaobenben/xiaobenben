@@ -6,6 +6,7 @@
  * 隔离 serve → 种子记忆 → stdin JSON 形态与 argv JSON 形态（Codex）真跑适配器
  * → 验证 inbox 收到推送。CI 三平台真跑，不 mock。
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { PersonalStore } from "../src/store";

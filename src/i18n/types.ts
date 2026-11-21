@@ -17,8 +17,9 @@
  */
 
 import type { HelpDict } from "./help/types";
+import type { AdminDict } from "./admin/types";
 
-export type { HelpDict };
+export type { HelpDict, AdminDict };
 
 export type Lang = "zh" | "en";
 
@@ -28,6 +29,9 @@ export interface Dict {
 
   /** 帮助文案（判据见 `help/types.ts` 顶部：谁读它，不是"是不是字符串"） */
   help: HelpDict;
+
+  /** 管理页（`xbb serve` 网页）文案 —— 含服务端渲染、API 错误与内联脚本三块 */
+  admin: AdminDict;
 
   banner: {
     /** 版本行里「构建 <时刻>」的那个词 */
@@ -329,6 +333,38 @@ export interface Dict {
       unknownCommand: (cmd: string) => string;
     };
   };
+
+  /**
+   * 托盘菜单 —— 用户**看得见**的一块界面，所以与命令行输出同等对待。
+   *
+   * 一处特别的约束：菜单是**起进程时一次性下发**给托盘程序的（线协议只在 spawn 后收一行
+   * menu），所以语言跟着进程启动那一刻走。用户改完 `xbb lang` 得重启才变 ——
+   * 这与"切云端模式要重启 AI 客户端"是同一类事实，不需要额外解释。
+   */
+  tray: {
+    /** 菜单里出现空组织名时的兜底词 */
+    bound: string;
+    openWindow: string;
+    modeCloud: (org: string) => string;
+    modeLocalKeep: string;
+    modeLocalOnly: string;
+    /** 模式行下面那行灰字：切换不会立即生效 */
+    switchHint: string;
+    toCloudBound: (org: string) => string;
+    toCloudUnbound: string;
+    toLocal: string;
+    bindKey: string;
+    verify: string;
+    report: string;
+    update: string;
+    /** 标题直接写现状，不写"点此开启/关闭"（用户不必先猜状态） */
+    autostart: (on: boolean) => string;
+    exit: string;
+    /** 托盘图标的悬浮提示（品牌名不译） */
+    tipCloud: (org: string) => string;
+    tipLocal: string;
+  };
+
 }
 
 /** 缺库话术需要的字段。`kind` 的取值见 home.ts 的 `DbMissingKind` */

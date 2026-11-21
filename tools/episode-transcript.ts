@@ -18,6 +18,7 @@
  *
  * 用法：bun run tools/episode-transcript.ts
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

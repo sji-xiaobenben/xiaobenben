@@ -29,6 +29,7 @@
  *   XBB_PROBE_BIN=<path> bun run tools/payload-probe.ts
  *   XBB_PROBE_FILE=<path> ...                       # 用真实文件替代自动生成的 clip.webm
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";

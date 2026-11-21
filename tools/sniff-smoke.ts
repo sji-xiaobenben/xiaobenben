@@ -12,6 +12,7 @@
  *
  * 用法：bun run tools/sniff-smoke.ts
  */
+import "./lib/locale"; // 语言锚点：必须是第一条 import（理由见该文件）
 import { applyDescriptor, looksLikeMessage, roleOfValue, sniffMessage, structureFingerprint, textOfValue } from "../src/sniff";
 import type { FormatDescriptor } from "../src/sniff";
 

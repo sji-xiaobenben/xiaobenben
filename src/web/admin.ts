@@ -27,6 +27,7 @@ import { existsSync } from "node:fs";
 // 产品元数据单一来源（此前此处硬编码 VERSION = "0.2.0"，与 build-meta 漂移）
 import { PRODUCT_NAME, PRODUCT_EN, VERSION, OFFICIAL_SITE } from "../build-meta";
 import { distillHint } from "./distill";
+import { dict, currentLang } from "../i18n";
 
 type AnyDb = Database;
 
@@ -82,8 +83,11 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   if (guard) return guard;
   const url = new URL(req.url);
   const p = url.pathname;
+  // 这些串会原样进 toast / 预览区，所以是**给用户看的话**，不是错误码。
+  const api = dict().admin.api;
 
-  if (p === "/" || p === "/ui" || p === "/index.html") return new Response(ADMIN_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+  // 页面文案要在**请求时**求值：`xbb lang` 改过之后不重启服务，刷新就该是新语言。
+  if (p === "/" || p === "/ui" || p === "/index.html") return new Response(adminHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
 
   // GET /api/list —— 最近记忆（分页 + kind 类型筛选 + session 会话检索）
   if (p === "/api/list") {
@@ -161,7 +165,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     if (!old) return json({ error: "not found" }, 404);
     const hash = createHash("sha256").update(content).digest("hex");
     const dup = db.prepare("SELECT id FROM memories WHERE content_hash = ? AND id != ? AND deleted_at IS NULL").get(hash, id) as any;
-    if (dup) return json({ error: "与记忆 #" + dup.id + " 内容重复" }, 409);
+    if (dup) return json({ error: api.dupContent(dup.id) }, 409);
     // FTS 由触发器 AFTER UPDATE OF content 自动同步（手动维护已删）
     db.prepare("UPDATE memories SET content = ?, content_hash = ?, updated_at = ? WHERE id = ?").run(content, hash, new Date().toISOString(), id);
     // 审计纪律：管理台编辑也落哈希链（payload 只记 id，零内容）
@@ -184,7 +188,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     const id = String(body.id ?? "");
     const old = db.prepare("SELECT content, system FROM memories WHERE id = ? AND deleted_at IS NULL").get(id) as any;
     if (!old) return json({ error: "not found" }, 404);
-    if (old.system) return json({ error: "「小本本默认约束」受引擎保护，不可删除（可编辑措辞）" }, 403);
+    if (old.system) return json({ error: api.systemProtected }, 403);
     // 双列同步：deleted_at + status（触发器据 status 同步 FTS）
     const nowIsoDel = new Date().toISOString();
     db.prepare("UPDATE memories SET deleted_at = ?, status = 'forgotten', updated_at = ? WHERE id = ?").run(nowIsoDel, nowIsoDel, id);
@@ -200,24 +204,24 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     if (mode === "session") {
       const s = String(body.sessionId ?? "").trim();
       if (!s) return null;
-      return { where: "session_id = ?", params: [s], desc: "会话「" + s + "」" };
+      return { where: "session_id = ?", params: [s], desc: api.purgeDescSession(s) };
     }
     if (mode === "time") {
       const from = String(body.from ?? ""), to = String(body.to ?? "");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
-      return { where: "created_at >= ? AND created_at <= ?", params: [from + "T00:00:00", to + "T23:59:59"], desc: from + " ~ " + to + " 入库的记忆" };
+      return { where: "created_at >= ? AND created_at <= ?", params: [from + "T00:00:00", to + "T23:59:59"], desc: api.purgeDescTime(from, to) };
     }
     if (mode === "domain") {
       const d = String(body.domain ?? "").trim();
       if (!d) return null;
-      return { where: "domain = ?", params: [d], desc: "域「" + d + "」" };
+      return { where: "domain = ?", params: [d], desc: api.purgeDescDomain(d) };
     }
     if (mode === "hits") {
       const n = Number(body.maxHits);
       if (!Number.isInteger(n) || n < 0) return null;
-      return { where: "COALESCE(hit_count, 0) <= ?", params: [n], desc: "回忆命中次数 ≤ " + n + " 的记忆" };
+      return { where: "COALESCE(hit_count, 0) <= ?", params: [n], desc: api.purgeDescHits(n) };
     }
-    if (mode === "all") return { where: "1=1", params: [], desc: "全部记忆" };
+    if (mode === "all") return { where: "1=1", params: [], desc: api.purgeDescAll };
     return null;
   }
 
@@ -225,7 +229,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   if (p === "/api/purge/preview" && req.method === "POST") {
     const body = await readBody(req);
     const w = purgeWhere(String(body.mode ?? ""), body);
-    if (!w) return json({ error: "参数不完整或维度无效" }, 400);
+    if (!w) return json({ error: api.badParams }, 400);
     const total = (db.prepare(
       `SELECT COUNT(*) AS c FROM memories WHERE deleted_at IS NULL AND system = 0 AND ${w.where}`
     ).get(...w.params) as any).c;
@@ -239,11 +243,14 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   // POST /api/purge —— 执行物理删除：含 terms/links/entity 卫星表 + FTS 索引 + 孤儿实体清理
   if (p === "/api/purge" && req.method === "POST") {
     const body = await readBody(req);
-    if (body.confirm !== "DELETE") return json({ error: "缺少二次确认" }, 400);
+    if (body.confirm !== "DELETE") return json({ error: api.noConfirm }, 400);
     const w = purgeWhere(String(body.mode ?? ""), body);
-    if (!w) return json({ error: "参数不完整或维度无效" }, 400);
-    if (w.where === "1=1" && String(body.typeText ?? "").trim() !== "清空全部记忆")
-      return json({ error: "清空全部需先在输入框键入「清空全部记忆」" }, 400);
+    if (!w) return json({ error: api.badParams }, 400);
+    // 通行词跟着界面语言走：写死中文的话，英文界面会要求用户键入一句中文。
+    // 词在 `html` 段而不是 `api` 段，因为它同时是页面上那个 input 的 placeholder。
+    const word = dict().admin.html.purgeTypeWord;
+    if (w.where === "1=1" && String(body.typeText ?? "").trim() !== word)
+      return json({ error: api.purgeTypeMismatch(word) }, 400);
     const rows = db.prepare(
       `SELECT id, content FROM memories WHERE deleted_at IS NULL AND system = 0 AND ${w.where}`
     ).all(...w.params) as any[];
@@ -279,9 +286,9 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   if (p === "/api/vault/update" && req.method === "POST") {
     const { id, value, label } = await readBody(req);
     const sid = Number(id);
-    if (!sid) return json({ error: "id 不能为空" }, 400);
+    if (!sid) return json({ error: api.idRequired }, 400);
     const row = db.prepare("SELECT id FROM secrets WHERE id = ?").get(sid) as any;
-    if (!row) return json({ error: "保险箱条目不存在" }, 404);
+    if (!row) return json({ error: api.vaultMissing }, 404);
     if (typeof value === "string" && value.trim()) {
       db.prepare("UPDATE secrets SET value = ?, value_hash = ?, updated_at = datetime('now','localtime') WHERE id = ?")
         .run(value.trim(), createHash("sha256").update(value.trim()).digest("hex"), sid);
@@ -296,7 +303,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   if (p === "/api/vault/delete" && req.method === "POST") {
     const { id } = await readBody(req);
     const sid = Number(id);
-    if (!sid) return json({ error: "id 不能为空" }, 400);
+    if (!sid) return json({ error: api.idRequired }, 400);
     db.prepare("DELETE FROM secrets WHERE id = ?").run(sid);
     return json({ ok: true });
   }
@@ -493,7 +500,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     const { setCloudEnabled } = await import("../cloud");
     const toCloud = p.endsWith("/enable");
     if (!setCloudEnabled(toCloud)) {
-      return json({ error: "本机还没有云端密钥，无法切换模式——请先在下方手动填写密钥（或从控制台绑定）" }, 400);
+      return json({ error: api.cloudNoKey }, 400);
     }
     return json({ ok: true, enabled: toCloud });
   }
@@ -504,7 +511,7 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   if (p === "/api/cloud/bind-key" && req.method === "POST") {
     const body = await readBody(req);
     const key = String(body?.key ?? "").trim();
-    if (!key) return json({ error: "密钥不能为空" }, 400);
+    if (!key) return json({ error: api.keyRequired }, 400);
     const { bindFromKey, BindError, DEFAULT_API } = await import("../cloud");
     try {
       const r = await bindFromKey(key, String(body?.apiBase ?? "").trim() || DEFAULT_API);
@@ -534,7 +541,9 @@ function prettyRow(row: any) {
 }
 
 // ── 管理页面（内嵌，零外部资源） ──
-// 注意：HTML/JS 内刻意不使用反引号与 ${}，保证模板字符串安全
+// 注意：内联 JS 里仍然**不使用**反引号与 `${}`（模板字面量会吃掉它们）；
+// 骨架里允许 `${a.html.x}` 这种取词插值，但只能是裸标识符或一级成员访问 ——
+// `tools/check-admin-html.ts` 按这条规则卡着，复杂表达式一律人工确认。
 
 // ── 内联脚本的设计说明 ─────────────────────────────────────────────
 // 原先这些注释写在 <script> 里，会随 HTML 一起发给浏览器（3286 字节，纯浪费）。
@@ -572,13 +581,35 @@ function prettyRow(row: any) {
 // ── 更新提示：有新版本时才出现；一次点击完成，不打扰 ──
 // 数据源是 /update-check（只读本地快照，不打网络），所以这里可以放心轮询式刷新。
 
-const ADMIN_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+// ── 管理页面（内嵌，零外部资源） ──
+/**
+ * 生成整页 HTML —— **按请求现算**，不是模块级常量。
+ *
+ * 为什么必须是函数：页面语言跟着 `dict()` 走，而 `dict()` 是懒求值的。
+ * 写成 `const ADMIN_HTML = ...` 就等于把语言钉死在进程启动那一刻，
+ * 用户敲完 `xbb lang en` 刷新页面还是中文 —— 而且不会报错，只会"看起来没生效"。
+ *
+ * 文案分三处取：
+ *   · `${a.html.xxx}`          —— 服务端直接拼进骨架；
+ *   · `i18nJson`               —— 内联脚本用的字典，序列化成一段 JSON 放进
+ *                                 `<script type="application/json">`，页面里 `JSON.parse` 成 `T`；
+ *   · `a.html.purgeTypeWord`   —— 危险区通行词，服务端校验时用同一个词。
+ *
+ * ⚠️ 内联脚本的字典**不能**写成 `var T = ${i18nJson};`（直接插进主脚本）：
+ * 回归闸求值模板时会把每个插值换成占位值，`var T = ;` 会让整段脚本报语法错，
+ * 闸门红得莫名其妙。放进独立的 JSON 元素里，主脚本就完全是静态代码了。
+ */
+export function adminHtml(): string {
+  const a = dict().admin;
+  // `<` 必须转义：它出现在 JSON 字符串里时可能拼出 `</script`，那会提前结束整个脚本元素。
+  const i18nJson = JSON.stringify(a.js).replace(/</g, "\\u003c");
+  return `<!DOCTYPE html>
+<html lang="${a.html.langTag}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='22' viewBox='0 0 18 22'%3E%3Cpath d='M2 0h14v22l-7-5-7 5z' fill='%23F22'/%3E%3C/svg%3E">
-<title>小本本 · 记忆管理</title>
+<title>${a.html.docTitle}</title>
 <style>
 :root{color-scheme:light dark;--r1:#FFF;--r2:#EEEEFF;--r3:#9999DD;--r4:#2255BB;--r5:#222255;--r6:#222;--r7:#111;--bg:var(--r1);--card:var(--r1);--chip:var(--r2);--tx:var(--r6);--tx2:rgba(34,34,34,.72);--tx3:rgba(34,34,34,.62);--line:rgba(34,34,34,.14);--line2:rgba(34,34,34,.07);--brand:#F22222;--acc:var(--r4);--link:var(--r4);--ring:rgba(34,85,187,.18);--dng:#A32D2D;--dngb:rgba(163,45,45,.07);--wrn:#8A5A00;--sh:0 5px 30px rgba(0,0,0,.05);--sh2:0 14px 44px rgba(0,0,0,.13);--mono:ui-monospace,Menlo,Consolas,monospace;--rad:8px;--radl:12px;--kd:var(--r4);--kc:var(--dng)}
 @media(prefers-color-scheme:dark){:root{--bg:var(--r7);--card:var(--r6);--chip:#2A2A38;--tx:#F2F2F2;--tx2:rgba(242,242,242,.72);--tx3:rgba(242,242,242,.58);--line:rgba(255,255,255,.13);--line2:rgba(255,255,255,.07);--link:var(--r3);--ring:rgba(153,153,221,.22);--dng:#E89292;--dngb:rgba(232,146,146,.1);--wrn:#D9A85C;--sh:0 5px 30px rgba(0,0,0,.35);--sh2:0 14px 44px rgba(0,0,0,.5);--kd:#5B8DEF;--kc:#DE6B6B}}
@@ -740,52 +771,52 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
 </style>
 </head>
 <body>
-<h2 class="sr">小本本记忆管理页：搜索、查看、编辑和删除记忆</h2>
+<h2 class="sr">${a.html.srHeading}</h2>
 <header class="appbar">
   <div class="wrap">
     <div class="brand">
       <svg width="15" height="19" viewBox="0 0 18 22" aria-hidden="true"><path d="M2 0h14v22l-7-5-7 5z" fill="currentColor"/></svg>
       小本本<span class="bn">memory</span>
     </div>
-    <div class="stat"><span class="led" id="led"></span><span id="ledTxt">本地模式</span></div>
+    <div class="stat"><span class="led" id="led"></span><span id="ledTxt">${a.html.ledLocal}</span></div>
   </div>
 </header>
 <main class="wrap">
-  <section class="ledger" id="ledger" aria-label="记忆账本">
+  <section class="ledger" id="ledger" aria-label="${a.html.ledgerAria}">
     <div class="lgrow">
-      <div class="lcell"><b id="lgEp">—</b><i>条原话</i></div>
-      <div class="lcell"><b id="lgSess">—</b><i>个会话</i></div>
-      <div class="lcell bd"><b id="lgMem">—</b><i>条记忆</i></div>
-      <div class="lcell" id="lgUsedCell"><b id="lgUsed">—</b><i>被召回过</i></div>
-      <div class="lcell"><b id="lgHits">—</b><i>次命中</i></div>
-      <div class="lcell"><b id="lgLinks">—</b><i>条关联</i></div>
+      <div class="lcell"><b id="lgEp">—</b><i>${a.html.statEp}</i></div>
+      <div class="lcell"><b id="lgSess">—</b><i>${a.html.statSess}</i></div>
+      <div class="lcell bd"><b id="lgMem">—</b><i>${a.html.statMem}</i></div>
+      <div class="lcell" id="lgUsedCell"><b id="lgUsed">—</b><i>${a.html.statUsed}</i></div>
+      <div class="lcell"><b id="lgHits">—</b><i>${a.html.statHits}</i></div>
+      <div class="lcell"><b id="lgLinks">—</b><i>${a.html.statLinks}</i></div>
     </div>
-    <div class="lgnote" id="lgNote">正在读账本…</div>
+    <div class="lgnote" id="lgNote">${a.html.ledgerReading}</div>
   </section>
   <div class="search">
-    <input type="text" class="q" id="q" placeholder="搜索记忆，或粘贴会话编号" autocomplete="off" spellcheck="false">
-    <button class="pri" onclick="doSearch()">搜索</button>
-    <button onclick="doSession()">按会话查</button>
+    <input type="text" class="q" id="q" placeholder="${a.html.qPlaceholder}" autocomplete="off" spellcheck="false">
+    <button class="pri" onclick="doSearch()">${a.html.btnSearch}</button>
+    <button onclick="doSession()">${a.html.btnSession}</button>
   </div>
   <div class="tabs" id="filterbar">
-    <button class="fbtn on" data-kind="all" onclick="setKind('all')">全部</button>
-    <button class="fbtn" data-kind="memory" onclick="setKind('memory')">记忆</button>
-    <button class="fbtn" data-kind="directive" onclick="setKind('directive')">短期叮嘱</button>
-    <button class="fbtn" data-kind="habit" onclick="setKind('habit')">长期习惯</button>
-    <button class="fbtn" data-kind="constraint" onclick="setKind('constraint')">长期约束</button>
-    <button class="fbtn" data-kind="vault" onclick="setKind('vault')">保险箱</button>
-    <button class="fbtn" data-kind="episodes" onclick="setKind('episodes')">原话</button>
+    <button class="fbtn on" data-kind="all" onclick="setKind('all')">${a.html.kindAll}</button>
+    <button class="fbtn" data-kind="memory" onclick="setKind('memory')">${a.html.kindMemory}</button>
+    <button class="fbtn" data-kind="directive" onclick="setKind('directive')">${a.html.kindDirective}</button>
+    <button class="fbtn" data-kind="habit" onclick="setKind('habit')">${a.html.kindHabit}</button>
+    <button class="fbtn" data-kind="constraint" onclick="setKind('constraint')">${a.html.kindConstraint}</button>
+    <button class="fbtn" data-kind="vault" onclick="setKind('vault')">${a.html.kindVault}</button>
+    <button class="fbtn" data-kind="episodes" onclick="setKind('episodes')">${a.html.kindEpisodes}</button>
   </div>
   <div class="epbar" id="epbar">
-    <select id="epSrc" onchange="epFilterChange()"><option value="">全部来源</option></select>
-    <input type="date" id="epDay" onchange="epFilterChange()" title="只看这一天的原话">
-    <button onclick="epClear()">清空筛选</button>
+    <select id="epSrc" onchange="epFilterChange()"><option value="">${a.html.srcAll}</option></select>
+    <input type="date" id="epDay" onchange="epFilterChange()" title="${a.html.epDayTitle}">
+    <button onclick="epClear()">${a.html.epClear}</button>
     <span class="sp"></span>
     <span class="csub" id="epInfo"></span>
   </div>
   <div class="tabs" id="sessbar" style="display:none">
     <span class="window" id="sessLabel"></span>
-    <button class="fbtn" onclick="exitSession()">✕ 退出会话视图</button>
+    <button class="fbtn" onclick="exitSession()">${a.html.exitSession}</button>
   </div>
   <div class="homebar" id="homebar"></div>
   <div class="cloudbar" id="cloudbar"></div>
@@ -796,22 +827,22 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
   <div id="list"></div>
   <div class="pager" id="pager"></div>
   <details class="purgebox" id="purgebox">
-    <summary>危险区 · 批量物理删除（不可恢复，默认约束不受影响）</summary>
+    <summary>${a.html.purgeSummary}</summary>
     <div class="pbody">
       <div class="prow">
         <select id="pMode" onchange="pModeChange()">
-          <option value="session">按会话编号</option>
-          <option value="time">按入库时间段</option>
-          <option value="domain">按约束域</option>
-          <option value="hits">按回忆命中次数</option>
-          <option value="all">全部记忆清空</option>
+          <option value="session">${a.html.purgeModeSession}</option>
+          <option value="time">${a.html.purgeModeTime}</option>
+          <option value="domain">${a.html.purgeModeDomain}</option>
+          <option value="hits">${a.html.purgeModeHits}</option>
+          <option value="all">${a.html.purgeModeAll}</option>
         </select>
-        <input type="text" id="pIn1" placeholder="会话编号" style="display:none">
+        <input type="text" id="pIn1" placeholder="${a.html.purgeSessPh}" style="display:none">
         <input type="date" id="pIn2" style="display:none">
         <select id="pDom" style="display:none"></select>
-        <input type="text" id="pIn3" placeholder="命中次数上限，如 0" style="display:none">
-        <input type="text" id="pText" placeholder="键入：清空全部记忆" style="display:none">
-        <button onclick="pPurgePreview()">预览</button>
+        <input type="text" id="pIn3" placeholder="${a.html.purgeHitsPh}" style="display:none">
+        <input type="text" id="pText" placeholder="${a.html.purgeTextPh}" style="display:none">
+        <button onclick="pPurgePreview()">${a.html.btnPreview}</button>
       </div>
       <div class="presult" id="pResult"></div>
     </div>
@@ -833,29 +864,34 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
     <div id="mRelHead" class="linkrow lh"></div>
     <div id="mRel"></div>
     <div class="acts">
-      <button id="btnDel" class="dgr" onclick="delCur()">删除</button>
-      <button onclick="closeModal()">取消</button>
-      <button class="pri" onclick="saveEdit()">保存</button>
+      <button id="btnDel" class="dgr" onclick="delCur()">${a.html.btnDelete}</button>
+      <button onclick="closeModal()">${a.html.btnCancel}</button>
+      <button class="pri" onclick="saveEdit()">${a.html.btnSave}</button>
     </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<script type="application/json" id="xbb-i18n">${i18nJson}</script>
 <script>
 var curId = null, curSystem = false, curKind = "all", curSession = null;
 var page = 0, pageSize = 20, total = 0;
 var ingSeenAt = null;
 var ingDismissed = false;
+var T = JSON.parse(document.getElementById("xbb-i18n").textContent);
 try { ingDismissed = localStorage.getItem("xbb.tip.ingest") === "1"; } catch(e){}
+// 占位符只有一层：{name} 换成调用方给的值，值里再出现花括号不会二次展开。
+function fmt(s, o){ return String(s).replace(/\\{(\\w+)\\}/g, function(_m, k){ var v = o ? o[k] : null; return v == null ? "" : String(v); }); }
 function esc(s){ var d=document.createElement("div"); d.textContent=s==null?"":String(s); return d.innerHTML; }
 function toast(m){ var t=document.getElementById("toast"); t.textContent=m; t.style.display="block"; setTimeout(function(){t.style.display="none";},1800); }
-function badge(t){ var map={decision:"决策",preference:"偏好",fact:"事实",event:"事件",procedure:"步骤"}; return esc(map[t]||t); }
+function srcLabel(s){ return s === "env" ? T.homeSrcEnv : s === "config" ? T.homeSrcConfig : s === "default" ? T.homeSrcDefault : s; }
+function badge(t){ var map={decision:T.typeDecision,preference:T.typePreference,fact:T.typeFact,event:T.typeEvent,procedure:T.typeProcedure}; return esc(map[t]||t); }
 function kindBadge(m){
-  if(m.system) return '<span class="badge sys">系统</span>';
-  var map={memory:"记忆",directive:"叮嘱",habit:"习惯",constraint:"约束"};
+  if(m.system) return '<span class="badge sys">'+esc(T.kindSystem)+'</span>';
+  var map={memory:T.kindMemory,directive:T.kindDirective,habit:T.kindHabit,constraint:T.kindConstraint};
   var k = m.kind || "memory";
   return '<span class="badge k-'+esc(k)+'">'+esc(map[k]||k)+'</span>';
 }
-function kindLabel(k){ var map={memory:"记忆",directive:"叮嘱",habit:"习惯",constraint:"约束"}; return map[k]||k; }
+function kindLabel(k){ var map={memory:T.kindMemory,directive:T.kindDirective,habit:T.kindHabit,constraint:T.kindConstraint}; return map[k]||k; }
 function nowLocal(){
   var d=new Date(); function p(n){ return (n<10?"0":"")+n; }
   return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
@@ -881,9 +917,7 @@ function expired(m){
 function renderList(items){
   var el = document.getElementById("list");
   if(!items.length){
-    el.innerHTML = curSession
-      ? '<div class="empty">该会话编号下没有记忆，注意 session_id 需完整精确匹配。</div>'
-      : '<div class="empty">没有记忆。去 AI 客户端聊点什么，让它帮你记下来。</div>';
+    el.innerHTML = '<div class="empty">' + esc(curSession ? T.emptySession : T.emptyList) + '</div>';
     return;
   }
   var h = "";
@@ -895,11 +929,11 @@ function renderList(items){
       var safeSid = String(m.session_id).replace(/["']/g, "");
       extras += '<span class="badge" data-sid="'+esc(safeSid)+'" onclick="event.stopPropagation();sessFromEl(this)">'+esc(m.session_id)+' ↗</span>';
     }
-    if(m.domain) extras += '<span class="domain">域·'+esc(m.domain)+'</span>';
-    if(m.expires_at) extras += '<span class="window'+(expired(m)?' expired':'')+'">'+(expired(m)?'已过期 · ':'生效至 ')+esc(m.expires_at)+'</span>';
-    if(m.kind==="directive" && m.similar_sessions>1) extras += '<span class="window">×'+esc(m.similar_sessions)+' 会话</span>';
-    if(m.hit_count>0) extras += '<span class="badge">命中 ×'+esc(m.hit_count)+'</span>';
-    if(m.superseded_by) extras += '<span class="badge" data-open="'+esc(m.superseded_by)+'">已延续 → '+esc(String(m.superseded_by).slice(0,8))+'</span>';
+    if(m.domain) extras += '<span class="domain">'+esc(fmt(T.domainTag,{d:m.domain}))+'</span>';
+    if(m.expires_at) extras += '<span class="window'+(expired(m)?' expired':'')+'">'+(expired(m)?esc(T.expiredTag):esc(T.untilTag))+esc(m.expires_at)+'</span>';
+    if(m.kind==="directive" && m.similar_sessions>1) extras += '<span class="window">'+esc(fmt(T.similarSessions,{n:m.similar_sessions}))+'</span>';
+    if(m.hit_count>0) extras += '<span class="badge">'+esc(fmt(T.hitCount,{n:m.hit_count}))+'</span>';
+    if(m.superseded_by) extras += '<span class="badge" data-open="'+esc(m.superseded_by)+'">'+esc(fmt(T.supersededBy,{id:String(m.superseded_by).slice(0,8)}))+'</span>';
     var legacy = (!m.kind || m.kind==="memory") && m.type && m.type!=="fact" ? '<span class="badge">'+badge(m.type)+'</span>' : '';
     h += '<div class="card k-'+(m.kind||"memory")+'" data-open="'+m.id+'" title="#'+esc(m.id)+'">'
       + '<div class="meta"><span class="pno">'+pno(m.id)+'</span>'+kindBadge(m)+legacy
@@ -920,18 +954,18 @@ function renderPager(){
   var el = document.getElementById("pager");
   var pages = Math.max(1, Math.ceil(total/pageSize));
   if(total === 0){ el.innerHTML = ""; return; }
-  var unit = (curKind === "episodes") ? " 条原话" : " 条";
+  var unit = (curKind === "episodes") ? T.unitEpisodes : T.unitItems;
   // 只有一页时跳页没有意义，不显示——多一个控件就多一次疑问。
   var jump = pages > 1
-    ? '<span class="jump">跳至'
+    ? '<span class="jump">' + esc(T.pageJumpTo)
       + '<input id="pagerJump" type="text" inputmode="numeric" autocomplete="off" maxlength="7"'
-      + ' aria-label="跳至第几页" title="输入 1 - ' + pages + ' 之间的页码，回车跳转"'
-      + ' oninput="pagerJumpClean(this)" onkeydown="pagerJumpKey(event)">页'
-      + '<button onclick="pagerJump()">跳转</button></span>'
+      + ' aria-label="' + esc(T.pageJumpAria) + '" title="' + esc(fmt(T.pageJumpTitle, {n: pages})) + '"'
+      + ' oninput="pagerJumpClean(this)" onkeydown="pagerJumpKey(event)">' + esc(T.pageJumpUnit)
+      + '<button onclick="pagerJump()">' + esc(T.pageJumpBtn) + '</button></span>'
     : "";
-  el.innerHTML = '<button onclick="pageTurn(-1)"' + (page===0?' disabled':'') + '>上一页</button>'
-    + '<span>第 ' + (page+1) + ' / ' + pages + ' 页 · 共 ' + fmtNum(total) + unit + '</span>'
-    + '<button onclick="pageTurn(1)"' + (page>=pages-1?' disabled':'') + '>下一页</button>'
+  el.innerHTML = '<button onclick="pageTurn(-1)"' + (page===0?' disabled':'') + '>' + esc(T.pagePrev) + '</button>'
+    + '<span>' + esc(fmt(T.pageInfo, {p: page+1, n: pages, c: fmtNum(total), unit: unit})) + '</span>'
+    + '<button onclick="pageTurn(1)"' + (page>=pages-1?' disabled':'') + '>' + esc(T.pageNext) + '</button>'
     + jump;
 }
 function pageTurn(d){
@@ -977,34 +1011,33 @@ function homeRender(d){
   if(!el) return;
   el.style.display = "flex";
   var mb = function(n){ return (Number(n||0)/1048576).toFixed(1) + " MB"; };
-  var srcMap = { env:"环境变量 XBB_DATA_DIR", config:"配置文件", "default":"默认位置" };
-  var h = '<b>记忆库</b><code>' + esc(d.dbPath) + '</code>';
+  var srcTxt = srcLabel(d.source);
+  var h = '<b>' + esc(T.homeTitle) + '</b><code>' + esc(d.dbPath) + '</code>';
   if(d.dbExists){
     h += '<span class="csub">' + mb(d.dbBytes)
-      + (d.counts ? ' · 记忆 ' + d.counts.memories + ' / 原话 ' + d.counts.episodes : '')
-      + ' · ' + esc(srcMap[d.source] || d.source) + '</span>';
+      + (d.counts ? esc(fmt(T.homeCounts, {m: d.counts.memories, e: d.counts.episodes})) : '')
+      + ' · ' + esc(srcTxt) + '</span>';
   } else {
-    h += '<span class="csub warn">⚠️ 库不在位 —— 下次启动会被拒绝，避免在空库上继续用</span>';
+    h += '<span class="csub warn">' + esc(T.homeMissing) + '</span>';
   }
   h += '<span class="sp"></span>';
-  h += '<button onclick="homeReveal()">打开所在文件夹</button>';
-  h += '<details><summary>详情</summary><div class="hgrid">'
-    + '<span>程序目录</span><span>' + esc(d.programDir) + '</span>'
-    + '<span>数据目录</span><span>' + esc(d.dataDir) + '</span>'
-    + '<span>位置来源</span><span>' + esc(srcMap[d.source] || d.source) + '</span>'
-    + '<span>模型目录</span><span>' + esc(d.modelsDir) + (d.modelsExists ? '' : '（尚未下载）') + '</span>'
-    + '<span>配置文件</span><span>' + esc(d.configPath) + '</span>'
-    + '<span>最后写入</span><span>' + (d.dbMtime ? esc(String(d.dbMtime).slice(0,19).replace("T"," ")) : '-') + '</span>'
-    + (d.config ? '<span>配置内容</span><span>' + esc(JSON.stringify(d.config)) + '</span>' : '')
-    + '</div><div class="csub mt">换盘走命令行：<code>xbb home move "D:\\xbb-data"</code>'
-    + ' —— 复制 → 校验（完整性 + 行数逐项比对）→ 才切配置；校验不过不切，原库不动。</div></details>';
+  h += '<button onclick="homeReveal()">' + esc(T.homeReveal) + '</button>';
+  h += '<details><summary>' + esc(T.homeDetails) + '</summary><div class="hgrid">'
+    + '<span>' + esc(T.homeProgramDir) + '</span><span>' + esc(d.programDir) + '</span>'
+    + '<span>' + esc(T.homeDataDir) + '</span><span>' + esc(d.dataDir) + '</span>'
+    + '<span>' + esc(T.homeSource) + '</span><span>' + esc(srcTxt) + '</span>'
+    + '<span>' + esc(T.homeModelsDir) + '</span><span>' + esc(d.modelsDir) + (d.modelsExists ? '' : esc(T.homeNotDownloaded)) + '</span>'
+    + '<span>' + esc(T.homeConfigFile) + '</span><span>' + esc(d.configPath) + '</span>'
+    + '<span>' + esc(T.homeLastWrite) + '</span><span>' + (d.dbMtime ? esc(String(d.dbMtime).slice(0,19).replace("T"," ")) : '-') + '</span>'
+    + (d.config ? '<span>' + esc(T.homeConfigBody) + '</span><span>' + esc(JSON.stringify(d.config)) + '</span>' : '')
+    + '</div><div class="csub mt">' + T.homeMoveHint + '</div></details>';
   el.innerHTML = h;
 }
 
 function homeReveal(){
   fetch("/api/home/reveal", {method:"POST"}).then(function(r){return r.json();})
-    .then(function(d){ if(!d || !d.ok) toast((d && d.error) || "打开失败"); })
-    .catch(function(){ toast("打开失败"); });
+    .then(function(d){ if(!d || !d.ok) toast((d && d.error) || T.homeOpenFailed); })
+    .catch(function(){ toast(T.homeOpenFailed); });
 }
 
 function loadLedger(){
@@ -1019,7 +1052,7 @@ function loadLedger(){
 function ledgerRender(d){
   // 千分位：26565 在 21px 下很难一眼读出量级，26,565 才行。
   // 注意：这段 JS 长在模板字面量里，正则的反斜杠必须双写，否则会被模板吃掉；
-  // 另外**注释里也不能出现反引号**，否则会把 ADMIN_HTML 提前闭合（整段报 Invalid character）。
+  // 另外**注释里也不能出现反引号**，否则会把模板提前闭合（整段报 Invalid character）。
   var nf = function(n){ return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ","); };
   var put = function(id, v){
     var el = document.getElementById(id);
@@ -1030,9 +1063,7 @@ function ledgerRender(d){
   var u = d && d.usage;
   if(!u){
     put("lgEp"); put("lgSess"); put("lgMem"); put("lgUsed"); put("lgHits"); put("lgLinks");
-    if(note) note.textContent = (d && d.dbExists === false)
-      ? "还没有库 —— 第一次写入时才会创建，这不是故障。"
-      : "账本读不到（老库或缺字段），不影响正常使用。";
+    if(note) note.textContent = (d && d.dbExists === false) ? T.ledgerNoteNoDb : T.ledgerNoteUnreadable;
     return;
   }
   put("lgEp", u.episodes); put("lgSess", u.sessions);
@@ -1042,24 +1073,18 @@ function ledgerRender(d){
   if(usedCell) usedCell.classList.toggle("hot", u.used > 0);
   if(!note) return;
   if(u.memories <= 0){
-    note.textContent = "还没有记忆 —— AI 写下第一条之后，这里就开始计数。";
+    note.textContent = T.ledgerNoteNoMemories;
     return;
   }
   var unused = u.memories - u.used;
-  var tail = unused <= 0
-    ? "，每一条都被召回过。这很少见。"
-    : "；其中 " + nf(unused) + " 条还没被召回过 —— 正常，新记忆要等下次聊到相关话题才被想起来。";
-  if(u.episodes < 0){
-    // 老库没有 episodes 表：说清"读不到"而不是"零条"，否则像在指责用户没攒到东西。
-    note.textContent = "这个库没有原话表（早期版本建的），账本只统计记忆" + tail;
-    return;
-  }
-  if(u.episodes === 0){
-    note.textContent = "还没读过 AI 对话原文 —— 记忆目前是 AI 直接写下的" + tail;
-    return;
-  }
-  note.textContent = nf(u.episodes) + " 条原话（" + nf(u.sessions) + " 个会话）提炼出这 "
-    + nf(u.memories) + " 条记忆" + tail;
+  var all = unused <= 0;
+  // 三种口径 × 两种收尾 = 六句完整话。不做「主干 + 从句拼接」：英文的从句
+  // 要跟着主干改语序，拼出来的句子两种语言里总有一种是错的。
+  var s;
+  if(u.episodes < 0) s = all ? T.ledgerNoEpAll : T.ledgerNoEpSome;
+  else if(u.episodes === 0) s = all ? T.ledgerNoEpisodesAll : T.ledgerNoEpisodesSome;
+  else s = all ? T.ledgerFullAll : T.ledgerFullSome;
+  note.textContent = fmt(s, { ep: nf(u.episodes), sess: nf(u.sessions), mem: nf(u.memories), unused: nf(unused) });
 }
 
 function loadCloud(){
@@ -1072,104 +1097,101 @@ function cloudRender(d){
   var bound = !!d.hasConfig, on = !!d.enabled;
   var led = document.getElementById("led"), ledTxt = document.getElementById("ledTxt");
   if(led) led.className = on ? "led cloud" : "led";
-  if(ledTxt) ledTxt.textContent = on ? "云端模式" : "本地模式";
+  if(ledTxt) ledTxt.textContent = on ? T.cloudMode : T.localMode;
   var h = '<div class="crow">';
   if(bound && on){
-    var nameTxt = d.nameKnown ? esc(d.label) : (d.orgId ? esc(d.orgId) : "已绑定");
-    h += '<span class="cmode"><span class="dot cloud"></span>云端模式</span>'
-      + '<span>记忆写入组织 <b>' + nameTxt + '</b>'
+    var nameTxt = d.nameKnown ? esc(d.label) : (d.orgId ? esc(d.orgId) : esc(T.bound));
+    h += '<span class="cmode"><span class="dot cloud"></span>' + esc(T.cloudMode) + '</span>'
+      + '<span>' + fmt(T.cloudWritesTo, {org: nameTxt})
       + (d.nameKnown && d.orgId ? ' <span class="csub">(' + esc(d.orgId) + ')</span>' : '')
       + (d.deviceName ? ' · ' + esc(d.deviceName) : '')
-      + (d.boundAt ? ' <span class="csub">绑定于 ' + esc(String(d.boundAt).slice(0,10)) + '</span>' : '')
+      + (d.boundAt ? ' <span class="csub">' + esc(fmt(T.cloudBoundAt, {date: String(d.boundAt).slice(0,10)})) + '</span>' : '')
       + '</span><span class="sp"></span>'
-      + '<button onclick="cloudSwitch(false)">切到本地（保留密钥）</button>'
-      + '<button class="dgr" onclick="cloudUnbind()">解除绑定</button>';
+      + '<button onclick="cloudSwitch(false)">' + esc(T.cloudToLocal) + '</button>'
+      + '<button class="dgr" onclick="cloudUnbind()">' + esc(T.unbind) + '</button>';
   } else if(bound){
-    h += '<span class="cmode"><span class="dot local"></span>本地模式</span>'
-      + '<span>记忆只存本机 · <b>云端密钥仍保留</b>，随时可切回</span><span class="sp"></span>'
-      + '<button class="pri" onclick="cloudSwitch(true)">切换到云端</button>'
-      + '<button class="dgr" onclick="cloudUnbind()">解除绑定</button>';
+    h += '<span class="cmode"><span class="dot local"></span>' + esc(T.localMode) + '</span>'
+      + '<span>' + T.localKeepKey + '</span><span class="sp"></span>'
+      + '<button class="pri" onclick="cloudSwitch(true)">' + esc(T.cloudToCloud) + '</button>'
+      + '<button class="dgr" onclick="cloudUnbind()">' + esc(T.unbind) + '</button>';
   } else {
-    h += '<span class="cmode"><span class="dot local"></span>本地模式</span>'
-      + '<span>记忆只存本机 · 未绑定云端组织</span>';
+    h += '<span class="cmode"><span class="dot local"></span>' + esc(T.localMode) + '</span>'
+      + '<span>' + esc(T.localUnbound) + '</span>';
   }
   h += '</div>';
 
   h += '<details class="cbind"' + (bound ? '' : ' open') + '><summary>'
-    + (bound ? '更换 / 手动填写云端密钥' : '手动填写云端密钥，连接云端')
+    + esc(bound ? T.keyChange : T.keyFill)
     + '</summary>'
     + '<div class="crow">'
-    + '<input type="password" id="ckey" autocomplete="off" spellcheck="false" placeholder="粘贴云端密钥">'
-    + '<button class="pri" onclick="cloudBindKey()">连接</button>'
+    + '<input type="password" id="ckey" autocomplete="off" spellcheck="false" placeholder="' + esc(T.keyPh) + '">'
+    + '<button class="pri" onclick="cloudBindKey()">' + esc(T.connect) + '</button>'
     + '</div>'
     + '<div class="crow mt">'
-    + '<input type="text" id="capi" spellcheck="false" placeholder="API 地址（默认 ' + esc(d.apiBase || '') + '，自建部署才需要改）">'
+    + '<input type="text" id="capi" spellcheck="false" placeholder="' + esc(fmt(T.apiPh, {api: d.apiBase || ''})) + '">'
     + '</div>'
-    + '<div class="csub mt">密钥在云端控制台生成并复制'
-    + (d.consoleUrl ? '（<a href="' + esc(d.consoleUrl) + '" target="_blank" rel="noopener">打开控制台</a>）' : '')
-    + '。连接时会先拿它向服务端校验一次，<b>校验不通过则不改动本机配置</b>。</div>'
+    + '<div class="csub mt">' + esc(T.keyHintBefore)
+    + (d.consoleUrl ? fmt(T.keyHintConsoleLine, {link: '<a href="' + esc(d.consoleUrl) + '" target="_blank" rel="noopener">' + esc(T.keyHintConsole) + '</a>'}) : '')
+    + T.keyHintAfter + '</div>'
     + '</details>';
 
-  h += '<div class="cloudhint">切换 / 绑定 / 解绑后，需重启 AI 客户端（opencode、Cursor、WorkBuddy 等）才会生效'
-    + '——<b>未重启的客户端仍按旧模式读写</b>，这期间新写入的记忆会落到旧目标'
-    + '（切到本地前写云端、切到云端前写本地库）。</div>';
+  h += '<div class="cloudhint">' + T.cloudRestartHint + '</div>';
   el.innerHTML = h;
 }
 
 function cloudSwitch(toCloud){
   fetch(toCloud ? "/api/cloud/enable" : "/api/cloud/disable", {method:"POST"})
     .then(function(r){return r.json();}).then(function(d){
-      if(d && d.ok){ toast(toCloud ? "已切到云端模式" : "已切到本地模式（密钥保留）"); loadCloud(); }
-      else toast((d && d.error) || "切换失败");
-    }).catch(function(){ toast("切换请求失败"); });
+      if(d && d.ok){ toast(toCloud ? T.toastSwitchedCloud : T.toastSwitchedLocal); loadCloud(); }
+      else toast((d && d.error) || T.toastSwitchFailed);
+    }).catch(function(){ toast(T.toastSwitchReqFailed); });
 }
 
 function cloudBindKey(){
   var kEl = document.getElementById("ckey");
   var aEl = document.getElementById("capi");
   var key = kEl ? kEl.value.trim() : "";
-  if(!key){ toast("先粘贴云端密钥"); if(kEl) kEl.focus(); return; }
+  if(!key){ toast(T.toastNeedKey); if(kEl) kEl.focus(); return; }
   var body = { key: key };
   if(aEl && aEl.value.trim()) body.apiBase = aEl.value.trim();
   if(kEl) kEl.value = "";   // 立刻清空：密钥不留在输入框里等下一次截图
   fetch("/api/cloud/bind-key",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)})
     .then(function(r){return r.json();}).then(function(d){
-      if(d && d.ok){ toast("已连接云端：" + (d.label || "已绑定")); loadCloud(); }
-      else toast((d && d.error) || "连接失败");
-    }).catch(function(){ toast("连接请求失败"); });
+      if(d && d.ok){ toast(fmt(T.toastConnected, {label: d.label || T.bound})); loadCloud(); }
+      else toast((d && d.error) || T.toastConnectFailed);
+    }).catch(function(){ toast(T.toastConnectReqFailed); });
 }
 
 function cloudUnbind(){
-  if(!confirm("解除绑定会删除本机的云端密钥，且不可恢复——只能回云端控制台重新绑定。\\n\\n"
-    + "如果只是暂时想用本地模式，请点「切到本地（保留密钥）」，密钥会留着，随时能切回来。\\n\\n"
-    + "确定要解除绑定吗？")) return;
+  if(!confirm(T.confirmUnbind)) return;
   fetch("/api/cloud/unbind",{method:"POST"}).then(function(r){return r.json();}).then(function(d){
-    if(d && d.ok){ toast("已解除云端绑定"); loadCloud(); }
-    else toast((d && d.error) || "解除失败");
-  }).catch(function(){ toast("请求失败"); });
+    if(d && d.ok){ toast(T.toastUnbound); loadCloud(); }
+    else toast((d && d.error) || T.toastUnbindFailed);
+  }).catch(function(){ toast(T.toastReqFailed); });
 }
 
 function loadStats(){
   fetch("/api/stats").then(function(r){return r.json();}).then(function(s){
-    var parts = ["记忆 "+s.total+" 条"];
-    (s.byKind||[]).forEach(function(t){ parts.push(kindLabel(t.kind)+" "+t.c); });
+    var parts = [fmt(T.statsMemories, {n: s.total})];
+    (s.byKind||[]).forEach(function(t){ parts.push(fmt(T.statsKind, {kind: kindLabel(t.kind), n: t.c})); });
     var ep = s.episodes || {};
-    if(ep.total) parts.push("原话 "+ep.total+" 条 · "+ep.sessions+" 会话");
+    if(ep.total) parts.push(fmt(T.statsEpisodes, {n: ep.total, sess: ep.sessions}));
     // 记忆层最近一次写入距今多久 —— 直接回答「为什么看到的都是几天前的」
     var dist = s.distill || {};
     if(dist.ageDays !== null && dist.ageDays !== undefined){
-      parts.push(dist.ageDays <= 0 ? "记忆今天写过" : "记忆最近写入 "+dist.ageDays+" 天前（"+String(dist.lastMemoryLocal||"").slice(0,10)+"）");
+      parts.push(dist.ageDays <= 0 ? T.statsDistillToday : fmt(T.statsDistillDays, {n: dist.ageDays, date: String(dist.lastMemoryLocal||"").slice(0,10)}));
     }
-    var doms = (s.domains||[]).map(function(d){ return d.domain+"("+d.c+")"; }).join("、");
-    if(doms) parts.push("约束域: "+doms);
-    document.getElementById("stats").textContent = parts.join(" · ") + " · 设备: " + s.devices.join("、");
+    var doms = (s.domains||[]).map(function(d){ return d.domain+"("+d.c+")"; }).join(T.sepList);
+    if(doms) parts.push(fmt(T.statsDomains, {list: doms}));
+    parts.push(fmt(T.statsDevices, {list: s.devices.join(T.sepList)}));
+    document.getElementById("stats").textContent = parts.join(T.sepMd);
     distillRender(dist);
     var sel = document.getElementById("epSrc");
     if(sel && !sel.getAttribute("data-filled")){
       var srcs = ep.sources || [];
-      var h = '<option value="">全部来源</option>';
+      var h = '<option value="">' + esc(T.allSources) + '</option>';
       for(var i=0;i<srcs.length;i++){
-        h += '<option value="'+esc(srcs[i].source)+'">'+esc(srcs[i].source)+'（'+srcs[i].c+'）</option>';
+        h += '<option value="'+esc(srcs[i].source)+'">' + esc(fmt(T.srcOption, {src: srcs[i].source, n: srcs[i].c})) + '</option>';
       }
       sel.innerHTML = h;
       sel.setAttribute("data-filled","1");
@@ -1187,7 +1209,7 @@ function distillRender(d){
   el.className = "tipbar on " + (h.tone === "warn" ? "warn" : "off");
   el.innerHTML = DIST_ICON
     + '<div class="tb"><b>' + esc(h.title) + '</b><i>' + esc(h.detail) + '</i></div>'
-    + '<button class="lk" onclick="setKind(&#39;episodes&#39;)">看原话</button>';
+    + '<button class="lk" onclick="setKind(&#39;episodes&#39;)">' + esc(T.lookAtEpisodes) + '</button>';
 }
 
 function setTabs(k){
@@ -1197,7 +1219,7 @@ function setTabs(k){
 function showSessionBar(){
   var b = document.getElementById("sessbar");
   b.style.display = "flex";
-  document.getElementById("sessLabel").textContent = "会话 " + curSession + " 的全部记忆（按记录时间正序）";
+  document.getElementById("sessLabel").textContent = fmt(T.sessionLabel, {sid: curSession});
 }
 function hideSessionBar(){ document.getElementById("sessbar").style.display = "none"; }
 
@@ -1226,11 +1248,11 @@ var epQ = "", epSource = "", epDay = "", epSession = null;
 function epFilterSync(){
   var info = document.getElementById("epInfo");
   var bits = [];
-  if(epSession) bits.push("会话 "+epSession.slice(0,16)+"…");
-  if(epQ) bits.push("含「"+epQ+"」");
-  if(epDay) bits.push(epDay+" 当天");
-  if(epSource) bits.push("来源 "+epSource);
-  info.textContent = bits.length ? ("筛选中：" + bits.join(" · ")) : "";
+  if(epSession) bits.push(fmt(T.epFilterSession, {sid: epSession.slice(0,16)}));
+  if(epQ) bits.push(fmt(T.epFilterQuery, {q: epQ}));
+  if(epDay) bits.push(fmt(T.epFilterDay, {day: epDay}));
+  if(epSource) bits.push(fmt(T.epFilterSource, {src: epSource}));
+  info.textContent = bits.length ? fmt(T.epFilterPrefix, {bits: bits.join(T.epFilterJoin)}) : "";
 }
 function epFilterChange(){
   epSource = document.getElementById("epSrc").value || "";
@@ -1268,14 +1290,14 @@ function loadEpisodes(){
     total = d.total || 0;
     renderEpisodes(d.items||[], d.filter||{});
     renderPager();
-  }).catch(function(){ toast("原话加载失败"); });
+  }).catch(function(){ toast(T.toastEpLoadFailed); });
 }
 
 function renderEpisodes(items, f){
   var el = document.getElementById("list");
   if(!items.length){
     el.innerHTML = '<div class="empty">'
-      + (f && (f.q||f.day||f.source||f.session) ? '这组条件下没有原话，放宽筛选试试。' : '还没有采集到原话。')
+      + esc(f && (f.q||f.day||f.source||f.session) ? T.emptyEpFiltered : T.emptyEpNone)
       + '</div>';
     return;
   }
@@ -1284,11 +1306,11 @@ function renderEpisodes(items, f){
     var e = items[i];
     var isU = (e.role === "user");
     var safeSid = String(e.sessionId||"").replace(/["']/g, "");
-    var meta = '<span class="badge '+(isU?"ep-u":"ep-a")+'">'+(isU?"我":"AI")+'</span>'
+    var meta = '<span class="badge '+(isU?"ep-u":"ep-a")+'">'+esc(isU?T.roleMe:T.roleAi)+'</span>'
       + '<span>#'+e.id+'</span>'
       + '<span>'+fmtTime(e.recordedAt)+'</span>'
       + '<span class="badge">'+esc(e.source||"?")+'</span>';
-    if(e.chars > 240) meta += '<span class="window">'+e.chars+' 字 · 点击展开</span>';
+    if(e.chars > 240) meta += '<span class="window">'+esc(fmt(T.charsHint, {n: e.chars}))+'</span>';
     if(safeSid) meta += '<span class="badge" data-sid="'+esc(safeSid)+'" onclick="event.stopPropagation();epSessFromEl(this)">'+esc(safeSid.slice(0,14))+(safeSid.length>14?"…":"")+' ↗</span>';
     h += '<div class="card ep '+(isU?"u":"a")+'" data-eid="'+e.id+'">'
       + '<div class="meta">'+meta+'</div>'
@@ -1304,16 +1326,16 @@ function epToggle(card){
   if(!id) return;
   var ph = document.createElement("div");
   ph.className = "epfull eploading";
-  ph.textContent = "读取中…";
+  ph.textContent = T.loading;
   card.appendChild(ph);
   fetch("/api/episode?id="+encodeURIComponent(id))
     .then(function(r){return r.json();})
     .then(function(d){
-      if(!d.item){ ph.textContent = (d.error||"读取失败"); return; }
+      if(!d.item){ ph.textContent = (d.error || T.loadFailed); return; }
       ph.className = "epfull";
       ph.textContent = d.item.content;   // textContent 而非 innerHTML：原话原样呈现，不解析任何标记
     })
-    .catch(function(){ ph.textContent = "读取失败"; });
+    .catch(function(){ ph.textContent = T.loadFailed; });
 }
 
 function secBadge(escapedText){
@@ -1326,52 +1348,52 @@ function loadVault(){
   fetch("/api/vault").then(function(r){return r.json();}).then(function(d){
     var el = document.getElementById("list");
     if(!d.items || !d.items.length){
-      el.innerHTML = '<div class="empty">保险箱是空的。AI 写入记忆时用 [[xbb_secret_value:值]] 标记的凭据会自动入箱。</div>';
+      el.innerHTML = '<div class="empty">' + esc(T.emptyVault) + '</div>';
       return;
     }
     var h = "";
     for(var i=0;i<d.items.length;i++){
       var s = d.items[i];
-      var refTxt = s.refs > 0 ? ('被 '+s.refs+' 条记忆引用') : '<span class="dng">无引用 · 可清理</span>';
+      var refTxt = s.refs > 0 ? esc(fmt(T.refsSome, {n: s.refs})) : '<span class="dng">' + esc(T.refsNone) + '</span>';
       h += '<div class="card static">'
         + '<div class="meta">'
         + '<span class="badge vault">🔑 #'+s.id+'</span>'
-        + '<span>值 '+esc(s.mask)+'</span>'
-        + '<span>'+(s.label?('用途: '+esc(s.label)):'<em>无用途标签</em>')+'</span>'
+        + '<span>'+esc(fmt(T.vaultValue, {mask: s.mask}))+'</span>'
+        + '<span>'+(s.label ? esc(fmt(T.vaultLabel, {label: s.label})) : '<em>'+esc(T.vaultNoLabel)+'</em>')+'</span>'
         + '<span>'+fmtTime(s.updated_at)+'</span>'
         + '<span class="badge">'+refTxt+'</span>'
         + '</div>'
         + '<div class="acts l mt">'
-        + '<button onclick="vaultEditValue('+s.id+')">改密</button>'
-        + '<button onclick="vaultEditLabel('+s.id+')">改标签</button>'
-        + '<button class="dgr" onclick="vaultDel('+s.id+')">删除</button>'
+        + '<button onclick="vaultEditValue('+s.id+')">'+esc(T.vaultEditValue)+'</button>'
+        + '<button onclick="vaultEditLabel('+s.id+')">'+esc(T.vaultEditLabel)+'</button>'
+        + '<button class="dgr" onclick="vaultDel('+s.id+')">'+esc(T.del)+'</button>'
         + '</div></div>';
     }
     el.innerHTML = h;
   });
 }
 function vaultEditValue(id){
-  var v = prompt("输入新值（改密后所有引用该编号的记忆自动生效）：");
+  var v = prompt(T.promptNewValue);
   if(v === null) return;
-  if(!v.trim()){ toast("值不能为空"); return; }
+  if(!v.trim()){ toast(T.toastValueEmpty); return; }
   fetch("/api/vault/update",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,value:v.trim()})})
-    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast("已改密"); loadVault(); } else { toast(d.error||"失败"); } });
+    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast(T.toastValueChanged); loadVault(); } else { toast(d.error||T.toastFailed); } });
 }
 function vaultEditLabel(id){
-  var v = prompt("输入用途标签（如：服务器 SSH 密码；留空清除）：");
+  var v = prompt(T.promptNewLabel);
   if(v === null) return;
   fetch("/api/vault/update",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,label:v})})
-    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast("已保存"); loadVault(); } else { toast(d.error||"失败"); } });
+    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast(T.toastSaved); loadVault(); } else { toast(d.error||T.toastFailed); } });
 }
 function vaultDel(id){
-  if(!confirm("确定删除保险箱 #"+id+"？引用它的记忆里将只剩失效编号。")) return;
+  if(!confirm(fmt(T.confirmVaultDelete, {id: id}))) return;
   fetch("/api/vault/delete",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id})})
-    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast("已删除"); loadVault(); } else { toast(d.error||"失败"); } });
+    .then(function(r){return r.json();}).then(function(d){ if(d.ok){ toast(T.toastDeleted); loadVault(); } else { toast(d.error||T.toastFailed); } });
 }
 
 function doSession(){
   var sid = document.getElementById("q").value.trim();
-  if(!sid){ toast("先在搜索框粘贴会话编号，再点按会话查"); return; }
+  if(!sid){ toast(T.toastPasteSession); return; }
   if(curKind === "episodes"){
     epSession = sid.replace(/["']/g, "");
     epQ = "";
@@ -1433,7 +1455,7 @@ function doSearch(){
   document.getElementById("pager").innerHTML = "";
   fetch("/api/search?q="+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
     renderList(d.hits);
-    if(!d.hits.length) toast("没捞到，换个词试试");
+    if(!d.hits.length) toast(T.toastNoHits);
   });
 }
 document.getElementById("q").addEventListener("keydown", function(e){ if(e.key==="Enter") doSearch(); });
@@ -1444,21 +1466,21 @@ function openEdit(id){
     curId = id;
     var m = d.memory;
     curSystem = !!m.system;
-    document.getElementById("mTitle").textContent = "记忆 "+String(m.id).slice(0,8);
+    document.getElementById("mTitle").textContent = fmt(T.memoryTitle, {id: String(m.id).slice(0,8)});
     var meta = kindBadge(m);
     if((!m.kind || m.kind==="memory") && m.type && m.type!=="fact") meta += '<span class="badge">'+badge(m.type)+'</span>';
     meta += '<span>'+fmtTime(m.occurred_at||m.recorded_at)+'</span><span>'+esc(m.device||"")+'</span>';
     if(m.dscope) meta += '<span>scope: '+esc(m.dscope)+'</span>';
-    if(m.domain) meta += '<span class="domain">域·'+esc(m.domain)+'</span>';
+    if(m.domain) meta += '<span class="domain">'+esc(fmt(T.domainTag,{d:m.domain}))+'</span>';
     if(m.session_id){
       var safeSid = String(m.session_id).replace(/["']/g, "");
-      meta += '<span class="badge" data-sid="'+esc(safeSid)+'" onclick="event.stopPropagation();sessFromEl(this)">会话 '+esc(m.session_id)+' ↗</span>';
+      meta += '<span class="badge" data-sid="'+esc(safeSid)+'" onclick="event.stopPropagation();sessFromEl(this)">'+esc(fmt(T.sessionBadge,{sid:m.session_id}))+'</span>';
     }
-    if(m.starts_at) meta += '<span class="window">始于 '+esc(m.starts_at)+'</span>';
-    if(m.expires_at) meta += '<span class="window'+(expired(m)?' expired':'')+'">'+(expired(m)?'已过期 · ':'生效至 ')+esc(m.expires_at)+'</span>';
-    if(m.kind==="directive" && m.similar_sessions>0) meta += '<span class="window">相似 '+esc(m.similar_sessions)+' 个会话</span>';
-    if(m.hit_count>0) meta += '<span class="badge">命中 ×'+esc(m.hit_count)+'</span>';
-    if(m.superseded_by) meta += '<span class="badge" data-open="'+esc(m.superseded_by)+'">已延续 → '+esc(String(m.superseded_by).slice(0,8))+'</span>';
+    if(m.starts_at) meta += '<span class="window">'+esc(fmt(T.startsAt,{t:m.starts_at}))+'</span>';
+    if(m.expires_at) meta += '<span class="window'+(expired(m)?' expired':'')+'">'+(expired(m)?esc(T.expiredTag):esc(T.untilTag))+esc(m.expires_at)+'</span>';
+    if(m.kind==="directive" && m.similar_sessions>0) meta += '<span class="window">'+esc(fmt(T.similarSessionsN,{n:m.similar_sessions}))+'</span>';
+    if(m.hit_count>0) meta += '<span class="badge">'+esc(fmt(T.hitCount,{n:m.hit_count}))+'</span>';
+    if(m.superseded_by) meta += '<span class="badge" data-open="'+esc(m.superseded_by)+'">'+esc(fmt(T.supersededBy,{id:String(m.superseded_by).slice(0,8)}))+'</span>';
     document.getElementById("mMeta").innerHTML = meta;
     document.getElementById("mOrig").innerHTML = secBadge(esc(m.content));
     document.getElementById("mEdit").value = m.content;
@@ -1468,12 +1490,12 @@ function openEdit(id){
     (d.linksIn||[]).forEach(function(l){ lh += '<div class="linkrow">← '+esc(l.relation)+' #'+l.id+' '+esc(l.content.slice(0,60))+'</div>'; });
     document.getElementById("mLinks").innerHTML = lh;
     var ch = d.chain||[];
-    document.getElementById("mChainHead").innerHTML = ch.length ? "📜 延续链 · "+ch.length+" 环（[链头]=现状，点击跳转）" : "";
+    document.getElementById("mChainHead").innerHTML = ch.length ? esc(fmt(T.chainHead, {n: ch.length})) : "";
     document.getElementById("mChain").innerHTML = ch.map(function(c){
-      return '<div class="linkrow">'+(c.current?'<b class="cl">[链头·现状]</b> ':'[历史环] ')+'<span data-open="'+esc(c.id)+'">'+esc(String(c.content).slice(0,50))+'</span>'+(c.occurredAt?' <span class="window">'+esc(c.occurredAt)+'</span>':'')+'</div>';
+      return '<div class="linkrow">'+(c.current?'<b class="cl">'+esc(T.chainCurrent)+'</b>':esc(T.chainHistory))+' <span data-open="'+esc(c.id)+'">'+esc(String(c.content).slice(0,50))+'</span>'+(c.occurredAt?' <span class="window">'+esc(c.occurredAt)+'</span>':'')+'</div>';
     }).join("");
     var rl = d.related||[];
-    document.getElementById("mRelHead").innerHTML = rl.length ? "🕸 赫布关联 · "+rl.length+" 条（weight 排序，点击跳转）" : "";
+    document.getElementById("mRelHead").innerHTML = rl.length ? esc(fmt(T.relatedHead, {n: rl.length})) : "";
     document.getElementById("mRel").innerHTML = rl.map(function(r){
       var bar = ""; for(var i=0;i<Math.round((r.weight||0)*10);i++) bar += "▎";
       return '<div class="linkrow">'+esc(r.relation)+' <span class="cl">'+bar+'</span> '+(r.weight||0).toFixed(1)+' <span data-open="'+esc(r.id)+'">'+esc(String(r.content).slice(0,40))+'</span></div>';
@@ -1488,15 +1510,15 @@ function saveEdit(){
   if(!content || !curId) return;
   fetch("/api/update",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:curId,content:content})})
     .then(function(r){return r.json();}).then(function(d){
-      if(d.ok){ toast("已保存"); closeModal(); refresh(); } else { toast(d.error||"保存失败"); }
+      if(d.ok){ toast(T.toastSaved); closeModal(); refresh(); } else { toast(d.error||T.toastSaveFailed); }
     });
 }
 function delCur(){
   if(!curId) return;
-  if(!confirm("确定删除记忆 #"+curId+"？（软删除，可从数据库恢复）")) return;
+  if(!confirm(fmt(T.confirmDelete, {id: curId}))) return;
   fetch("/api/delete",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:curId})})
     .then(function(r){return r.json();}).then(function(d){
-      if(d.ok){ toast("已删除"); closeModal(); refresh(); } else { toast(d.error||"删除失败"); }
+      if(d.ok){ toast(T.toastDeleted); closeModal(); refresh(); } else { toast(d.error||T.toastDeleteFailed); }
     });
 }
 function refresh(){
@@ -1521,16 +1543,15 @@ function pModeChange(){
   pPreview = null;
   document.getElementById("pIn1").value = "";
   document.getElementById("pIn2").value = "";
-  if(m==="time"){ document.getElementById("pIn1").title = "起始日期"; document.getElementById("pIn2").title = "结束日期"; }
-  if(m==="session") document.getElementById("pIn1").placeholder = "会话编号";
+  if(m==="time"){ document.getElementById("pIn1").title = T.startDate; document.getElementById("pIn2").title = T.endDate; }
   if(m==="domain"){
     var sel = document.getElementById("pDom");
-    sel.innerHTML = '<option value="">加载中…</option>';
+    sel.innerHTML = '<option value="">' + esc(T.purging) + '</option>';
     fetch("/api/stats").then(function(r){return r.json();}).then(function(s){
       var doms = (s.domains||[]).filter(function(d){ return d.domain!=="小本本默认约束"; });
       sel.innerHTML = doms.length
-        ? doms.map(function(d){ return '<option value="'+esc(d.domain)+'">'+esc(d.domain)+'（'+d.c+' 条）</option>'; }).join("")
-        : '<option value="">暂无自定义域</option>';
+        ? doms.map(function(d){ return '<option value="'+esc(d.domain)+'">' + esc(fmt(T.domainOption, {d: d.domain, n: d.c})) + '</option>'; }).join("")
+        : '<option value="">' + esc(T.noCustomDomain) + '</option>';
     });
   }
 }
@@ -1552,25 +1573,25 @@ function pPurgePreview(){
       el.style.display = "block";
       if(d.error){ el.innerHTML = esc(d.error); pPreview = null; return; }
       pPreview = b;
-      var h = '<div class="ptitle">将物理删除 '+d.total+' 条（'+esc(d.desc)+'）：</div>';
+      var h = '<div class="ptitle">' + fmt(T.purgeWillDelete, {n: d.total, desc: esc(d.desc)}) + '</div>';
       (d.sample||[]).forEach(function(s){
-        h += '<div class="srow">#'+s.id+' · 命中×'+(s.hit_count||0)+' · '+esc(s.recorded_at||"")+' · '+esc(s.content.slice(0,60))+'</div>';
+        h += '<div class="srow">' + fmt(T.purgeSampleRow, {id: s.id, hits: (s.hit_count||0), date: esc(s.recorded_at||""), content: esc(String(s.content).slice(0,60))}) + '</div>';
       });
-      if(d.total > (d.sample||[]).length) h += '<div class="srow">…仅展示前 10 条，实际删除以总数为准</div>';
-      h += '<div class="acts l"><button class="dgr" onclick="pPurgeExec()">确认物理删除（不可恢复）</button></div>';
+      if(d.total > (d.sample||[]).length) h += '<div class="srow">' + esc(T.purgeMore) + '</div>';
+      h += '<div class="acts l"><button class="dgr" onclick="pPurgeExec()">' + esc(T.purgeConfirmBtn) + '</button></div>';
       el.innerHTML = h;
-      if(d.total===0){ el.innerHTML = '该维度下没有可删除的记忆。'; pPreview = null; }
+      if(d.total===0){ el.innerHTML = esc(T.purgeNothing); pPreview = null; }
     });
 }
 function pPurgeExec(){
-  if(!pPreview){ toast("请先点预览"); return; }
+  if(!pPreview){ toast(T.toastPreviewFirst); return; }
   var b = pParams();
   b.confirm = "DELETE";
-  if(!confirm("物理删除后无法从数据库恢复，确定执行？")) return;
+  if(!confirm(T.confirmPurge)) return;
   fetch("/api/purge",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(b)})
     .then(function(r){return r.json();}).then(function(d){
-      if(d.ok){ toast("已物理删除 "+d.deleted+" 条"); pPreview = null; document.getElementById("pResult").style.display = "none"; refresh(); }
-      else toast(d.error||"删除失败");
+      if(d.ok){ toast(fmt(T.toastPurged, {n: d.deleted})); pPreview = null; document.getElementById("pResult").style.display = "none"; refresh(); }
+      else toast(d.error||T.toastDeleteFailed);
     });
 }
 
@@ -1590,28 +1611,28 @@ function loadUpdate(){
     if(!d || !d.enabled || !d.latest){ el.style.display = "none"; return; }
     if(d.applied){
       el.style.display = "flex";
-      el.innerHTML = '<b>新版本 v' + esc(d.latest) + ' 已就位</b><span>重启小本本后生效。</span>';
+      el.innerHTML = '<b>' + esc(fmt(T.updateReady, {v: d.latest})) + '</b><span>' + esc(T.updateRestart) + '</span>';
       return;
     }
     if(!d.available){ el.style.display = "none"; return; }
     el.style.display = "flex";
-    el.innerHTML = '<b>发现小本本有新版本 v' + esc(d.latest) + '</b>'
-      + '<span>（当前 v' + esc(d.current) + '）要更新至 v' + esc(d.latest) + ' 吗？</span>'
+    el.innerHTML = '<b>' + esc(fmt(T.updateFound, {v: d.latest})) + '</b>'
+      + '<span>' + esc(fmt(T.updateAsk, {current: d.current, latest: d.latest})) + '</span>'
       + '<span class="sp"></span>'
-      + '<button class="pri" onclick="doUpdate()">立即更新</button>'
-      + '<button onclick="dismissUpdate(\\'' + esc(d.latest) + '\\')">以后再说</button>';
+      + '<button class="pri" onclick="doUpdate()">' + esc(T.updateNow) + '</button>'
+      + '<button onclick="dismissUpdate(\\'' + esc(d.latest) + '\\')">' + esc(T.updateLater) + '</button>';
   }).catch(function(){});
 }
 function doUpdate(){
   var el = document.getElementById("updatebar");
-  if(el) el.innerHTML = "正在下载并校验…";
+  if(el) el.innerHTML = esc(T.updateDownloading);
   fetch("/update", {method:"POST"}).then(function(r){return r.json();}).then(function(d){
     var st = d && d.result && d.result.status;
-    if(st === "swapped") toast("新版本已就位，重启小本本生效");
-    else if(st === "up_to_date") toast("已是最新版本");
-    else toast("更新未完成：" + ((d && d.result && (d.result.reason || d.result.status)) || "未知"));
+    if(st === "swapped") toast(T.toastUpdateReady);
+    else if(st === "up_to_date") toast(T.toastUpToDate);
+    else toast(fmt(T.toastUpdateIncomplete, {reason: (d && d.result && (d.result.reason || d.result.status)) || T.unknown}));
     loadUpdate();
-  }).catch(function(){ toast("更新请求失败"); loadUpdate(); });
+  }).catch(function(){ toast(T.toastUpdateReqFailed); loadUpdate(); });
 }
 function dismissUpdate(v){
   fetch("/update-dismiss", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({version:v})})
@@ -1625,7 +1646,7 @@ function ingestRender(d){
   if(!d || !d.active) return ingestHide(el);
   // 新一批原话进来了：只在「上次观察到的时刻」变了时提一次，别每次轮询都弹
   if(ingSeenAt && d.lastRunAt && d.lastRunAt !== ingSeenAt && d.lastInserted > 0 && !d.running){
-    toast("又整理了 " + d.lastInserted + " 条原话");
+    toast(fmt(T.toastIngested, {n: d.lastInserted}));
     if(curKind === "episodes") loadEpisodes();
   }
   if(d.lastRunAt) ingSeenAt = d.lastRunAt;
@@ -1637,16 +1658,16 @@ function ingestRender(d){
   el.className = "tipbar on " + mode; el.dataset.m = mode;
   var body = "", acts = "";
   if(mode === "busy"){
-    body = '<b>正在后台整理本机会话原文…</b><i>只读本机的对话记录，只写这台电脑上的库，你现在的操作不受影响。</i>';
+    body = '<b>' + esc(T.ingestBusyTitle) + '</b><i>' + esc(T.ingestBusyBody) + '</i>';
   } else if(mode === "off"){
-    body = '<b>自动整理已关闭</b><i>小本本不会再读本机会话原文；已入库的原话仍在，可在「原话」里查看或清理。</i>';
-    acts = '<button class="lk" onclick="ingestToggle(true)">重新开启</button>';
+    body = '<b>' + esc(T.ingestOffTitle) + '</b><i>' + esc(T.ingestOffBody) + '</i>';
+    acts = '<button class="lk" onclick="ingestToggle(true)">' + esc(T.ingestReopen) + '</button>';
   } else if(mode === "warn"){
-    body = '<b>自动整理连续 ' + d.failStreak + ' 次没成功</b><i>' + esc(d.lastError || "原因未知") + '</i>';
-    acts = '<button class="lk" onclick="ingestToggle(true)">再试一次</button>';
+    body = '<b>' + esc(fmt(T.ingestWarnTitle, {n: d.failStreak})) + '</b><i>' + esc(d.lastError || T.ingestUnknownReason) + '</i>';
+    acts = '<button class="lk" onclick="ingestToggle(true)">' + esc(T.ingestRetry) + '</button>';
   } else {
-    body = '<b>温馨提示：小本本在后台整理你的 AI 会话</b><i>为了让回忆接得上前因后果，它会定期读本机 AI 客户端（opencode / Cursor / Claude Code / Codex）的对话原文存进本地库 —— 只在这台电脑上，不上传云端。整理在后台跑，不占你操作。</i>';
-    acts = '<button class="lk" onclick="ingestDismiss()">知道啦</button><button class="lk mute" onclick="ingestToggle(false)">不要自动整理</button>';
+    body = '<b>' + esc(T.ingestTipTitle) + '</b><i>' + esc(T.ingestTipBody) + '</i>';
+    acts = '<button class="lk" onclick="ingestDismiss()">' + esc(T.ingestGotIt) + '</button><button class="lk mute" onclick="ingestToggle(false)">' + esc(T.ingestDisable) + '</button>';
   }
   el.innerHTML = (mode === "busy" ? '<span class="pulse"></span>' : ING_ICON) + '<div class="tb">' + body + '</div>' + acts;
 }
@@ -1656,9 +1677,9 @@ function ingestToggle(on){
   fetch("/api/ingest", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled:on})})
     .then(function(r){ return r.json(); })
     .then(function(d){
-      if(!d || !d.ok){ toast(d && d.error === "ingest_unavailable" ? "这个版本不支持自动整理" : "操作没生效"); return loadIngest(); }
-      keep(); toast(on ? "已打开，稍后自动整理" : "已关闭自动整理"); ingestRender(d);
-    }).catch(function(){ toast("请求失败"); });
+      if(!d || !d.ok){ toast(d && d.error === "ingest_unavailable" ? T.toastIngestUnsupported : T.toastIngestNoEffect); return loadIngest(); }
+      keep(); toast(on ? T.toastIngestOn : T.toastIngestOff); ingestRender(d);
+    }).catch(function(){ toast(T.toastReqFailed); });
 }
 loadHome(); loadLedger(); loadCloud(); loadStats(); loadList(); loadUpdate(); loadIngest();
 // 5 秒一轮很够用：采集是分钟级的节奏，轮询再密只是白白占用服务端的空闲判定
@@ -1667,3 +1688,4 @@ setInterval(function(){ if(!document.hidden) loadIngest(); }, 5000);
 </script>
 </body>
 </html>`;
+}
