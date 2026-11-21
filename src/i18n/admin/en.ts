@@ -60,12 +60,14 @@ export const adminEn: AdminDict = {
     btnCancel: "Cancel",
     btnSave: "Save",
     purgeTypeWord: "delete all memories",
+    langSwitchAria: "Interface language",
   },
 
   api: {
     dupContent: (id) => "Content duplicates memory #" + id,
     systemProtected:
       "The built-in default constraints are protected by the engine and cannot be deleted (reword them instead)",
+    badLang: "Unrecognized language (available: zh / en)",
     badParams: "Incomplete parameters or unknown dimension",
     noConfirm: "Missing explicit confirmation",
     purgeTypeMismatch: (word) => 'To wipe everything, type "' + word + '" in the box first',
@@ -94,6 +96,7 @@ export const adminEn: AdminDict = {
   },
 
   js: {
+    langFail: "Switch failed; the language is unchanged.",
     kindMemory: "Memories",
     kindDirective: "Directives",
     kindHabit: "Habits",

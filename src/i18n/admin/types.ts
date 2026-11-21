@@ -26,6 +26,8 @@
 
 /** 内联脚本用的字典：纯字符串 + `{name}` 占位。 */
 export interface AdminJsDict {
+  /** 语言开关请求失败时的提示（`alert` 里那半句，前面不拼任何固定话） */
+  langFail: string;
   // ── 类型徽章 ──
   kindMemory: string;
   kindDirective: string;
@@ -296,10 +298,14 @@ export interface AdminDict {
      * 放进字典是必须的：写死中文的话，英文界面会要求用户键入一句中文。
      */
     purgeTypeWord: string;
+    /** 右上角语言开关的 aria-label（屏幕阅读器念的那句） */
+    langSwitchAria: string;
   };
 
   /** 服务端 API 的错误与描述（页面拿到后原样显示） */
   api: {
+    /** `POST /api/lang` 收到认不出的语言码 */
+    badLang: string;
     dupContent: (id: string) => string;
     systemProtected: string;
     badParams: string;

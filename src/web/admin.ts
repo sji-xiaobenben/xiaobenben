@@ -27,7 +27,11 @@ import { existsSync } from "node:fs";
 // 产品元数据单一来源（此前此处硬编码 VERSION = "0.2.0"，与 build-meta 漂移）
 import { PRODUCT_NAME, PRODUCT_EN, VERSION, OFFICIAL_SITE } from "../build-meta";
 import { distillHint } from "./distill";
-import { dict, currentLang } from "../i18n";
+import { dict, currentLang, refreshLang, normalizeLang } from "../i18n";
+import type { Lang } from "../i18n";
+// 语言偏好写配置文件、不写库：换库不该换语言。写入失败（配置损坏且备份不成）会抛
+// ConfigCorruptError，那里面的 message 已经是完整人话，可以原样交给页面。
+import { writeHomeConfig, ConfigCorruptError } from "../home";
 
 type AnyDb = Database;
 
@@ -81,6 +85,10 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   const db = store.db;
   const guard = localGuard(req);
   if (guard) return guard;
+  // 语言跟着配置文件走。两条路径都会改到它：用户在另一个终端敲 `xbb lang en`，
+  // 或者刚点了本页右上角的开关。`dict()` 默认是进程内缓存的（CLI 每个命令一个新进程，
+  // 缓存本来也命中不了第二次），只有长期驻留的 serve 需要这次比对 —— 没变化时只是一次 stat。
+  refreshLang();
   const url = new URL(req.url);
   const p = url.pathname;
   // 这些串会原样进 toast / 预览区，所以是**给用户看的话**，不是错误码。
@@ -156,6 +164,27 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
   }
 
   // POST /api/update —— 编辑内容（同步 FTS + content_hash）
+  // POST /api/lang —— 从页面右上角切界面语言。写的是**配置文件**（跟着程序目录走），不是库：
+  // 换库不该换语言，同一台机器上两份数据用两种语言也没有意义。
+  // 这条接口存在的唯一理由是「不会敲命令的用户也得能切」。
+  if (p === "/api/lang" && req.method === "POST") {
+    const body = await readBody(req);
+    // 用 normalizeLang 而不是 isLang：`en-US` 这种也放行，跟 `xbb lang` 的宽容度保持一致。
+    const target = normalizeLang(String(body.lang ?? ""));
+    if (!target) return json({ error: api.badLang }, 400);
+    try {
+      writeHomeConfig({ lang: target }, "web.lang");
+    } catch (e) {
+      // 配置损坏且连备份都做不成时 home.ts 会**拒绝写入**（绝不拿原内容冒险），
+      // 它的 message 已经是完整人话，直接给页面显示。
+      if (e instanceof ConfigCorruptError) return json({ error: e.message }, 500);
+      throw e;
+    }
+    // 这里**不刷新**：页面拿到 ok 就整页重载，下一次请求会进 handleServe 的比对 ——
+    // 那才是唯一需要跟着文件走的地方。少一处重复，就少一处将来被改漏的地方。
+    return json({ ok: true, lang: target });
+  }
+
   if (p === "/api/update" && req.method === "POST") {
     const body = await readBody(req);
     const id = String(body.id ?? "");
@@ -583,6 +612,16 @@ function prettyRow(row: any) {
 
 // ── 管理页面（内嵌，零外部资源） ──
 /**
+ * 语言开关里各语言的名字 —— **不译**。
+ *
+ * 语言选择器按惯例显示每种语言自己的写法（GitHub、Google 的语言菜单都这样）：
+ * 英文界面里写 "Chinese" 时，中文用户反而得先在心里翻一次才知道该点哪个。
+ * 抽成常量是为了让测试能引用它 —— 页面上允许出现的汉字必须能指名道姓地解释，
+ * 不能靠在测试里随手放一个宽泛的例外。
+ */
+export const LANG_SELF_NAMES: Record<Lang, string> = { zh: "中文", en: "English" };
+
+/**
  * 生成整页 HTML —— **按请求现算**，不是模块级常量。
  *
  * 为什么必须是函数：页面语言跟着 `dict()` 走，而 `dict()` 是懒求值的。
@@ -601,6 +640,13 @@ function prettyRow(row: any) {
  */
 export function adminHtml(): string {
   const a = dict().admin;
+  // 语言开关：选中态与两个语言名都预算成裸标识符 —— 模板插值只允许裸标识符
+  // （`check-admin-html` 回归闸会拦表达式）。
+  const cur = currentLang();
+  const langZh = cur === "zh";
+  const langEn = cur === "en";
+  const nameZh = LANG_SELF_NAMES.zh;
+  const nameEn = LANG_SELF_NAMES.en;
   // `<` 必须转义：它出现在 JSON 字符串里时可能拼出 `</script`，那会提前结束整个脚本元素。
   const i18nJson = JSON.stringify(a.js).replace(/</g, "\\u003c");
   return `<!DOCTYPE html>
@@ -625,6 +671,13 @@ code{font-family:var(--mono);font-size:11.5px;color:var(--tx);background:var(--c
 .brand svg{display:block;flex:none;color:var(--brand)}
 .bn{font-weight:400;color:var(--tx3);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
 .stat{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--tx2);white-space:nowrap}
+/* 语言开关：两段式胶囊。各语言显示**自己的名字**（中文 / English），不随界面语言变 ——
+   否则英文界面里出现 "Chinese" 时，中文用户反而认不出该点哪个。 */
+.langsw{margin-left:12px;display:inline-flex;flex:none;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.langsw button{height:auto;padding:2px 8px;border:0;border-radius:0;background:none;font-size:11.5px;line-height:1.6;color:var(--tx3)}
+.langsw button+button{border-left:1px solid var(--line)}
+.langsw button:hover{background:var(--chip)}
+.langsw button[aria-pressed=true]{background:var(--chip);color:var(--tx);font-weight:600}
 .led{width:7px;height:7px;border-radius:99px;background:var(--tx3);flex:none}
 .led.cloud{background:var(--acc);box-shadow:0 0 0 3px var(--ring)}
 .search{display:flex;gap:8px;padding:24px 0 14px;flex-wrap:wrap}
@@ -779,6 +832,10 @@ textarea{width:100%;min-height:150px;padding:11px 13px;border:1px solid var(--li
       小本本<span class="bn">memory</span>
     </div>
     <div class="stat"><span class="led" id="led"></span><span id="ledTxt">${a.html.ledLocal}</span></div>
+    <div class="langsw" role="group" aria-label="${a.html.langSwitchAria}">
+      <button type="button" data-lang="zh" aria-pressed="${langZh}">${nameZh}</button>
+      <button type="button" data-lang="en" aria-pressed="${langEn}">${nameEn}</button>
+    </div>
   </div>
 </header>
 <main class="wrap">
@@ -878,6 +935,31 @@ var page = 0, pageSize = 20, total = 0;
 var ingSeenAt = null;
 var ingDismissed = false;
 var T = JSON.parse(document.getElementById("xbb-i18n").textContent);
+
+// 语言开关：写配置 → 整页重载。服务端每次请求都重新判定语言，所以重载即生效，
+// 不需要重启后台服务。已经是当前语言的那个按钮直接忽略，避免一次无谓的往返。
+(function(){
+  var box = document.querySelector(".langsw");
+  if (!box) return;
+  var btns = box.querySelectorAll("button");
+  Array.prototype.forEach.call(btns, function(b){
+    b.addEventListener("click", function(){
+      if (b.getAttribute("aria-pressed") === "true") return;
+      Array.prototype.forEach.call(btns, function(x){ x.disabled = true; });
+      fetch("/api/lang", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lang: b.getAttribute("data-lang") })
+      }).then(function(r){
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        location.reload();
+      }).catch(function(){
+        Array.prototype.forEach.call(btns, function(x){ x.disabled = false; });
+        alert(T.langFail);
+      });
+    });
+  });
+})();
 try { ingDismissed = localStorage.getItem("xbb.tip.ingest") === "1"; } catch(e){}
 // 占位符只有一层：{name} 换成调用方给的值，值里再出现花括号不会二次展开。
 function fmt(s, o){ return String(s).replace(/\\{(\\w+)\\}/g, function(_m, k){ var v = o ? o[k] : null; return v == null ? "" : String(v); }); }

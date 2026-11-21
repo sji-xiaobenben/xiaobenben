@@ -22,7 +22,7 @@
  * 第 2 条压过第 3 条是有意的：用户在中文 Windows 上敲了 `xbb lang en`，
  * 他要的是英文，不是"系统是中文所以还给你中文"。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homeConfigPath } from "../paths";
 import type { Dict, Lang } from "./types";
 import { zh } from "./zh";
@@ -108,9 +108,30 @@ function systemLocale(): string | null {
 }
 
 let cached: Resolution | null = null;
+/** 上面这份缓存是基于配置文件的哪个版本算出来的。`refreshLang()` 靠它判断"用户刚改过"。 */
+let cachedKey: string | null = null;
+
+/**
+ * 配置文件的「版本」—— mtime + size，文件不在就是 `absent`。
+ *
+ * 不用内容哈希：语言设置只有几个字节，改一次 mtime 必变；而哈希要把整个文件读进来，
+ * `xbb stats` 这种高频命令每敲一次都多读一次盘不划算。`absent` 单独一个值，
+ * 这样「删掉配置、回落到系统语言」也能被察觉 —— 否则从 `{lang:en}` 变成"没有文件"
+ * 会被当成没变化。
+ */
+function configKey(): string {
+  try {
+    const st = statSync(homeConfigPath());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "absent";
+  }
+}
 
 export function resolveLang(): Resolution {
   if (cached) return cached;
+  // 记录这次结论基于哪个版本 —— 必须在最前面：无论最后是哪一层生效，都从同一个配置快照算出来。
+  cachedKey = configKey();
 
   const envRaw = process.env.XBB_LANG?.trim() || null;
   const fromEnv = normalizeLang(envRaw);
@@ -128,11 +149,30 @@ export function resolveLang(): Resolution {
 }
 
 /**
- * 清掉缓存 —— 只在**测试**里用（改完 env / XBB_HOME 后要重新判定）。
- * 生产代码没有任何一处需要重新判定：进程活多久，语言就该定多久。
+ * 无条件清掉缓存 —— 只在**测试**里用（改完 env / XBB_HOME 后要重新判定）。
+ * 生产代码要走 `refreshLang()`：它先比对配置文件版本，没变就什么都不做。
  */
 export function resetLangCache(): void {
   cached = null;
+  cachedKey = null;
+}
+
+/**
+ * 配置文件变了就丢掉缓存，返回是否丢了。
+ *
+ * **只给长期驻留的 `serve` 用**，不是给所有调用点用的：
+ *   · CLI 每个命令一个新进程，缓存本来就命中不了第二次，无所谓；
+ *   · MCP 的 stdout 是协议通道，会话中途换语言只会让同一次交互里两种话术交替出现；
+ *   · 管理窗口不一样 —— 用户在另一个终端敲了 `xbb lang en`，或者点了页面右上角的开关，
+ *     刷新就该是新语言。这是唯一需要跟着文件走的地方。
+ *
+ * 没变化时零副作用：一次 `stat`，不读文件、不重建字典。
+ */
+export function refreshLang(): boolean {
+  if (cached && cachedKey === configKey()) return false;
+  cached = null;
+  cachedKey = null;
+  return true;
 }
 
 export function currentLang(): Lang {

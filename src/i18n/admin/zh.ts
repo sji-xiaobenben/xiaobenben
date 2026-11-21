@@ -52,11 +52,13 @@ export const adminZh: AdminDict = {
     btnCancel: "取消",
     btnSave: "保存",
     purgeTypeWord: "清空全部记忆",
+    langSwitchAria: "界面语言",
   },
 
   api: {
     dupContent: (id) => "与记忆 #" + id + " 内容重复",
     systemProtected: "「小本本默认约束」受引擎保护，不可删除（可编辑措辞）",
+    badLang: "认不出这个语言（可选 zh / en）",
     badParams: "参数不完整或维度无效",
     noConfirm: "缺少二次确认",
     purgeTypeMismatch: (word) => "清空全部需先在输入框键入「" + word + "」",
@@ -83,6 +85,7 @@ export const adminZh: AdminDict = {
   },
 
   js: {
+    langFail: "切换失败，语言没有改变。",
     kindMemory: "记忆",
     kindDirective: "叮嘱",
     kindHabit: "习惯",

@@ -13,7 +13,7 @@
  * 而 i18n 的判定是**带缓存**的，污染一次后面全错。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,7 @@ import {
   formatTime,
   LANGS,
   normalizeLang,
+  refreshLang,
   resetLangCache,
   resolveLang,
 } from "./i18n";
@@ -34,9 +35,9 @@ import { helpZh } from "./i18n/help/zh";
 import { en } from "./i18n/en";
 import { adminEn } from "./i18n/admin/en";
 import { adminZh } from "./i18n/admin/zh";
-import { adminHtml } from "./web/admin";
+import { adminHtml, LANG_SELF_NAMES } from "./web/admin";
 import { helpText } from "./cli-help";
-import { writeHomeConfig } from "./home";
+import { homeConfigPath, writeHomeConfig } from "./home";
 
 type EnvKey = "XBB_LANG" | "XBB_HOME" | "LC_ALL" | "LC_MESSAGES" | "LANG";
 const ENV_KEYS: EnvKey[] = ["XBB_LANG", "XBB_HOME", "LC_ALL", "LC_MESSAGES", "LANG"];
@@ -331,6 +332,9 @@ describe("管理页文案 —— 200 多条，键要对齐、英文里不许有�
     const DATA_LITERALS = ['"小本本默认约束"'];
     let text = html;
     for (const lit of DATA_LITERALS) text = text.split(lit).join("");
+    // 语言开关里那两个名字是**自指**的（中文界面写「中文」，英文界面也写「中文」），
+    // 从常量取而不是在测试里硬写一个「中文」—— 那样页面上允许出现什么汉字就没人说得清了。
+    for (const name of Object.values(LANG_SELF_NAMES)) text = text.split(name).join("");
     const stripped = text
       .split("小本本").join("")
       .replace(/\/\*[\s\S]*?\*\//g, "") // CSS 块注释
@@ -446,5 +450,52 @@ describe("终端显示宽度", () => {
   test("超宽不截断 —— 宁可错位也不要把一个词砍一半", () => {
     expect(padTo("Transcripts", 6)).toBe("Transcripts");
     expect(padTo("库文件", 2)).toBe("库文件");
+  });
+});
+
+describe("refreshLang —— 长期驻留的进程要跟着配置文件走", () => {
+  // 这一组守的是「管理窗口能不能热切换」。CLI 每个命令一个新进程，缓存命中不了第二次，
+  // 所以它从来不需要这段逻辑；出问题的只有 serve —— 它活几个小时，而用户在这期间
+  // 完全可能敲 `xbb lang en` 或者点页面右上角的开关。
+  test("配置文件没动：返回 false，字典对象原样复用（不做无谓重建）", () => {
+    writeHomeConfig({ lang: "zh" }, "test");
+    const first = dict();
+    expect(refreshLang()).toBe(false);
+    expect(dict()).toBe(first);
+  });
+
+  test("别人改了配置：同进程里 dict() 立刻跟上", () => {
+    writeHomeConfig({ lang: "zh" }, "test");
+    expect(currentLang()).toBe("zh");
+
+    // 模拟「另一个终端敲了 xbb lang en」：直接动文件，不经过本进程任何函数
+    writeFileSync(homeConfigPath(), JSON.stringify({ lang: "en" }), "utf8");
+    // mtime 精度随文件系统而异，显式推后一秒 —— 否则同一毫秒内两次写会被判成"没变"，
+    // 那是测试自己不稳，不是代码错。
+    const t = new Date(Date.now() + 1000);
+    utimesSync(homeConfigPath(), t, t);
+
+    expect(refreshLang()).toBe(true);
+    expect(currentLang()).toBe("en");
+  });
+
+  test("配置文件被删掉也要察觉 —— 回落到默认语言", () => {
+    // `configKey()` 把"文件不在"记成 absent 而不是空串，就是为了这一条：
+    // 从 `{lang:en}` 变成"没有文件"必须算变化。
+    writeHomeConfig({ lang: "en" }, "test");
+    expect(currentLang()).toBe("en");
+
+    rmSync(homeConfigPath());
+    expect(refreshLang()).toBe(true);
+    expect(currentLang()).toBe("zh");
+  });
+
+  test("刷新过一次之后不会一直返回 true", () => {
+    // 假如实现写成"永远 return true"，上面几条全都会绿 —— 它们只检查"变了要跟上"，
+    // 没检查"没变别乱动"。这一条补上另一半：否则每个请求都会重建一次字典。
+    writeHomeConfig({ lang: "en" }, "test");
+    expect(refreshLang()).toBe(true); // 首次：还没解析过
+    dict(); // 重新解析并记下新版本
+    expect(refreshLang()).toBe(false);
   });
 });
