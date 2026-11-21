@@ -26,6 +26,8 @@ export const en: Dict = {
 
   org: { personalSpace: "Personal space" },
 
+  shortcut: { description: "xiaobenben · a personal memory store for AI" },
+
   banner: { built: "built", fingerprint: "fingerprint", site: "official site" },
 
   langCmd: {

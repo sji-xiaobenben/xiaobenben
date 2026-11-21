@@ -21,6 +21,8 @@ export const zh: Dict = {
 
   org: { personalSpace: "个人空间" },
 
+  shortcut: { description: "小本本 · 面向 AI 的个人记忆库" },
+
   banner: { built: "构建", fingerprint: "指纹", site: "官方站点" },
 
   langCmd: {

@@ -71,6 +71,7 @@ import { programDir } from "./home";
 import { isCompiledExe } from "./updater";
 import { encodePsCommand, psLiteral } from "./notify";
 import { desktopExecQuote } from "./autostart";
+import { dict } from "./i18n";
 
 /** 开始菜单里显示的名字 —— 也是 lnk 文件名（Windows 用文件名做显示名）。 */
 export const SHORTCUT_NAME = "小本本";
@@ -90,8 +91,9 @@ export const LINUX_DESKTOP_FILE = "xbb.desktop";
  */
 export const SHORTCUT_ARGS = "start --open";
 
-/** 快捷方式描述（Windows 的「备注」栏，鼠标悬停可见）。 */
-export const SHORTCUT_DESCRIPTION = "小本本 · 面向 AI 的个人记忆库";
+/** 快捷方式描述（Windows 的「备注」栏、Linux 的 `Comment=`，鼠标悬停可见）—— 所以要跟语言走。
+ *  做成函数而非常量：语言可能在进程内被改（`xbb lang`），常量会把语言钉在 import 那一刻。 */
+export const shortcutDescription = () => dict().shortcut.description;
 
 /** 环境变量关闭开关：企业分发、纯净安装、CI 用得上（假值即可，如 `0`）。 */
 export const NO_SHORTCUT_ENV = "XBB_NO_SHORTCUT";
@@ -206,7 +208,7 @@ export function linuxDesktopEntry(o: { exec: string; icon?: string; name?: strin
     "Type=Application",
     "Version=1.0",
     `Name=${o.name ?? SHORTCUT_NAME}`,
-    `Comment=${o.comment ?? SHORTCUT_DESCRIPTION}`,
+    `Comment=${o.comment ?? shortcutDescription()}`,
     `Exec=${desktopExecQuote(o.exec)} ${SHORTCUT_ARGS}`,
   ];
   if (o.icon) lines.push(`Icon=${o.icon}`);
@@ -320,7 +322,7 @@ export async function ensureStartMenuShortcut(o: EnsureShortcutOpts = {}): Promi
         args: SHORTCUT_ARGS,
         workDir: dirname(exe),
         icon: `${await shortcutIconPath(exe)},0`,
-        description: SHORTCUT_DESCRIPTION,
+        description: shortcutDescription(),
       });
       const r = await (o.run ?? runPowershell)(script);
       if (r.code !== 0) {

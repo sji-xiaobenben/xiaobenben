@@ -43,6 +43,14 @@ export interface Dict {
   /** 管理页（`xbb serve` 网页）文案 —— 含服务端渲染、API 错误与内联脚本三块 */
   admin: AdminDict;
 
+  /**
+   * 开始菜单 / 应用菜单里的快捷方式描述（Windows 的「备注」栏、Linux 的 `Comment=`）。
+   * 鼠标悬停就看得见，属于界面。快捷方式**名字**是品牌名，不翻。
+   */
+  shortcut: {
+    description: string;
+  };
+
   banner: {
     /** 版本行里「构建 <时刻>」的那个词 */
     built: string;
