@@ -147,4 +147,25 @@ describe("语言开关：不重启服务就能换语言", () => {
     expect(html).toContain('data-lang="zh" aria-pressed="true"');
     expect(html).toContain('data-lang="en" aria-pressed="false"');
   });
+
+  test("语言名长短一样、文件时间戳又没变：照样得切过去", async () => {
+    // 这条守的是「用户点了开关却没反应」那个具体故障：
+    //   · `{"lang":"en"}` 与 `{"lang":"zh"}` **字节数完全相同**，size 判不出来；
+    //   · 服务自己处理一次点击可能就在同一毫秒里，时间戳粒度不够时也判不出来。
+    // 两次都把 mtime 压到同一个整秒值，把“靠文件版本号察觉变化”这条路彻底堵死 ——
+    // 此时还能切成功，靠的就是 POST 写完自己失效缓存。
+    // （CI 的 Windows 上真红过一次，本地因机器快慢不同恰好没撞上。）
+    const cfg = join(dir, "config.json");
+    const pinned = new Date("2020-01-01T00:00:00Z"); // 整秒：纳秒位是 0，两次设出来完全一样
+
+    expect((await postLang("en")).status).toBe(200);
+    utimesSync(cfg, pinned, pinned);
+    expect(await (await fetch(`${base}/ui`)).text()).toContain('<html lang="en">');
+
+    expect((await postLang("zh")).status).toBe(200);
+    utimesSync(cfg, pinned, pinned); // 时间戳回到切换前 → 只靠 stat 看不出任何变化
+
+    const html = await (await fetch(`${base}/ui`)).text();
+    expect(html).toContain('<html lang="zh-CN">');
+  });
 });

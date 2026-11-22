@@ -27,7 +27,7 @@ import { existsSync } from "node:fs";
 // 产品元数据单一来源（此前此处硬编码 VERSION = "0.2.0"，与 build-meta 漂移）
 import { PRODUCT_NAME, PRODUCT_EN, VERSION, OFFICIAL_SITE } from "../build-meta";
 import { distillHint } from "./distill";
-import { dict, currentLang, refreshLang, normalizeLang } from "../i18n";
+import { dict, currentLang, refreshLang, resetLangCache, normalizeLang } from "../i18n";
 import type { Lang } from "../i18n";
 // 语言偏好写配置文件、不写库：换库不该换语言。写入失败（配置损坏且备份不成）会抛
 // ConfigCorruptError，那里面的 message 已经是完整人话，可以原样交给页面。
@@ -180,8 +180,11 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
       if (e instanceof ConfigCorruptError) return json({ error: e.message }, 500);
       throw e;
     }
-    // 这里**不刷新**：页面拿到 ok 就整页重载，下一次请求会进 handleServe 的比对 ——
-    // 那才是唯一需要跟着文件走的地方。少一处重复，就少一处将来被改漏的地方。
+    // **写完自己失效一次缓存**，别指望下一请求靠 mtime 察觉：
+    // 从 `en` 切到 `zh` 字节数一模一样，如果这次写和上一次落在同一毫秒里，
+    // `configKey()` 分辨不出来 —— 用户点「中文」，页面重载后还是英文。
+    // （CI 的 Windows 上真红过一次，本地因为机器快慢不同恰好没撞上。）
+    resetLangCache();
     return json({ ok: true, lang: target });
   }
 

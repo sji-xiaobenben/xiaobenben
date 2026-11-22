@@ -112,17 +112,25 @@ let cached: Resolution | null = null;
 let cachedKey: string | null = null;
 
 /**
- * 配置文件的「版本」—— mtime + size，文件不在就是 `absent`。
+ * 配置文件的「版本」—— mtime（纳秒）+ size，文件不在就是 `absent`。
  *
  * 不用内容哈希：语言设置只有几个字节，改一次 mtime 必变；而哈希要把整个文件读进来，
  * `xbb stats` 这种高频命令每敲一次都多读一次盘不划算。`absent` 单独一个值，
  * 这样「删掉配置、回落到系统语言」也能被察觉 —— 否则从 `{lang:en}` 变成"没有文件"
  * 会被当成没变化。
+ *
+ * ⚠️ 这个判据**只能守"别的进程改的"**。本进程自己写配置之后不要指望它察觉：
+ * 手改/另开一个终端敲 `xbb lang` 必然跨毫秒，但服务自己响应一次点击可能就在同一毫秒里
+ * （而且 `en` 与 `zh` 字节数相同，size 帮不上忙）。所以 `POST /api/lang` 写完必须
+ * 自己调 `resetLangCache()`，两层各守一半，不是冗余。
  */
 function configKey(): string {
   try {
-    const st = statSync(homeConfigPath());
-    return `${st.mtimeMs}:${st.size}`;
+    // **必须取纳秒**（`bigint` + `mtimeNs`）。毫秒粒度下，`{"lang":"en"}` → `{"lang":"zh"}`
+    // 这种「字节数一模一样、只差一个字」的改动，在同一毫秒内写完会被判成"没变化"，
+    // 于是切了语言页面不动。CI 的 Windows 上就这么红过一次，而本地跑是绿的（机器快慢不一样）。
+    const st = statSync(homeConfigPath(), { bigint: true });
+    return `${st.mtimeNs}:${st.size}`;
   } catch {
     return "absent";
   }
@@ -149,8 +157,12 @@ export function resolveLang(): Resolution {
 }
 
 /**
- * 无条件清掉缓存 —— 只在**测试**里用（改完 env / XBB_HOME 后要重新判定）。
- * 生产代码要走 `refreshLang()`：它先比对配置文件版本，没变就什么都不做。
+ * 无条件清掉缓存。
+ *
+ * 两种用法：① 测试里改完 env / `XBB_HOME` 要重新判定；
+ * ② **`POST /api/lang` 写完配置文件之后**——写的人自己知道状态变了，比让 `configKey()`
+ *    去猜更可靠（同一毫秒内写完、又只差一个字母时，`configKey()` 是分辨不出来的）。
+ * 从别处来的改动仍然交给 `refreshLang()`：先比对版本，没变就什么都不做。
  */
 export function resetLangCache(): void {
   cached = null;
