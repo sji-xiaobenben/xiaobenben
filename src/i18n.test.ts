@@ -19,25 +19,30 @@ import { join } from "node:path";
 
 import {
   __setSystemLocaleForTest,
+  applyLangPreference,
   currentLang,
   dict,
   formatNumber,
   formatTime,
   LANGS,
   normalizeLang,
+  onLangChange,
   refreshLang,
   resetLangCache,
   resolveLang,
+  type Lang,
 } from "./i18n";
 import { columnWidth, displayWidth, padTo } from "./i18n/width";
 import { helpEn } from "./i18n/help/en";
 import { helpZh } from "./i18n/help/zh";
 import { en } from "./i18n/en";
+import { zh } from "./i18n/zh";
 import { adminEn } from "./i18n/admin/en";
 import { adminZh } from "./i18n/admin/zh";
 import { adminHtml, LANG_SELF_NAMES } from "./web/admin";
 import { helpText } from "./cli-help";
 import { homeConfigPath, writeHomeConfig } from "./home";
+import { trayMenu } from "./tray";
 
 type EnvKey = "XBB_LANG" | "XBB_HOME" | "LC_ALL" | "LC_MESSAGES" | "LANG";
 const ENV_KEYS: EnvKey[] = ["XBB_LANG", "XBB_HOME", "LC_ALL", "LC_MESSAGES", "LANG"];
@@ -497,5 +502,155 @@ describe("refreshLang —— 长期驻留的进程要跟着配置文件走", () 
     expect(refreshLang()).toBe(true); // 首次：还没解析过
     dict(); // 重新解析并记下新版本
     expect(refreshLang()).toBe(false);
+  });
+});
+
+describe("语言变更通知 —— 托盘这类「自己持有渲染结果」的界面靠它刷新", () => {
+  // 真实缺陷（老板 2026-11-23 报）：管理页点了 English，页面变英文了，
+  // **右下角托盘菜单还是中文**。根因不是漏翻 —— 菜单文案早就走字典了 ——
+  // 而是托盘菜单在子进程 spawn 后只下发**一次**（见 tray.ts 线协议），
+  // 换了字典没人去重建那个子进程，屏幕上那行字就永远停在旧语言。
+  //
+  // 这一组守两件事：① i18n 层能可靠地喊醒订阅者；② 被喊醒后重新取的字典确实是新的。
+  // 第 ② 件靠最后那条 trayMenu 断言，它复现的正是用户看到的那个菜单。
+
+  let seen: Lang[] = [];
+  let off: (() => void) | null = null;
+
+  beforeEach(() => {
+    seen = [];
+    off = onLangChange((l) => seen.push(l));
+  });
+
+  afterEach(() => {
+    off?.();
+    off = null;
+  });
+
+  test("写配置切语言：订阅者被叫醒，回调里 dict() 已经是新字典", () => {
+    writeHomeConfig({ lang: "zh" }, "test");
+    expect(currentLang()).toBe("zh");
+
+    // 用对象接而不是两个 let 变量：TS 的控制流分析不追踪闭包里的赋值，
+    // 两个 `let x: Lang | null = null` 在断言点会被窄化成 `null`，`toBe("en")` 直接编译不过。
+    const probe: { lang: Lang | null; exit: string | null } = { lang: null, exit: null };
+    off?.();
+    off = onLangChange(() => {
+      probe.lang = currentLang();
+      probe.exit = dict().tray.exit;
+    });
+
+    const before = currentLang();
+    writeHomeConfig({ lang: "en" }, "test");
+    applyLangPreference(before);
+
+    expect(seen).toEqual([]); // 这个订阅者是替换过的那个，不该追加到旧数组
+    expect(probe.lang).toBe("en"); // 缓存已失效：回调里读到的就是新语言
+    expect(probe.exit).toBe(en.tray.exit);
+  });
+
+  test("写成同一个值：不算变化，不通知（否则每次点当前语言都重建一次托盘）", () => {
+    writeHomeConfig({ lang: "en" }, "test");
+    expect(currentLang()).toBe("en");
+
+    const before = currentLang();
+    writeHomeConfig({ lang: "en" }, "test"); // 文件 mtime 变了，结论没变
+    applyLangPreference(before);
+
+    expect(seen).toEqual([]);
+  });
+
+  test("XBB_LANG 压过配置：文件变了但结论没变，同样不通知", () => {
+    // env 优先级最高。用户设了 `XBB_LANG=en` 时点页面上的「中文」，
+    // 配置确实被写成 zh，但界面仍然是英文 —— 这时候重建托盘是白做功。
+    setEnv({ XBB_LANG: "en" });
+    writeHomeConfig({ lang: "en" }, "test");
+    const before = currentLang();
+    expect(before).toBe("en");
+
+    writeHomeConfig({ lang: "zh" }, "test");
+    applyLangPreference(before);
+
+    expect(seen).toEqual([]);
+    expect(currentLang()).toBe("en");
+  });
+
+  test("别的进程改配置：refreshLang 察觉后也会通知", () => {
+    writeHomeConfig({ lang: "zh" }, "test");
+    expect(currentLang()).toBe("zh"); // 先让本进程缓存住
+
+    // 模拟「另一个终端敲了 xbb lang en」：只动文件，不经过本进程任何函数
+    writeFileSync(homeConfigPath(), JSON.stringify({ lang: "en" }), "utf8");
+    const t = new Date(Date.now() + 1000);
+    utimesSync(homeConfigPath(), t, t);
+
+    expect(refreshLang()).toBe(true);
+    expect(seen).toEqual(["en"]);
+  });
+
+  test("缓存本来就是空的：「不知道之前是什么」不算变化，不能通知", () => {
+    // 守 `prev === null` 那条分支。不守的话，serve 刚起来第一条定时器空转
+    // 就会把托盘无缘无故重建一遍（用户会看到图标闪一下）。
+    resetLangCache(); // beforeEach 已 reset，这里显式表达"确定是空的"
+    expect(refreshLang()).toBe(true); // 丢了个空缓存
+    expect(seen).toEqual([]);
+  });
+
+  test("订阅者抛错不影响切语言本身", () => {
+    off?.();
+    off = null;
+    const offBad = onLangChange(() => {
+      throw new Error("订阅者自己的 bug");
+    });
+    try {
+      writeHomeConfig({ lang: "zh" }, "test");
+      const before = currentLang();
+      writeHomeConfig({ lang: "en" }, "test");
+      expect(() => applyLangPreference(before)).not.toThrow();
+      expect(currentLang()).toBe("en");
+    } finally {
+      offBad();
+    }
+  });
+
+  test("退订之后不再收到通知", () => {
+    off?.();
+    off = null;
+    writeHomeConfig({ lang: "zh" }, "test");
+    const before = currentLang();
+    writeHomeConfig({ lang: "en" }, "test");
+    applyLangPreference(before);
+    expect(seen).toEqual([]);
+  });
+
+  test("托盘菜单真的跟着变 —— 这就是用户看到的那份菜单", () => {
+    // ⚠️ 这条必须**在订阅回调里**重建菜单，不能在 applyLangPreference 之后直接调 trayMenu()。
+    // 后者只能证明"缓存清空后 trayMenu 会读新字典"，而缓存是 applyLangPreference 自己清的 ——
+    // 于是把 notifyLangChange 整行删掉，它也照样绿（第一版就这么写的，变异验证抓出来了）。
+    // 真实链路是「通知 → index.ts 重建托盘子进程 → 重新拼菜单」，这里把第二步摆进回调。
+    writeHomeConfig({ lang: "zh" }, "test");
+    expect(currentLang()).toBe("zh");
+    const zhMenu = trayMenu("icon");
+
+    const rebuilt: { menu: ReturnType<typeof trayMenu> | null } = { menu: null };
+    off?.();
+    off = onLangChange(() => {
+      rebuilt.menu = trayMenu("icon"); // 订阅者被叫醒后才会重新拼
+    });
+
+    const before = currentLang();
+    writeHomeConfig({ lang: "en" }, "test");
+    applyLangPreference(before);
+
+    expect(rebuilt.menu).not.toBeNull(); // 没被通知到 = 托盘永远停在旧文案
+    const enMenu = rebuilt.menu!;
+    const zhExit = zhMenu.items[zhMenu.items.length - 1].title;
+    const enExit = enMenu.items[enMenu.items.length - 1].title;
+
+    expect(zhExit).toBe(zh.tray.exit);
+    expect(enExit).toBe(en.tray.exit);
+    expect(enExit).not.toBe(zhExit);
+    // 菜单项数量与顺序不受语言影响（`__id` 是点击派发的依据，错位等于点到别的动作）
+    expect(enMenu.items.map((i) => i.__id)).toEqual(zhMenu.items.map((i) => i.__id));
   });
 });

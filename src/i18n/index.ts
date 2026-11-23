@@ -156,17 +156,79 @@ export function resolveLang(): Resolution {
   return (cached = { lang: "zh", source: "default", raw: null });
 }
 
+// ── 语言变更订阅 ────────────────────────────────────────────────────────────
+//
+// 为什么需要它：**不是所有界面都是"请求时求值"的**。管理窗口每次请求重新拼 HTML，
+// 所以 `refreshLang()` 一句话就够；但系统托盘不一样 —— 菜单在子进程 spawn 后
+// 只下发**一次**（`tray.ts` 的线协议如此），语言变了不重建就永远是旧文案。
+// 这里给"持有自己那份渲染结果的人"一个被叫醒的机会。
+//
+// 纪律：订阅者**不许影响写配置的人**。任何回调抛错一律吞掉 —— 托盘是增强，
+// 没有让「切语言」这件事失败的权力（同 `tray.ts` 纪律 1、`notify.ts` 第 1 条）。
+
+type LangChangeListener = (lang: Lang) => void;
+
+const langChangeListeners = new Set<LangChangeListener>();
+
+/**
+ * 订阅"界面语言变了"。返回退订函数。
+ *
+ * 只会因**真的变了**被调用 —— 配置被重写成同一个值、`XBB_LANG` 压过配置导致
+ * 文件变了但结论没变，这些都不通知。调用时缓存已经清掉，回调里 `dict()` 拿到的是新字典。
+ */
+export function onLangChange(cb: LangChangeListener): () => void {
+  langChangeListeners.add(cb);
+  return () => {
+    langChangeListeners.delete(cb);
+  };
+}
+
+/**
+ * 缓存已失效之后调用：结论与 `prev` 不同就通知订阅者。
+ *
+ * `prev === null` 表示"上一个结论未知"（缓存本来就是空的）——那**不算变化**，
+ * 不能通知。否则 `serve` 刚起来、第一条定时器空转一次就会把托盘无缘无故重建一遍。
+ */
+function notifyLangChange(prev: Lang | null): void {
+  if (prev === null) return;
+  const now = currentLang();
+  if (prev === now) return;
+  for (const cb of langChangeListeners) {
+    try {
+      cb(now);
+    } catch {
+      /* 订阅者自己的错，不能反向影响写配置的人 */
+    }
+  }
+}
+
 /**
  * 无条件清掉缓存。
  *
  * 两种用法：① 测试里改完 env / `XBB_HOME` 要重新判定；
- * ② **`POST /api/lang` 写完配置文件之后**——写的人自己知道状态变了，比让 `configKey()`
- *    去猜更可靠（同一毫秒内写完、又只差一个字母时，`configKey()` 是分辨不出来的）。
+ * ② `applyLangPreference()` 内部 —— 本进程刚写完配置、还需要通知订阅者时走那条。
+ *
+ * "写的人自己知道状态变了"这件事不能只交给 `refreshLang()`：同一毫秒内写完、
+ * 又只差一个字母时（`en` 与 `zh` 字节数相同）`configKey()` 是分辨不出来的。
  * 从别处来的改动仍然交给 `refreshLang()`：先比对版本，没变就什么都不做。
  */
 export function resetLangCache(): void {
   cached = null;
   cachedKey = null;
+}
+
+/**
+ * **配置文件已经写好了**，`prev` 是写**之前**的结论 —— 失效缓存、必要时通知订阅者。
+ *
+ * 这是 `POST /api/lang` 唯一该调的东西。为什么参数是旧结论而不是新语言：
+ * ① 顺序安全 —— 调用方在 `writeHomeConfig` 之前取 `currentLang()`，拿到的必然是旧值，
+ *    不会出现"写太快、读回来已经是新的"这种判断；
+ * ② 结论要从「配置文件 + env + locale」重新算一遍，而不是信调用方以为的值 ——
+ *    `XBB_LANG` 设了英文时写配置成中文并不会真的切过去，这时通知订阅者重建托盘纯属浪费。
+ */
+export function applyLangPreference(prev: Lang): void {
+  resetLangCache();
+  notifyLangChange(prev);
 }
 
 /**
@@ -179,11 +241,14 @@ export function resetLangCache(): void {
  *     刷新就该是新语言。这是唯一需要跟着文件走的地方。
  *
  * 没变化时零副作用：一次 `stat`，不读文件、不重建字典。
+ * 变了则顺带通知订阅者（托盘等"自己持有渲染结果"的界面）。
  */
 export function refreshLang(): boolean {
   if (cached && cachedKey === configKey()) return false;
+  const prev = cached?.lang ?? null;
   cached = null;
   cachedKey = null;
+  notifyLangChange(prev);
   return true;
 }
 

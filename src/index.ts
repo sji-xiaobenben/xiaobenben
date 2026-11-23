@@ -20,7 +20,7 @@ import { runStartupRollback, confirmStartupSuccess } from "./update-rollback";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { helpText, helpTopic, isHelpRequest, overviewHelp } from "./cli-help";
-import { dict, formatNumber, formatTime, isLang, normalizeLang, resolveLang, currentLang, LANGS } from "./i18n";
+import { dict, formatNumber, formatTime, isLang, normalizeLang, resolveLang, currentLang, LANGS, refreshLang, onLangChange } from "./i18n";
 import { columnWidth, displayWidth, padTo } from "./i18n/width";
 
 const args = process.argv.slice(2);
@@ -263,11 +263,24 @@ if (cmd === "serve") {
      * 切换后重建托盘 —— **必须重建**：线协议只在 spawn 后下发一次菜单，
      * 状态行（「模式：本地/云端」）与两条切换项的灰态都不会自己刷新。
      * 重启一个几十毫秒的子进程，比赌一个没有文档的动态更新指令便宜。
+     *
+     * **串行化**：切模式、切自启、切语言三条路都会走到这里。并发进去会让两个
+     * `startTray()` 同时在跑，后完成的覆盖 `tray` 变量 —— 先起的那个 handle 就丢了，
+     * `process.on("exit")` 只 dispose 得到最后一个，托盘区会留下一个点不掉的孤儿图标。
      */
-    const rebuildTray = async () => {
-      tray?.dispose();
-      tray = await startTray(trayState());
-      wireTray();
+    let trayQueue: Promise<void> = Promise.resolve();
+    const rebuildTray = (): Promise<void> => {
+      trayQueue = trayQueue
+        .then(async () => {
+          tray?.dispose();
+          tray = await startTray(trayState());
+          wireTray();
+        })
+        .catch((e) => {
+          // 重建失败最多是菜单停在旧文案，服务本身不能因此受影响
+          console.warn("[xbb] 托盘重建失败:", e instanceof Error ? e.message : e);
+        });
+      return trayQueue;
     };
 
     /**
@@ -310,6 +323,31 @@ if (cmd === "serve") {
 
     tray = await startTray(trayState());
     wireTray();
+
+    /**
+     * 语言变了 → 重建托盘。**这是「切语言后托盘还是中文」那个 bug 的正解。**
+     *
+     * 托盘菜单不像管理页那样"每次请求重新拼 HTML"：菜单是 spawn 时一次性下发给
+     * Go 子进程的，之后我方再改内存里的字典，屏幕上那行字也不会变。所以必须整条重建。
+     *
+     * 触发有两条路，都在 `i18n` 里汇到同一个订阅：
+     *   · 点了管理页右上角的开关（`POST /api/lang`）；
+     *   · 在另一个终端敲了 `xbb lang en` —— 靠下面那个低频轮询察觉。
+     */
+    const offLangWatch = onLangChange(() => void rebuildTray());
+    process.on("exit", offLangWatch);
+
+    /**
+     * 语言「跟着配置文件走」的轮询 —— 只服务托盘。
+     *
+     * 管理窗口不需要它：`handleServe` 每次请求都 `refreshLang()`，刷新页面即生效。
+     * 但**用户不开页面时没人来触发**，托盘就会一直停在旧文案。2 秒一次 `stat`
+     * （没变化时不读文件、不重建字典）换"另一个终端改完语言，两秒内托盘跟上"，值。
+     */
+    const langTimer = setInterval(() => {
+      refreshLang(); // 变了会经 onLangChange 通知上面的回调
+    }, 2000);
+    langTimer.unref?.(); // 不靠它撑住进程
 
     // 托盘子进程必须显式收尾：它是**独立进程**，serve 退出（Ctrl+C / 关控制台窗口 / 崩溃）
     // 不会带走它 ⇒ 不清就会在托盘区留下一个点不掉的幽灵图标 + 一个孤儿进程。

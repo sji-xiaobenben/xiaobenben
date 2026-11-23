@@ -27,7 +27,7 @@ import { existsSync } from "node:fs";
 // 产品元数据单一来源（此前此处硬编码 VERSION = "0.2.0"，与 build-meta 漂移）
 import { PRODUCT_NAME, PRODUCT_EN, VERSION, OFFICIAL_SITE } from "../build-meta";
 import { distillHint } from "./distill";
-import { dict, currentLang, refreshLang, resetLangCache, normalizeLang } from "../i18n";
+import { dict, currentLang, refreshLang, applyLangPreference, normalizeLang } from "../i18n";
 import type { Lang } from "../i18n";
 // 语言偏好写配置文件、不写库：换库不该换语言。写入失败（配置损坏且备份不成）会抛
 // ConfigCorruptError，那里面的 message 已经是完整人话，可以原样交给页面。
@@ -172,6 +172,9 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     // 用 normalizeLang 而不是 isLang：`en-US` 这种也放行，跟 `xbb lang` 的宽容度保持一致。
     const target = normalizeLang(String(body.lang ?? ""));
     if (!target) return json({ error: api.badLang }, 400);
+    // 旧结论必须在写盘**之前**取：写完之后再读，缓存还是旧的能读到旧值，
+    // 但万一缓存已被别处清过，就会读到新值、误判成"没变化"、托盘不重建。
+    const before = currentLang();
     try {
       writeHomeConfig({ lang: target }, "web.lang");
     } catch (e) {
@@ -184,7 +187,10 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     // 从 `en` 切到 `zh` 字节数一模一样，如果这次写和上一次落在同一毫秒里，
     // `configKey()` 分辨不出来 —— 用户点「中文」，页面重载后还是英文。
     // （CI 的 Windows 上真红过一次，本地因为机器快慢不同恰好没撞上。）
-    resetLangCache();
+    //
+    // 用 `applyLangPreference` 而不是裸 `resetLangCache`：语言真变了还要
+    // **通知系统托盘重建子进程** —— 菜单只在 spawn 时下发一次，不重建就还是旧文案。
+    applyLangPreference(before);
     return json({ ok: true, lang: target });
   }
 
