@@ -62,6 +62,15 @@ export const en: Dict = {
       `${episodes} utterances across ${sessions} sessions (collected automatically, never uploaded)`,
     adminHint: (url) => `Admin window ${url} — same numbers, plus trends.`,
     unreadable: "unavailable",
+    search: {
+      title: (days, n) => `Retrieval health (last ${days} days, ${n} searches)`,
+      latency: (p50, p90, empty) => `Latency  median ${p50}ms · p90 ${p90}ms · empty ${empty}`,
+      vec: (rate, share, f) => `Semantic  used in ${rate} · ${share} found only by it · ${f}`,
+      failures: (n) => `${n} ${n === "1" ? "failure" : "failures"}`,
+      chan: (parts) => `Channels ${parts}`,
+      labels: { fts: "full-text", inv: "inverted", ent: "entity", ng: "split" },
+      none: "Retrieval health  no searches recorded yet (numbers appear once you start using it)",
+    },
   },
 
   missingDb: {

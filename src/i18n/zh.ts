@@ -54,6 +54,15 @@ export const zh: Dict = {
     transcripts: (episodes, sessions) => `${episodes} 条 / ${sessions} 场（自动采集，永不上云）`,
     adminHint: (url) => `管理窗口 ${url}  有同一组数和趋势。`,
     unreadable: "读不到",
+    search: {
+      title: (days, n) => `检索健康（近 ${days} 天 ${n} 次）`,
+      latency: (p50, p90, empty) => `耗时  中位 ${p50}ms · P90 ${p90}ms · 零命中 ${empty}`,
+      vec: (rate, share, f) => `语义  参与 ${rate} · 仅它捞到 ${share} · ${f}`,
+      failures: (n) => `故障 ${n} 次`,
+      chan: (parts) => `通道  ${parts}`,
+      labels: { fts: "全文", inv: "倒排", ent: "实体", ng: "拆词" },
+      none: "检索健康  还没有检索记录（用起来之后这里会有数）",
+    },
   },
 
   missingDb: {

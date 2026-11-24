@@ -110,6 +110,51 @@ export interface SearchHit {
   chain?: { id: string; content: string; occurredAt: string | null; createdAt: string; superseded: boolean }[];
 }
 
+/**
+ * 一次检索的观测快照。
+ *
+ * 存在的理由是**归因**，不是做报表：这个模块曾经两次静默失效（`linkedPreview` 永远空、
+ * 107 条被时间闸吞掉），两次都不是崩溃，都是「某一路悄悄返回了空/被裁掉了而没人察觉」。
+ * 事后想复盘「上周召回变差是哪天开始的、是哪一路塌的」，除了这张表**没有任何数据**。
+ *
+ * 因此这里的字段选择标准只有一条：**能不能用来区分「没有」和「坏了」**。
+ * 通道命中数分开记（而不是只记总数）就是为了这个 —— FTS 恒为 0 和 FTS 偶尔为 0
+ * 是完全不同的两个故障。耗时则用来区分「算得慢」和「在等锁」。
+ */
+export interface SearchStats {
+  /** 词群大小 */
+  termsN: number;
+  /** FTS trigram 通道命中条数 */
+  ftsN: number;
+  /** 倒排 `memory_terms` 通道命中条数（不含 n-gram 回退） */
+  invN: number;
+  /** 实体精确通道命中条数 */
+  entN: number;
+  /** n-gram 拆词回退命中条数（只在 ABC 全空时才有非零值） */
+  ngN: number;
+  /** 去重后的候选条数 */
+  candN: number;
+  hitN: number;
+  /** 只在混合检索里出现：ok / empty-index / not-ready / error */
+  vecStatus?: string;
+  /** 时间闸之后真正参与 RRF 的向量命中条数 */
+  vecN?: number;
+  tokens: number;
+  /** 词法管线耗时（ms） */
+  msLex: number;
+  /** 端到端耗时，含向量编码（ms） */
+  msAll: number;
+  /**
+   * 最终结果里每条命中的来源，按返回顺序：`L` = 词法榜、`V` = 纯向量榜。
+   *
+   * 「前 10 条里有几条是向量才捞到的」是最值钱的一个数：向量通道塌了的时候，
+   * 结果集看起来仍然完全正常（词法那几路照样能出东西），只有这个比值会掉到 0。
+   */
+  srcTop: string;
+  hasWindow: boolean;
+  budget: number;
+}
+
 export interface SearchResult {
   hits: SearchHit[];
   linkedPreview: { id: string; relation: string; preview: string }[];
@@ -133,6 +178,11 @@ export interface SearchResult {
    * 后者必须说出来 —— 否则它会把一堆字面相近的邻居当成答案。
    */
   lexNote?: string;
+  /**
+   * 本次检索的观测快照。**由调用方决定要不要落库** —— 检索本身是纯读函数，
+   * 不在这里产生写副作用（`searchMemory` 被测试直接调用了几十次，写库会污染计数）。
+   */
+  stats?: SearchStats;
 }
 
 /** 估算一条记忆的 token 占用（中文 ~1 字 ≈ 1 token，保守 + 头部开销） */
@@ -254,6 +304,7 @@ export function linkedPreviewFor(
 }
 
 export function searchMemory(db: Database, params: SearchParams): SearchResult {
+  const t0 = performance.now();
   const limit = Math.min(params.limit ?? 5, 10);
   const budget = params.budget ?? 2000;
   const terms = params.terms.map((t) => t.trim()).filter(Boolean);
@@ -318,6 +369,10 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   // 只在 A/B/C 三路**全空**时启用 —— 有任一命中就说明词对上了，再拆词只会把噪音掺进
   // 本来干净的结果里。这是纯粹的兜底路径，不参与正常排序。
   // 命中项在 matched 里带 `~` 前缀，打分时半权（见下方融合），回包时经 lexNote 明说。
+  // 倒排通道的命中数必须在 n-gram **之前**取：拆出来的 gram 会塞进同一个
+  // `termScores`，之后取就只能拿到「倒排 + 拆词」的合计，而这两路正好是
+  // 「正常命中」与「词没对上硬凑」的分界，正是最需要分开的两个数。
+  const invN = termScores.size;
   let ngGrams: string[] = [];
   if (!ftsScores.size && !termScores.size && !entityScores.size) {
     ngGrams = [...new Set(terms.flatMap(bigramsOf))];
@@ -543,6 +598,23 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     lexNote: ngGrams.length
       ? `词群原样一条都没命中（复合词在倒排里是精确等值），已自动拆成 2 字片段重搜（${ngGrams.slice(0, 6).join("/")}${ngGrams.length > 6 ? "…" : ""}）——结果偏字面相近，未必对题；不准就换更短的词再搜一次，或直接换 recall_topic / recall_timeline`
       : undefined,
+    stats: {
+      termsN: terms.length,
+      ftsN: ftsScores.size,
+      invN,
+      entN: entityScores.size,
+      // 只在 ABC 全空时 n-gram 才会跑，所以这里的差值就是从拆词里捞到的条数。
+      ngN: termScores.size - invN,
+      candN: candidates.size,
+      hitN: hits.length,
+      tokens: tokensUsed,
+      msLex: Math.round((performance.now() - t0) * 100) / 100,
+      msAll: Math.round((performance.now() - t0) * 100) / 100,
+      // 纯词法管线里所有命中都来自词法榜；混合检索会把它重算成 L/V 串。
+      srcTop: "L".repeat(hits.length),
+      hasWindow,
+      budget,
+    },
   };
 }
 
@@ -688,28 +760,40 @@ export async function searchHybrid(
   embedQuery: () => Promise<Float32Array | null>,
   params: SearchParams,
 ): Promise<SearchResult & { vecHits?: number }> {
+  const t0 = performance.now();
   const lexical = searchMemory(db, params);
+  /**
+   * 三个降级分支共用。**必须共用** —— 以前它们各自写一遍「展开 lexical」，
+   * 加统计时漏掉任何一条，那条分支就会带着 `msAll = 词法耗时` 落库，
+   * 读起来像「向量没花时间」，而降级恰恰是最需要看清耗时去向的场景。
+   */
+  const degraded = (vecStatus: NonNullable<SearchResult["vecStatus"]>, vecNote: string, vecN?: number) => ({
+    ...lexical,
+    vecStatus,
+    vecNote,
+    stats: lexical.stats
+      ? { ...lexical.stats, vecStatus, vecN, msAll: Math.round((performance.now() - t0) * 100) / 100 }
+      : undefined,
+  });
   try {
     const qv = await embedQuery();
     if (!qv) {
-      return {
-        ...lexical,
-        vecStatus: "not-ready",
-        vecNote:
-          "语义通道未就绪（向量模型还没加载完/加载失败），本次只有词法检索结果 —— 用词不同但意思相近的记忆可能漏掉，稍后重试一次能补上",
-      };
+      return degraded(
+        "not-ready",
+        "语义通道未就绪（向量模型还没加载完/加载失败），本次只有词法检索结果 —— 用词不同但意思相近的记忆可能漏掉，稍后重试一次能补上",
+      );
     }
     const rawVec = vecTopK(db, qv, 100);
     // 向量路走同一道时间闸（见 vecHitsWithin）。原实现完全不过滤。
     const vecHits = vecHitsWithin(db, rawVec, params.occurredFrom, params.occurredTo);
     if (vecHits.length === 0) {
-      return {
-        ...lexical,
-        vecStatus: rawVec.length ? "ok" : "empty-index",
-        vecNote: rawVec.length
+      return degraded(
+        rawVec.length ? "ok" : "empty-index",
+        rawVec.length
           ? "时间窗内没有语义相近的记忆（语义通道也按同一个时间范围过滤过了），本次结果全部来自词法检索"
           : "语义索引还是空的（本地还没有可检索的向量），本次只有词法检索结果",
-      };
+        0,
+      );
     }
 
     // RRF k=60：词法榜与向量榜各按名次贡献 1/(60+rank)
@@ -794,15 +878,25 @@ export async function searchHybrid(
       tokensUsed: tokens,
       vecHits: vecHits.length,
       vecStatus: "ok",
+      stats: lexical.stats
+        ? {
+            ...lexical.stats,
+            // 合并后条数与 token 都重算过，不能再沿用词法侧的旧值 ——
+            // 预算重算正是这个函数里最容易出错的一段，报出去的数必须是被返回的那一份。
+            hitN: merged.length,
+            tokens,
+            vecStatus: "ok",
+            vecN: vecHits.length,
+            msAll: Math.round((performance.now() - t0) * 100) / 100,
+            // 纯向量命中 = 词法三路一条都没捞到、只靠语义进来的那些。
+            srcTop: merged.map((h) => (lexIds.has(h.id) ? "L" : "V")).join(""),
+          }
+        : undefined,
     };
   } catch (e) {
     // 永不因向量故障挂 —— 但**必须说出来**。以前这里是裸 catch，返回一份和正常结果
     // 长得一模一样的词法结果，于是「语义通道崩了」和「真没这段记忆」在 AI 眼里没区别。
     const msg = e instanceof Error ? e.message : String(e);
-    return {
-      ...lexical,
-      vecStatus: "error",
-      vecNote: `语义通道出错（${msg.slice(0, 80)}），本次已退回词法检索 —— 结果可能不全`,
-    };
+    return degraded("error", `语义通道出错（${msg.slice(0, 80)}），本次已退回词法检索 —— 结果可能不全`);
   }
 }

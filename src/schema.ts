@@ -530,7 +530,7 @@ export function migrateV10(db: Database): void {
 }
 
 /** 目标结构版本：所有 migrateV* 收敛到的终点。healthz 靠它判断「服务活着但库还是旧的」。 */
-export const SCHEMA_TARGET_VERSION = 11;
+export const SCHEMA_TARGET_VERSION = 12;
 
 /**
  * V11：原话层补 bigram 倒排。
@@ -576,6 +576,45 @@ export function migrateV11(db: Database): void {
     }
   }
   db.exec("PRAGMA user_version = 11");
+}
+
+/**
+ * V12：检索观测表。
+ *
+ * 为什么**不能**写进 `events`：那张表是凭证层哈希链，`appendEvent` 每条都要算 prev_hash
+ * 并把整条链串起来，`verifyChain` 会从头遍历一遍。检索是读操作，一次搜索产生一条凭证
+ * 既不符合账本语义（账本记的是「状态被谁改了」），也会让链迅速膨胀、把校验拖成 O(全部搜索次数)。
+ * 所以观测数据必须另立一张**可变、可裁剪**的表 —— 它回答「发生了什么」，不承担「不可篡改」。
+ *
+ * 行数封顶由 `src/search-stats.ts` 在写入后自己裁（保留最近若干条），不在迁移里做：
+ * 迁移只负责结构。
+ */
+export function migrateV12(db: Database): void {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS search_stats (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       at         TEXT    NOT NULL,
+       terms_n    INTEGER NOT NULL,
+       fts_n      INTEGER NOT NULL,
+       inv_n      INTEGER NOT NULL,
+       ent_n      INTEGER NOT NULL,
+       ng_n       INTEGER NOT NULL,
+       cand_n     INTEGER NOT NULL,
+       hit_n      INTEGER NOT NULL,
+       vec_status TEXT,
+       vec_n      INTEGER,
+       tokens     INTEGER NOT NULL,
+       ms_lex     REAL    NOT NULL,
+       ms_all     REAL    NOT NULL,
+       src_top    TEXT    NOT NULL,
+       has_win    INTEGER NOT NULL,
+       budget     INTEGER NOT NULL
+     )`,
+  );
+  // 摘要只按时间倒序取最近 N 条，索引跟着走。
+  db.exec("CREATE INDEX IF NOT EXISTS idx_search_stats_at ON search_stats(at)");
+  const v = db.query("PRAGMA user_version").get() as { user_version: number };
+  if (v.user_version < 12) db.exec("PRAGMA user_version = 12");
 }
 
 /** 拿不到写锁时的总尝试次数。每次尝试内部还会各自等 `busy_timeout`（默认 3s）。
@@ -675,6 +714,7 @@ export function initSchemaV2(db: Database): void {
         migrateV9(db);
         migrateV10(db);
         migrateV11(db);
+        migrateV12(db);
         db.exec("COMMIT");
       } catch (e) {
         try {

@@ -91,6 +91,26 @@ export interface Dict {
     adminHint: (url: string) => string;
     /** 数字读不到时显示的词 —— 绝不显示 0（0 是结论，不是未知） */
     unreadable: string;
+    /**
+     * 检索健康摘要（`search_stats` 表）。
+     *
+     * 整句都做成函数而不是「标签 + 值」两段：四种语言里中英文的语序本来就不同，
+     * 拼半句会让英文变成「Latency 中位 …」这种杂交。宽度对齐交给调用方的 `padTo`。
+     */
+    search: {
+      title: (days: string, n: string) => string;
+      /** 「耗时  中位 12.3ms · P90 38.7ms · 零命中 4.2%」 */
+      latency: (p50: string, p90: string, empty: string) => string;
+      /** 「语义  参与 87% · 仅它捞到 31% · 故障 1 次」 */
+      vec: (rate: string, share: string, failures: string) => string;
+      /** 「故障 1 次」/「1 failure」—— 复数由各语言自己决定，不在这里拼 */
+      failures: (n: string) => string;
+      /** 「通道  全文 41% · 倒排 63% · 实体 12% · 拆词 2%」 */
+      chan: (parts: string) => string;
+      labels: { fts: string; inv: string; ent: string; ng: string };
+      /** 窗口内一次检索都没有 */
+      none: string;
+    };
   };
 
   missingDb: {

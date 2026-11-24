@@ -744,6 +744,53 @@ if (cmd === "serve") {
   row(L.recalled, d.stats.recalled(formatNumber(u.used), formatNumber(u.hits)));
   row(L.links, d.stats.links(formatNumber(u.links)));
   row(L.transcripts, d.stats.transcripts(formatNumber(u.episodes), formatNumber(u.sessions)));
+  // ── 检索健康（观测表）──
+  // 单独开一个**只读**连接：`readUsageCounts` 自开自关、不交 handle，为回传它去改签名
+  // 不值当，再开一次的代价是几毫秒。旧库还没有 `search_stats` 表时 `readSearchHealth`
+  // 返回 null，这一整段安静消失 —— 观测可以缺，主统计不能因此报错。
+  try {
+    const { Database } = await import("bun:sqlite");
+    const { readSearchHealth } = await import("./search-stats");
+    const ro = new Database(p, { readonly: true });
+    try {
+      const h = readSearchHealth(ro, 7);
+      if (h) {
+        const S = d.stats.search;
+        const num = (v: number | null, digits = 1) =>
+          v == null ? d.stats.unreadable : v.toFixed(digits);
+        const pct = (v: number | null) =>
+          v == null ? d.stats.unreadable : `${Math.round(v * 1000) / 10}%`;
+        console.log();
+        if (!h.n) {
+          console.log(S.none);
+        } else {
+          console.log(S.title("7", formatNumber(h.n)));
+          console.log(`  ${S.latency(num(h.p50ms), num(h.p90ms), pct(h.emptyRate))}`);
+          console.log(
+            `  ${S.vec(
+              pct((h.n - h.noVec) / h.n),
+              pct(h.vecShare),
+              S.failures(formatNumber(h.degraded)),
+            )}`,
+          );
+          console.log(
+            `  ${S.chan(
+              [
+                `${S.labels.fts} ${pct(h.chanRate.fts)}`,
+                `${S.labels.inv} ${pct(h.chanRate.inv)}`,
+                `${S.labels.ent} ${pct(h.chanRate.ent)}`,
+                `${S.labels.ng} ${pct(h.chanRate.ng)}`,
+              ].join(" · "),
+            )}`,
+          );
+        }
+      }
+    } finally {
+      ro.close();
+    }
+  } catch {
+    /* 观测缺了不影响主统计 */
+  }
   console.log();
   console.log(d.stats.adminHint("http://127.0.0.1:17630/ui"));
 } else if (cmd === "lang") {

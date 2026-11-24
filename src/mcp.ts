@@ -411,7 +411,15 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
           hits?: Array<{ id: string; payloads?: unknown }>;
           vecNote?: string;
           lexNote?: string;
+          stats?: import("./memory-search").SearchStats;
         };
+        // 观测先落库，**再把 stats 从回包里摘掉**：
+        // 它是给排障用的，AI 读它没有意义，还会白占每次检索的输出 token。
+        // 落库在 attachPayloads 之前也无所谓 —— 它只关心检索本身的数字。
+        if (r?.stats) {
+          const { recordSearchStats } = await import("./search-stats");
+          recordSearchStats(db(), r.stats);
+        }
         // 载荷提货单（只给引用与描述、不给字节）。无载荷的命中**不出现 payloads 键**。
         if (r?.hits?.length) {
           const { attachPayloads } = await import("./payloads");
@@ -420,12 +428,9 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
         // 降级说明必须送到 AI 眼前。少了这一句，「语义通道没跑 / 词没对上被拆词兜底」和
         // 「库里真没这段记忆」对它来说完全一样 —— 它会用肯定的语气告诉用户「没有相关记录」，
         // 或者把字面相近的邻居当答案。两条说明可能同时存在（向量降级 + 词法回退），合并成一条。
-        const note = [r.vecNote, r.lexNote].filter(Boolean).join("；");
-        if (note) {
-          const { vecNote, lexNote, ...rest } = r as { vecNote?: string; lexNote?: string };
-          return { ...rest, note };
-        }
-        return r as object;
+        const { stats, vecNote, lexNote, ...rest } = r;
+        const note = [vecNote, lexNote].filter(Boolean).join("；");
+        return note ? { ...rest, note } : rest;
       }),
   );
 
