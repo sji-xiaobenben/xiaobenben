@@ -281,3 +281,146 @@ describe("低置信：乱码查询不该被当成答案", () => {
     expect(r.lowConfidence).toBeUndefined();
   });
 });
+
+/**
+ * 弱证据的条数上限（2026-11-25）。
+ *
+ * 原先 `want = Math.min(cap, 10)`：正文提到话题、但写入时没挂实体的记忆，
+ * 一次最多兜回 10 条。这 10 是为了控体积拍的数，实际后果是**真实召回被吃掉**——
+ * 本机实测正文含「小本本」而没有实体挂边的有 38 条，剩下 28 条在话题召回里
+ * 永远看不见，而它们在库里明明存在。
+ *
+ * 现在跟随调用方的 `limit`（`cap` 仍限到 30），并且**超额部分必须报数**。
+ * 「悄悄吞掉」是这条链上最常见的那种病：没有任何报错，用户只会觉得"记了但找不到"。
+ */
+describe("弱证据条数：跟随 limit，超额必须报数", () => {
+  /** 独立库：主库里已经堆了链和实体，容易被别的断言串味 */
+  const d2 = mkdtempSync(join(tmpdir(), "xbb-mention-cap-"));
+  const s2 = PersonalStore.open(join(d2, "t.db"));
+  const db2 = s2.db;
+  const TOPIC = "紫电计划";
+  const N = 25;
+
+  afterAll(() => {
+    db2.close();
+    try {
+      rmSync(d2, { recursive: true, force: true });
+    } catch {
+      /* Windows 上 WAL 句柄释放有延迟 */
+    }
+  });
+
+  const ids = (r: unknown) =>
+    ((r as { mentions?: Array<{ memories: Array<{ id: string }> }> }).mentions ?? []).flatMap((s) =>
+      s.memories.map((m) => m.id),
+    );
+
+  test("准备 25 条只在正文里提到话题、没有实体挂边的记忆", async () => {
+    for (let i = 0; i < N; i++) {
+      await s2.deliver({ spaceId: "sp-1", actor: "ai-host", content: `第 ${i + 1} 次讨论：${TOPIC} 的排期与风险` });
+    }
+    // 弱证据是它们唯一的入口 —— 一条挂边都没有，才测得出这条路径
+    expect((db2.query("SELECT COUNT(*) AS c FROM memory_entity").get() as { c: number }).c).toBe(0);
+  });
+
+  test("limit 20 就给 20 条（旧实现钉死在 10）", () => {
+    const r = recallTopic(db2, TOPIC, 20);
+    // 反面：`want = Math.min(cap, 10)` 的实现这里只有 10 条，且没有任何提示
+    expect(ids(r).length).toBe(20);
+  });
+
+  test("超出的部分要报数，数字还必须出现在给模型读的那段话里", () => {
+    const r = recallTopic(db2, TOPIC, 20) as { mentionsOmitted?: number; mentionsNote?: string };
+    expect(r.mentionsOmitted).toBe(5);
+    // 只放机器字段等于没人看见：MCP 的直接消费者是模型，它读的是 note
+    expect(r.mentionsNote).toContain("5");
+  });
+
+  test("limit 小就少给，超额如实报（别固定发满 10 条的无用载荷）", () => {
+    const r = recallTopic(db2, TOPIC, 3) as { mentionsOmitted?: number };
+    expect(ids(r).length).toBe(3);
+    expect(r.mentionsOmitted).toBe(22);
+  });
+
+  test("凑得齐时不留截断字段（别让调用方以为永远还有隐藏条目）", () => {
+    const r = recallTopic(db2, TOPIC, 30) as { mentionsOmitted?: number };
+    expect(ids(r).length).toBe(N);
+    expect(r.mentionsOmitted).toBeUndefined();
+  });
+
+  test("给出来的 + 报出来的 = 库里真实可召条数（对得上账）", () => {
+    const r = recallTopic(db2, TOPIC, 20) as { mentionsOmitted?: number };
+    expect(ids(r).length + (r.mentionsOmitted ?? 0)).toBe(N);
+  });
+});
+
+/**
+ * 弱证据与实体锚定的边界（2026-11-25）。
+ *
+ * `mentionsNote` 对 AI 说的话是「这些只在正文里提到过、**并没有建立实体关联**」——
+ * 这是一句事实陈述，必须兑现。第一版直接拿 FTS 命中当池子，结果 171 条正文含
+ * 「小本本」的记忆里 133 条本来就挂在该实体上，它们没进 `sessions` 只是因为
+ * `limit` 卡在 30。混进 `mentions` 等于对 AI 说"这些记忆缺关联"，是硬性错误信息，
+ * 还会误导用户去补根本不缺的标注（本机真实库：171 条里真正无挂边的只有 38 条）。
+ */
+describe("弱证据的边界：有挂边的不许冒充「没建关联」", () => {
+  const d3 = mkdtempSync(join(tmpdir(), "xbb-mention-scope-"));
+  const s3 = PersonalStore.open(join(d3, "t.db"));
+  const db3 = s3.db;
+  const ENT = "苍梧工程";
+  const ANCHORED = 25;
+  let mentionOnly = "";
+
+  afterAll(() => {
+    db3.close();
+    try {
+      rmSync(d3, { recursive: true, force: true });
+    } catch {
+      /* Windows 上 WAL 句柄释放有延迟 */
+    }
+  });
+
+  test("准备：25 条挂在实体上 + 1 条只在正文提到", async () => {
+    const eid = Number(
+      db3.prepare("INSERT INTO entities (name, aliases) VALUES (?,?)").run(ENT, null).lastInsertRowid,
+    );
+    for (let i = 0; i < ANCHORED; i++) {
+      const id = (await s3.deliver({ spaceId: "sp-1", actor: "ai-host", content: `第 ${i + 1} 条：${ENT} 的施工日志` })).id;
+      db3.prepare("INSERT INTO memory_entity (memory_id, entity_id) VALUES (?,?)").run(id, eid);
+    }
+    mentionOnly = (await s3.deliver({ spaceId: "sp-1", actor: "ai-host", content: `顺口一提，${ENT} 那边好像停工了` })).id;
+    expect((db3.query("SELECT COUNT(*) AS c FROM memory_entity").get() as { c: number }).c).toBe(ANCHORED);
+  });
+
+  const ids = (r: unknown) =>
+    ((r as { mentions?: Array<{ memories: Array<{ id: string }> }> }).mentions ?? []).flatMap((s) =>
+      s.memories.map((m) => m.id),
+    );
+
+  test("挂边总数要报出来：给了 5 条，库里其实 25 条", () => {
+    const r = recallTopic(db3, ENT, 5) as { total: number; entityTotal?: number; entityOmitted?: number };
+    expect(r.total).toBe(5);
+    // 不说这一句，调用方会把 total:5 当成"这个话题只有 5 条"，据此下结论
+    expect(r.entityTotal).toBe(ANCHORED);
+    expect(r.entityOmitted).toBe(ANCHORED - 5);
+  });
+
+  test("有挂边、只是没进 limit 的条目不进 mentions", () => {
+    const r = recallTopic(db3, ENT, 5);
+    // 反面：不排挂边的实现会把剩下 20 条塞进 mentions，然后对 AI 说"这些没建关联"
+    expect(ids(r)).toEqual([mentionOnly]);
+  });
+
+  test("锚定结果里不许有重复 id", () => {
+    const r = recallTopic(db3, ENT, 5) as { sessions: Array<{ memories: Array<{ id: string }> }> };
+    const all = r.sessions.flatMap((s) => s.memories.map((m) => m.id));
+    // 反面：headOf 空分支不查 seenIds 的实现会把每条推两遍，一直推到 hardCap
+    expect(all.length).toBe(5);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  test("只有一条真·无挂边时不留截断字段", () => {
+    const r = recallTopic(db3, ENT, 5) as { mentionsOmitted?: number };
+    expect(r.mentionsOmitted).toBeUndefined();
+  });
+});

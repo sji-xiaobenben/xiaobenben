@@ -447,7 +447,8 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
   server.tool(
     "recall_topic",
     `Recall an entity's topic cluster ("what do we know about X"): all memories anchored to that entity, grouped by session, aliases included, chain heads guaranteed present.
-TWO TIERS, DO NOT MIX THEM: \`sessions\` are memories actually linked to the entity (strong evidence — this is what "we talked about X" means). \`mentions\` (only when present) are memories whose text merely contains the entity name but were never linked to it at write time — weak evidence: a passing "by the way, X..." counts as a mention too. Never present a \`mentions\` entry as something the user discussed about X; read its content first, and if it really belongs to the topic, say so. Its presence also means the entity annotation was missed at write time.`,
+TWO TIERS, DO NOT MIX THEM: \`sessions\` are memories actually linked to the entity (strong evidence — this is what "we talked about X" means). \`mentions\` (only when present) are memories whose text merely contains the entity name but were never linked to it at write time — weak evidence: a passing "by the way, X..." counts as a mention too. Never present a \`mentions\` entry as something the user discussed about X; read its content first, and if it really belongs to the topic, say so. Its presence also means the entity annotation was missed at write time.
+TRUNCATION IS REPORTED, NEVER HIDDEN: \`total\` is capped by \`limit\`, so a big topic returns only its most recent slice — \`entityTotal\` is how many memories the topic actually has and \`entityOmitted\` how many were left out. Same for \`mentionsOmitted\`. When either is present, say so ("there are N in total, here are the latest M") instead of implying you saw everything.`,
     { entity: z.string().min(1), limit: z.number().int().optional() },
     TOOL_ANNOTATIONS.recall_topic,
     async ({ entity, limit }) =>

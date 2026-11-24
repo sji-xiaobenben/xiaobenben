@@ -118,6 +118,25 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
     WHERE me.entity_id = ? AND m.deleted_at IS NULL
     ORDER BY m.occurred_at DESC, m.created_at DESC LIMIT ?
   `);
+
+  /**
+   * 主实体 + 大小写兄弟的**挂边总数**（不受 `cap` 影响）。
+   * 只用来在返回里诚实报一句"库里一共有多少条、这次给了多少条" —— 大实体上
+   * `total` 是 `limit` 的天花板，不说清就会被当成"这个话题就这么点内容"。
+   */
+  let entityTotal = 0;
+  if (ent) {
+    const ids = [ent.id, ...siblingIds];
+    entityTotal = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM memory_entity me JOIN memories m ON m.id = me.memory_id
+            WHERE me.entity_id IN (${ids.map(() => "?").join(", ")}) AND m.deleted_at IS NULL`,
+        )
+        .get(...ids) as { c: number }
+    ).c;
+  }
+
   const rows: TopicRow[] = ent ? (qEnt.all(ent.id, cap) as TopicRow[]) : [];
 
   const seenIds = new Set<string>(rows.map((r) => r.id));
@@ -135,9 +154,16 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
   const qNext = db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
   const qOne = db.prepare(`${TOPIC_ROW_SQL} WHERE id = ? AND deleted_at IS NULL`);
 
-  /** 被延续掉的条目换成它的**真链头**（现状）；链头已在结果里就跳过 */
+  /**
+   * 被延续掉的条目换成它的**真链头**（现状）；链头已在结果里就跳过。
+   *
+   * ⚠️ 没有 `superseded_by` 的条目**必须也查一次 `seenIds`**：它在锚定名单里时
+   * 返回自身，调用方 `rows.push(h)` 就等于把同一条推第二遍。这个洞漏了很久 ——
+   * 实测 limit 5 的实体返回 `total: 8`，其中 3 条是重复的同一个 id（一直推到
+   * `hardCap` 才停）。重复项不报错，只会让 `total` 虚高、让 AI 以为看到了更多东西。
+   */
   const headOf = (r: TopicRow): TopicRow | undefined => {
-    if (!r.superseded_by) return r;
+    if (!r.superseded_by) return seenIds.has(r.id) ? undefined : r;
     const head = walkToHead(db, r.id, qNext);
     if (seenIds.has(head)) return undefined;
     const hm = qOne.get(head) as TopicRow | undefined;
@@ -154,6 +180,9 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
    * 上下文预算，而调用方以为自己只要了 30 条。
    *
    * 被挤掉的那些不是丢了：它们仍在链里，`get_memory` 能看到完整故事线。
+   *
+   * 注意这个上限只管 `sessions`（强证据）。弱证据走独立字段 `mentions`，额度是它自己的
+   * `cap` —— 两者性质不同，调用方可以只读前者。混用一个预算会让"要么链头缺、要么弱证据缺"。
    */
   for (const r of [...rows]) {
     if (rows.length >= hardCap) break;
@@ -174,32 +203,66 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
   //   · <3 个字符 → trigram 生不出 gram（它就是这么设计的），只能 LIKE，
   //     但改成**单列排序**，让 `idx_memories_occurred` 的反向扫描能吃上，凑够就停。
   // 2 字词那条在超大库上仍会慢，所以额外用 `MENTION_SCAN_CAP` 兜住最坏情况。
+  /**
+   * 弱证据一次列多少条：**跟随调用方的 limit**，不再钉死在 10。
+   *
+   * 10 是当初为了控返回体积拍的数，实测在大实体上把真实召回吃掉了：正文含「小本本」
+   * 却没有实体挂边的有 38 条，只兜回 10 条 —— 剩下 28 条在话题召回里永远看不见，
+   * 而它们在库里明明存在。调用方既然要了 `limit` 条，就按 `limit` 给。
+   *
+   * 体积仍然可控：`cap` 已经被限到 30，且弱证据是**独立字段** `mentions`，
+   * 调用方可以只读 `sessions`。真被 `MENTION_SCAN_CAP` 截断时必须报出来
+   * （`mentionsOmitted`）—— 悄悄吞掉正是这条链上最常见的那种病。
+   */
+  const want = cap;
   const mentionRows: TopicRow[] = [];
+  /** 因为条数上限而没列出的弱证据（按链头去重；同一链条上的多个成员算一条） */
+  const mentionOmitted = new Set<string>();
+  /** 弱证据池是否被 MENTION_SCAN_CAP 截住 —— 截住了真实总数就只多不少 */
+  let mentionPoolCapped = false;
   if (name) {
     const chars = Array.from(name).length;
-    const want = Math.min(cap, 10);
     let pool: TopicRow[] = [];
+    /**
+     * **必须排掉已经有实体挂边的条目。**
+     *
+     * `mentions` 的语义是"只在正文里提到过、没有建立实体关联"，这句话要兑现。
+     * 第一版直接拿 FTS 命中当池子，结果 171 条正文含「小本本」的记忆里有 133 条
+     * 本来就挂在小本本实体上 —— 它们没进 `sessions` 只是因为 `limit` 卡在 30，
+     * 跟"缺实体标注"毫无关系。混进来等于对 AI 说"这些记忆没建关联"，是硬性错误信息。
+     *
+     * 真正无挂边的只有 38 条；这个数才是值得提醒用户去补标注的量。
+     */
+    const NOT_ATTACHED = "NOT EXISTS (SELECT 1 FROM memory_entity me WHERE me.memory_id = m.id)";
+    // LIKE 那一路用的是无别名的 TOPIC_ROW_SQL，列名只能裸写
+    const NOT_ATTACHED_BARE = "NOT EXISTS (SELECT 1 FROM memory_entity me WHERE me.memory_id = id)";
     if (chars >= 3) {
       // FTS5 短语：整串当字面量，内部的双引号要成对转义
       const phrase = `"${name.replace(/"/g, '""')}"`;
       pool = db.prepare(`
         SELECT m.id, m.content, m.type, m.session_id, m.occurred_at, m.superseded_by
         FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
-        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND ${NOT_ATTACHED}
         ORDER BY m.occurred_at DESC LIMIT ?
       `).all(phrase, MENTION_SCAN_CAP) as TopicRow[];
     } else {
       pool = db.prepare(`
         ${TOPIC_ROW_SQL}
-        WHERE deleted_at IS NULL AND content LIKE ? ESCAPE '\\'
+        WHERE deleted_at IS NULL AND content LIKE ? ESCAPE '\\' AND ${NOT_ATTACHED_BARE}
         ORDER BY occurred_at DESC LIMIT ?
       `).all(`%${likeEsc(name)}%`, MENTION_SCAN_CAP) as TopicRow[];
     }
+    mentionPoolCapped = pool.length >= MENTION_SCAN_CAP;
     for (const r of pool) {
       if (seenIds.has(r.id)) continue;
       const h = headOf(r);
-      if (h) { mentionRows.push(h); seenIds.add(h.id); }
-      if (mentionRows.length >= want) break;
+      if (!h) continue;
+      if (mentionRows.length >= want) {
+        mentionOmitted.add(h.id);
+        continue;
+      }
+      mentionRows.push(h);
+      seenIds.add(h.id);
     }
   }
 
@@ -240,6 +303,17 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
     // 拆簇是写入侧的问题，但读的人有权知道"还有几个同名的簇被合并进来了"
     out.mergedEntities = siblingIds.length;
   }
+  /**
+   * 锚定侧被 `limit` 截掉多少条，必须报出来。
+   *
+   * 大实体上「这次只给了 45 条、库里其实有 216 条」是最关键的一句 —— 不说，
+   * 调用方会把 `total: 45` 当成"这个话题只有 45 条"，然后据此下结论。
+   * 不额外查一次表：主实体挂边总数在取锚定时就一并取了。
+   */
+  if (ent && entityTotal > rows.length) {
+    out.entityTotal = entityTotal;
+    out.entityOmitted = entityTotal - rows.length;
+  }
   if (mentions.length) {
     /**
      * 这段说明必须给到 AI：`mentions` 里的条目**没有**实体关联，只是正文出现过这个词。
@@ -247,10 +321,17 @@ export function recallTopic(db: Database, entity: string, limit = 30) {
      * 顺带把数据卫生的问题点出来 —— 缺实体的记忆对话题召回是长期损失，值得提醒补。
      */
     out.mentions = mentions;
+    // 截断必须报数：池子被 MENTION_SCAN_CAP 截住时，真实数量可能还更多，用 "+" 标出来
+    const capped = mentionPoolCapped;
+    if (mentionOmitted.size > 0) out.mentionsOmitted = mentionOmitted.size;
     out.mentionsNote =
       `另有 ${mentionRows.length} 条**只在正文里提到过「${ent?.name ?? name}」、并没有建立实体关联**（已与上面的结果去重）。` +
       `这批是弱证据：提到不等于在讲这件事，引用前先看内容对不对题。` +
-      `若其中确有该挂到该实体下的条目，说明写入时漏了实体标注 —— 用 get_memory 看清内容后再决定要不要以它为准。`;
+      `若其中确有该挂到该实体下的条目，说明写入时漏了实体标注 —— 用 get_memory 看清内容后再决定要不要以它为准。` +
+      (mentionOmitted.size > 0
+        ? `\n还有 ${mentionOmitted.size}${capped ? "+" : ""} 条同类弱证据因返回体积没有列出，` +
+          `需要时用 search_memory 按关键词单独查。`
+        : "");
   }
   return out;
 }
