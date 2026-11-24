@@ -50,9 +50,59 @@ export interface ChainLink {
   current: boolean;
 }
 
-/** 展开某条记忆所在的延续链，返回按时间正序的链成员（链头带 current=true） */
-export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[] {
-  let head = id, hops = 0;
+/**
+ * 走到**真正的**链头（`superseded_by` 一路向上，直到没有后继）。
+ *
+ * ⚠️ **这里不许有跳数上限。**
+ * 原先有三处各自写了 `hops < 10`：本文件的 `resolveChain`、`memory-tools.ts` 的
+ * `chainHead`、以及 `searchMemory` 里链重定向那段内联循环。链一旦超过 10 层，
+ * 三处都会**停在中途并把这个中间节点当成现状**：`get_memory` 显示的"当前"是 10 代前的旧状态，
+ * `recall_topic` 的"链头保障在场"保障了一个假链头，`search_memory` 会把早已被推翻的旧值
+ * 当命中结果交出去。三者都不报错，因为"没走到头"和"本来就到头了"长得一模一样。
+ *
+ * 防环靠 `seen`，不靠跳数：数据库里若真出现 A→B→A 这种坏数据（曾经有过手写修复），
+ * 无上限循环会把进程挂死，跳到环上就停在原地 —— 返回一个错的答案，好过返回不了答案。
+ */
+export function walkToHead(db: Database, id: string, qNext?: ChainNextStmt): string {
+  const q = qNext ?? db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
+  const seen = new Set<string>([id]);
+  let cur = id;
+  for (;;) {
+    const r = q.get(cur) as { superseded_by: string | null } | undefined;
+    if (!r || !r.superseded_by) return cur;
+    if (seen.has(r.superseded_by)) return cur; // 环：停在原地，绝不无限循环
+    seen.add(r.superseded_by);
+    cur = r.superseded_by;
+  }
+}
+
+type ChainNextStmt = ReturnType<Database["prepare"]>;
+
+/**
+ * 遍历安全阀。
+ *
+ * 只防**异常长链**（坏数据、或某天有人把整本日志串成一条链），不是展示上限：
+ * 正常链 10~20 层，触到 500 说明数据形态已经不对了。在此之前一条都不会少。
+ */
+const CHAIN_SCAN_CAP = 500;
+
+/** 一次链展开的结果。**带 total/truncated** —— 不截断就别让人猜有没有截断。 */
+export interface ChainResolution {
+  links: ChainLink[];
+  /** 整条链的真实成员数（含链头） */
+  total: number;
+  /** true = `links` 被 `limit` 裁过，链里还有更早的成员没返回 */
+  truncated: boolean;
+}
+
+/**
+ * 展开某条记忆所在的延续链，返回按时间正序的链成员（链头带 current=true）。
+ *
+ * `limit` 是**输出**上限（默认 50，远大于实际链长），不是遍历上限 —— 遍历会走完整条链，
+ * 所以 `total` 永远是真实值。以前那个 10 既当遍历上限又当输出上限，导致
+ * 「链里有 15 条」这件事在返回值里完全看不出来。
+ */
+export function resolveChain(db: Database, id: string, limit = 50): ChainResolution {
   // 三条 SQL 各自只编译一次：原写法在 while 里 prepare，链越长编译次数越多，
   // 而语句字符串是常量、结果只随参数变，逐圈重编译是纯浪费。
   const qNext = db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
@@ -60,15 +110,11 @@ export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[]
     "SELECT id, content, occurred_at, created_at FROM memories WHERE superseded_by = ? AND deleted_at IS NULL ORDER BY created_at ASC",
   );
   const qOne = db.prepare("SELECT id, content, occurred_at, created_at FROM memories WHERE id = ?");
-  while (hops++ < maxLen) {
-    const r = qNext.get(head) as { superseded_by: string | null } | undefined;
-    if (!r || !r.superseded_by) break;
-    head = r.superseded_by;
-  }
+  const head = walkToHead(db, id, qNext);
   const members: { id: string; content: string; occurred_at: string | null; created_at: string; current: boolean }[] = [];
   const seen = new Set<string>([head]);
   const queue: string[] = [head];
-  while (queue.length && members.length < maxLen - 1) {
+  while (queue.length && members.length < CHAIN_SCAN_CAP) {
     const cur = queue.shift()!;
     const rows = qChildren.all(cur) as Array<{ id: string; content: string; occurred_at: string | null; created_at: string }>;
     for (const r of rows) {
@@ -82,9 +128,18 @@ export function resolveChain(db: Database, id: string, maxLen = 10): ChainLink[]
   if (headRow) members.push({ id: headRow.id, content: headRow.content, occurred_at: headRow.occurred_at ?? null, created_at: headRow.created_at, current: true });
   const key = (m: { occurred_at: string | null; created_at: string }) => normTime(m.occurred_at ?? m.created_at);
   members.sort((a, b) => (key(a) < key(b) ? -1 : 1));
-  return members.slice(-maxLen).map((m) => ({
-    id: m.id, content: m.content, occurredAt: m.occurred_at, createdAt: m.created_at, current: m.current,
-  }));
+  const total = members.length;
+  const kept = total > limit ? members.slice(-limit) : members;
+  // 截断时保留的是"最近的一批"，链头一般本来就在里面；万一不在（时钟倒挂），
+  // 就把链头补进去并挤掉最早那条 —— 少了链头的链等于没展开。
+  if (total > kept.length && !kept.some((m) => m.current)) kept[0] = members[members.length - 1]!;
+  return {
+    links: kept.map((m) => ({
+      id: m.id, content: m.content, occurredAt: m.occurred_at, createdAt: m.created_at, current: m.current,
+    })),
+    total,
+    truncated: total > kept.length,
+  };
 }
 
 export interface SearchParams {
@@ -183,6 +238,24 @@ export interface SearchResult {
    * 不在这里产生写副作用（`searchMemory` 被测试直接调用了几十次，写库会污染计数）。
    */
   stats?: SearchStats;
+  /**
+   * 最高原始余弦相似度（只在走混合检索、且向量通道有命中时出现）。
+   *
+   * `vecTopK` 是**无下限**取 top-100 的（设计如此：宁多不漏，交给 RRF 去排）。
+   * 后果是任何查询——包括一段乱码——都能凑出 2~4 条"语义邻居"。这个数把
+   * "最高的一条到底有多像"暴露出来，调用方才有办法判断这批是不是硬凑的。
+   */
+  vecTop1?: number;
+  /**
+   * `true` = 这批结果证据很弱：词法三路**一条硬命中都没有**（只有 n-gram 拆词凑的，
+   * 或干脆全空），同时语义相似度也没上来。
+   *
+   * 为什么不直接丢结果：返回空比返回弱相关更糟 —— 用户明明记得有这回事，
+   * 得到"没查到"会认为记忆库坏了。正确做法是**给结果并标明它不可靠**。
+   */
+  lowConfidence?: boolean;
+  /** 低置信时给调用方的人话说明（非低置信时不带）。 */
+  confidenceNote?: string;
 }
 
 /** 估算一条记忆的 token 占用（中文 ~1 字 ≈ 1 token，保守 + 头部开销） */
@@ -503,12 +576,9 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     } | undefined;
     if (!m) continue;
     if (m.superseded_by) {
-      let head = m.superseded_by, hops = 0;
-      while (hops++ < 10) {
-        const r2 = qSuperseded.get(head) as { id: string; superseded_by: string | null } | undefined;
-        if (!r2 || !r2.superseded_by) break;
-        head = r2.superseded_by;
-      }
+      // 走到**真链头**，不是走 10 跳。见 walkToHead 的说明：链超过 10 层时，
+      // 旧写法会把中途的中间节点当成现状返回，而且看起来完全正常。
+      const head = walkToHead(db, m.superseded_by, qSuperseded);
       if (hitIds.has(head)) continue;
       const hm = loadMem.get(head) as typeof m | undefined;
       if (!hm) continue;
@@ -548,7 +618,8 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   // ── 链共现：为每条命中挂延续链（轻量附注，跨命中去重，token 计入预算）──
   const chainShown = new Set<string>(hitIds);
   for (const h of hits) {
-    const links = resolveChain(db, h.id);
+    // 附注只取最近的一段（默认 50 条封顶），不截断链本身；管理页/取单条走完整链。
+    const links = resolveChain(db, h.id).links;
     const others = links.filter((l) => !chainShown.has(l.id));
     for (const l of others) chainShown.add(l.id);
     if (others.length) {
@@ -725,6 +796,28 @@ function vecTopK(
 const VEC_MODEL_REF = "bge-small-zh-v1.5/int8";
 
 /**
+ * 低于这个余弦相似度，就算"没真的像"。
+ *
+ * **实测标定，不是拍的**（2026-11-24，老板真实库 605 条记忆 / bge-small-zh-v1.5-int8）：
+ *
+ * | 查询类型 | top1 相似度区间 | 样本 |
+ * |---|---|---|
+ * | 与库内容相关 | 0.548 ~ 0.723 | 6 条 |
+ * | 无关但正常的中文（"今天中午吃什么"）| 0.409 ~ 0.509 | 4 条 |
+ * | 乱码（"zzkqxjv mwqpz"）| 0.459 ~ 0.566 | 5 条 |
+ *
+ * ⚠️ **两组在 0.548~0.566 是重叠的**，这是 bge-small-zh 的固有局限（中文句向量基线偏高、
+ * 区分度不够），不是实现问题。取 0.57 是这条重叠带的上沿：
+ * 非相关 9 条全被判弱，相关 6 条里误伤 1 条（0.548 那条）。
+ *
+ * 之所以敢取上沿：这个判据**还要叠加"词法三路一条硬命中都没有"**才生效，
+ * 误伤面已经很小；反过来，阈值取得松一点，乱码就照样被当答案——那正是要修的问题。
+ *
+ * 样本只有 15 条，换向量模型、或库的领域变了都必须重新标定。
+ */
+const VEC_WEAK_SIM = 0.57;
+
+/**
  * 给向量路补时间闸。
  *
  * 词法管线在组装 hits 时逐条判 occurredFrom/occurredTo，向量路却是把 top-100 **无条件**
@@ -795,6 +888,20 @@ export async function searchHybrid(
         0,
       );
     }
+
+    // ── 证据强度 ──
+    /**
+     * 两个条件同时成立才算"弱"：
+     *  ① 词法三路**一条硬命中都没有** —— 注意 n-gram 拆词命中的（`ngN`）不算：
+     *     那是"词没对上、硬拆成 2 字片段凑出来的"，正好是弱证据本身。
+     *  ② 语义最高相似度够不上门槛。
+     * 只要有一路硬命中，这条结果就有确定的字面依据，不该被标成"弱"——
+     * 文件里已经有过一次教训：多加一个含糊的判据，正常结果会被误伤，比不加更糟。
+     */
+    const top1 = vecHits[0]?.score ?? 0;
+    const hardHits =
+      (lexical.stats?.ftsN ?? 0) + (lexical.stats?.invN ?? 0) + (lexical.stats?.entN ?? 0);
+    const weak = hardHits === 0 && top1 < VEC_WEAK_SIM;
 
     // RRF k=60：词法榜与向量榜各按名次贡献 1/(60+rank)
     const K = 60;
@@ -878,6 +985,17 @@ export async function searchHybrid(
       tokensUsed: tokens,
       vecHits: vecHits.length,
       vecStatus: "ok",
+      // 最高相似度原样带出去：这是"这批像不像"的唯一硬指标，
+      // 而它此前被 RRF 的名次彻底掩盖（第 1 名得分 1/61，跟它有多像毫无关系）。
+      vecTop1: Math.round(top1 * 1000) / 1000,
+      ...(weak
+        ? {
+            lowConfidence: true,
+            confidenceNote:
+              `这批结果证据很弱：词法三路没有一条精确命中（全文/倒排/实体全 0），而语义最像的那条也只有 ${top1.toFixed(2)}（够不上 ${VEC_WEAK_SIM}）—— 它们大概率只是字面或语义上的邻居，不是用户要找的那件事。` +
+              `回答时不要把其中任何一条当事实陈述；要么如实说没找到，要么换更具体的词再搜一次。`,
+          }
+        : {}),
       stats: lexical.stats
         ? {
             ...lexical.stats,

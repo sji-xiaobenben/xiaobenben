@@ -411,6 +411,10 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
           hits?: Array<{ id: string; payloads?: unknown }>;
           vecNote?: string;
           lexNote?: string;
+          /** 低置信说明：调用方只看 `note`，这个字段本身不直接下发 */
+          confidenceNote?: string;
+          lowConfidence?: boolean;
+          vecTop1?: number;
           stats?: import("./memory-search").SearchStats;
         };
         // 观测先落库，**再把 stats 从回包里摘掉**：
@@ -428,8 +432,13 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
         // 降级说明必须送到 AI 眼前。少了这一句，「语义通道没跑 / 词没对上被拆词兜底」和
         // 「库里真没这段记忆」对它来说完全一样 —— 它会用肯定的语气告诉用户「没有相关记录」，
         // 或者把字面相近的邻居当答案。两条说明可能同时存在（向量降级 + 词法回退），合并成一条。
-        const { stats, vecNote, lexNote, ...rest } = r;
-        const note = [vecNote, lexNote].filter(Boolean).join("；");
+        // 三段说明的顺序是刻意的：低置信在最前 —— 它决定「这批到底能不能当答案」，
+        // 而降级说明只是解释「少了一路」。先说结论，再说原因。
+        // `vecTop1` 摘掉不下发：一个没有基准的相似度数字对 AI 只是噪音，
+        // 判据已经折进 lowConfidence 与 confidenceNote 里了。
+        const { stats, vecNote, lexNote, confidenceNote, vecTop1, ...rest } = r;
+        void vecTop1;
+        const note = [confidenceNote, vecNote, lexNote].filter(Boolean).join("；");
         return note ? { ...rest, note } : rest;
       }),
   );
@@ -437,7 +446,8 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
   // ── 其余七工具（本地独占）──
   server.tool(
     "recall_topic",
-    `Recall an entity's topic cluster ("what do we know about X"): all memories anchored to that entity, grouped by session, aliases included, chain heads guaranteed present.`,
+    `Recall an entity's topic cluster ("what do we know about X"): all memories anchored to that entity, grouped by session, aliases included, chain heads guaranteed present.
+TWO TIERS, DO NOT MIX THEM: \`sessions\` are memories actually linked to the entity (strong evidence — this is what "we talked about X" means). \`mentions\` (only when present) are memories whose text merely contains the entity name but were never linked to it at write time — weak evidence: a passing "by the way, X..." counts as a mention too. Never present a \`mentions\` entry as something the user discussed about X; read its content first, and if it really belongs to the topic, say so. Its presence also means the entity annotation was missed at write time.`,
     { entity: z.string().min(1), limit: z.number().int().optional() },
     TOOL_ANNOTATIONS.recall_topic,
     async ({ entity, limit }) =>

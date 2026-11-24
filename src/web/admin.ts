@@ -156,9 +156,14 @@ export async function handleServe(store: PersonalStore, req: Request): Promise<R
     `).all(id) as any[];
     const { resolveChain } = await import("../memory-search");
     const { getRelated } = await import("../memory-tools");
+    // 整条链都返回（含旁支）；只有异常长链才会被 limit 裁，此时把真实条数一并交给页面，
+    // 免得管理员把「看到的最早那条」当成这条记忆的起点。
+    const chainRes = resolveChain(db, id);
     return json({
       memory: prettyRow(row), terms, linksOut, linksIn,
-      chain: resolveChain(db, id).filter((l) => l.id !== id), // 延续链（不含自身；链头 current=true）
+      chain: chainRes.links.filter((l) => l.id !== id), // 延续链（不含自身；链头 current=true）
+      chainTotal: chainRes.total,                      // 真实条数（含链头）
+      chainTruncated: chainRes.truncated,
       related: getRelated(db, id),                            // 赫布邻居（有效权重 ÷ √度）
     });
   }

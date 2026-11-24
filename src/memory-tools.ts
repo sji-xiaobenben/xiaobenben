@@ -13,63 +13,246 @@
 import type { Database } from "bun:sqlite";
 import { localNow, autoSessionId } from "./memory-write";
 import { DEFAULT_DOMAIN } from "./seed";
-import { maskSecrets, resolveChain } from "./memory-search";
+import { maskSecrets, resolveChain, walkToHead } from "./memory-search";
 import { onRecalled } from "./recall-feedback";
 import { LINK_VISIBLE_MIN } from "./schema";
 import { attachPayloads, loadPayloadsFor } from "./payloads";
 
 const cut = (s: string, n = 30) => (s.length > n ? s.slice(0, n) + "…" : s);
 
-function chainHead(db: Database, id: string, maxHops = 10): string {
-  let head = id, hops = 0;
-  while (hops++ < maxHops) {
-    const r = db.prepare("SELECT id, superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL").get(head) as { id: string; superseded_by: string | null } | undefined;
-    if (!r || !r.superseded_by) break;
-    head = r.superseded_by;
-  }
-  return head;
+// 链头查找统一走 memory-search 的 walkToHead（无跳数上限、靠 seen 防环）。
+// 这里原先有一份 `maxHops = 10` 的副本：链超过 10 层时它返回的是**中间节点**，
+// 而 recallTopic 拿这个结果做「链头保障在场」——保障了一个假链头，还不报错。
+
+/**
+ * 话题簇召回：「我们上次聊的 X」——实体精确命中 + 按会话分组 + 链头保障在场。
+ *
+ * ⚠️ **两道召回，缺一不可**（2026-11-24 修）：
+ * 原先只有「`memory_entity` 显式挂边」这一道。于是**正文里明明提到了 X、但写入时没建立
+ * 实体关联**的记忆，`recall_topic` 永远看不到 —— 用户问「上次聊的 X 有哪些」，它只交出
+ * 一半，而且看起来完全正常（有结果、有分组、不报错）。实测本机库有 212 条记忆没有任何实体（用户抽测的另一份库是 258 条），
+ * 这些记忆对话题召回就是黑洞。
+ *
+ * 第二道用正文子串匹配补上。**但它是弱证据**：正文提到 X 不等于这条记忆在讲 X
+ * （"顺便说一句，X 那个事我不同意"也算提到）。所以两道的返回**分开**——
+ * `sessions` 是锚定过的（强），`mentions` 只是提到过（弱），让调用方自己判，
+ * 而不是混在一起假装一样可靠。这正是本模块一贯的原则：宁可说"这批证据弱"，不假装都强。
+ */
+type TopicRow = {
+  id: string; content: string; type: string; session_id: string | null;
+  occurred_at: string | null; superseded_by: string | null;
+};
+type EntRow = { id: number; name: string; aliases: string | null };
+
+/** LIKE 的通配符要转义，否则实体名里带 `_`（如 `user_name`）会变成"任意一个字符" */
+function likeEsc(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
-/** 话题簇召回：「我们上次聊的 X」——实体精确命中 + 按会话分组 + 链头保障在场 */
-export function recallTopic(db: Database, entity: string, limit = 30) {
-  const ent = db.prepare("SELECT id, name, aliases FROM entities WHERE name = ? OR aliases LIKE ?").get(entity, `%"${entity}"%`) as { id: number; name: string; aliases: string | null } | undefined;
-  if (!ent) return { entity, aliases: [], total: 0, sessions: [] };
-  let aliases: string[] = [];
-  try { aliases = ent.aliases ? JSON.parse(ent.aliases) : []; } catch { /* 忽略 */ }
+const TOPIC_ROW_SQL = "SELECT id, content, type, session_id, occurred_at, superseded_by FROM memories";
 
-  const rows = db.prepare(`
+/**
+ * 弱证据那一路最多捞多少条候选。
+ *
+ * 不是展示上限（展示是 10 条），是**扫描阀**：2 字实体只能 LIKE，在十年期大库上
+ * 没有这个阀就是「一个查询跑几秒」。取 200 —— 真实的"提到过"条目远比这多，
+ * 我们只要最近的那十条，多扫的部分纯浪费。
+ */
+const MENTION_SCAN_CAP = 200;
+
+export function recallTopic(db: Database, entity: string, limit = 30) {
+  const cap = Math.min(limit, 30);
+  const name = entity.trim();
+  if (!name) return { entity, aliases: [], total: 0, sessions: [] };
+
+  /**
+   * 实体名匹配分三档，由严到宽：精确名 > 别名 > 名字包含。
+   *
+   * 只取**一个**实体（最精确、名字最短的那个）——`recall_topic` 的语义是"一个话题"，
+   * 多实体合并会让 `total` 失去意义，也会把"青岚"和"青岚项目二期"糊成一个簇。
+   * 加子串档是为了「用户说的是全名、库里存的是简称」这类日常偏差。
+   */
+  const ent: EntRow | undefined =
+    (db.prepare("SELECT id, name, aliases FROM entities WHERE name = ? LIMIT 1").get(name) as EntRow | undefined) ??
+    (db.prepare("SELECT id, name, aliases FROM entities WHERE aliases LIKE ? ESCAPE '\\' ORDER BY length(name) ASC LIMIT 1")
+      .get(`%"${likeEsc(name)}"%`) as EntRow | undefined) ??
+    (db.prepare("SELECT id, name, aliases FROM entities WHERE name LIKE ? ESCAPE '\\' ORDER BY length(name) ASC LIMIT 1")
+      .get(`%${likeEsc(name)}%`) as EntRow | undefined);
+
+  /**
+   * 同一实体的**大小写变体**必须一起取。
+   *
+   * 真实库上实测：`小本本`(216 条) / `XiaoBenBen`(28) / `xiaobenben`(21) 是**三个独立实体**。
+   * 写入侧的实体归一只做完全相等，于是同一件事被拆成三个簇 —— 只取最大的那个，
+   * 剩下 49 条对 `recall_topic("小本本")` 就是黑洞。这正是「簇总量 20、提到 20 仍不出现」
+   * 那类漏召回的另一个成因（根因是写入时没有归一，这里只能补救）。
+   *
+   * 判据刻意收得很窄：**忽略大小写后完全相同**才算同一个。不按前后缀、不按包含关系，
+   * 因为「青岚」和「青岚项目二期」是真的两件事，合并会把话题搅浑。
+   */
+  const siblingIds: number[] = [];
+  if (ent) {
+    const sib = db.prepare("SELECT id FROM entities WHERE lower(name) = lower(?)").all(ent.name) as Array<{ id: number }>;
+    for (const r of sib) if (r.id !== ent.id) siblingIds.push(r.id);
+  }
+
+  let aliases: string[] = [];
+  if (ent) {
+    try { aliases = ent.aliases ? JSON.parse(ent.aliases) : []; } catch { /* 忽略损坏的别名 JSON */ }
+  }
+
+  // ── 第一道：显式锚定 ──
+  /**
+   * **主实体先独占 `cap` 个名额，兄弟实体和链头只能在剩余额度里补。**
+   *
+   * 这条顺序是硬约束，不是洁癖：第一版把主实体和大小写兄弟塞进同一个
+   * `WHERE entity_id IN (...)` 再 `LIMIT cap`，实测自指召回率从 100% 掉到 94.1%
+   * —— 兄弟实体的记忆按时间排进来，把主实体自己的条目挤出了名单。
+   * "为了让 A 能被搜到，把 B 挤掉"不是改进，是换了个地方漏。
+   * 现在的形态保证：**旧实现能拿到的，一条都不会少**。
+   */
+  const hardCap = cap + Math.ceil(cap / 2);
+  const qEnt = db.prepare(`
     SELECT m.id, m.content, m.type, m.session_id, m.occurred_at, m.superseded_by
     FROM memory_entity me JOIN memories m ON m.id = me.memory_id
     WHERE me.entity_id = ? AND m.deleted_at IS NULL
     ORDER BY m.occurred_at DESC, m.created_at DESC LIMIT ?
-  `).all(ent.id, Math.min(limit, 30)) as Array<{ id: string; content: string; type: string; session_id: string | null; occurred_at: string | null; superseded_by: string | null }>;
+  `);
+  const rows: TopicRow[] = ent ? (qEnt.all(ent.id, cap) as TopicRow[]) : [];
 
   const seenIds = new Set<string>(rows.map((r) => r.id));
+
+  // 大小写兄弟实体：追加，不抢占主实体的名额
+  for (const sid of siblingIds) {
+    if (rows.length >= hardCap) break;
+    for (const r of qEnt.all(sid, hardCap - rows.length) as TopicRow[]) {
+      if (seenIds.has(r.id)) continue;
+      seenIds.add(r.id);
+      rows.push(r);
+      if (rows.length >= hardCap) break;
+    }
+  }
+  const qNext = db.prepare("SELECT superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL");
+  const qOne = db.prepare(`${TOPIC_ROW_SQL} WHERE id = ? AND deleted_at IS NULL`);
+
+  /** 被延续掉的条目换成它的**真链头**（现状）；链头已在结果里就跳过 */
+  const headOf = (r: TopicRow): TopicRow | undefined => {
+    if (!r.superseded_by) return r;
+    const head = walkToHead(db, r.id, qNext);
+    if (seenIds.has(head)) return undefined;
+    const hm = qOne.get(head) as TopicRow | undefined;
+    if (hm) seenIds.add(head);
+    return hm;
+  };
+
+  /**
+   * 链头补入也吃同一个 `hardCap`（cap 的 1.5 倍）。
+   *
+   * "链头保障在场"原先没有条数上限（旧实现也没有），于是一条挂了 216 条记忆的实体
+   * 在 limit 30 下会返回 54 条，其中 24 条是补进来的链头。这些条目确实该在，
+   * 但**一次工具调用的返回体积不能是调用方 limit 的两倍** —— 多出来的每一条都在挤
+   * 上下文预算，而调用方以为自己只要了 30 条。
+   *
+   * 被挤掉的那些不是丢了：它们仍在链里，`get_memory` 能看到完整故事线。
+   */
   for (const r of [...rows]) {
-    if (!r.superseded_by) continue;
-    const head = chainHead(db, r.id);
-    if (!seenIds.has(head)) {
-      const hm = db.prepare("SELECT id, content, type, session_id, occurred_at, superseded_by FROM memories WHERE id = ? AND deleted_at IS NULL").get(head) as typeof rows[number] | undefined;
-      if (hm) { rows.push(hm); seenIds.add(head); }
+    if (rows.length >= hardCap) break;
+    const h = headOf(r);
+    // headOf 已经保证「链头不在 seenIds 里」才返回它，这里不需要再比对引用
+    if (h) rows.push(h);
+  }
+
+  // ── 第二道：正文提到（弱证据）──
+  // 用实体名本身（不用别名：别名常是泛词，会带进一堆无关条目）。
+  // 已经出现在锚定结果里的排除，避免同一条既算"聊过"又算"提到"。
+  //
+  // ⚠️ **性能：这里绝不能无条件 `content LIKE '%x%'`。**
+  // 实测真实库（178MB / 605 条）上，一条 `LIKE ... ORDER BY occurred_at DESC, created_at DESC`
+  // 要 225ms —— 双列排序用不上任何索引，等于全表扫 + 全表排序。相差两个数量级的是
+  // **索引**，不是"多查了一路"：
+  //   · ≥3 个字符 → 走 `memories_fts` 的 trigram 索引（MATCH 短语查询），毫秒级；
+  //   · <3 个字符 → trigram 生不出 gram（它就是这么设计的），只能 LIKE，
+  //     但改成**单列排序**，让 `idx_memories_occurred` 的反向扫描能吃上，凑够就停。
+  // 2 字词那条在超大库上仍会慢，所以额外用 `MENTION_SCAN_CAP` 兜住最坏情况。
+  const mentionRows: TopicRow[] = [];
+  if (name) {
+    const chars = Array.from(name).length;
+    const want = Math.min(cap, 10);
+    let pool: TopicRow[] = [];
+    if (chars >= 3) {
+      // FTS5 短语：整串当字面量，内部的双引号要成对转义
+      const phrase = `"${name.replace(/"/g, '""')}"`;
+      pool = db.prepare(`
+        SELECT m.id, m.content, m.type, m.session_id, m.occurred_at, m.superseded_by
+        FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
+        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+        ORDER BY m.occurred_at DESC LIMIT ?
+      `).all(phrase, MENTION_SCAN_CAP) as TopicRow[];
+    } else {
+      pool = db.prepare(`
+        ${TOPIC_ROW_SQL}
+        WHERE deleted_at IS NULL AND content LIKE ? ESCAPE '\\'
+        ORDER BY occurred_at DESC LIMIT ?
+      `).all(`%${likeEsc(name)}%`, MENTION_SCAN_CAP) as TopicRow[];
+    }
+    for (const r of pool) {
+      if (seenIds.has(r.id)) continue;
+      const h = headOf(r);
+      if (h) { mentionRows.push(h); seenIds.add(h.id); }
+      if (mentionRows.length >= want) break;
     }
   }
 
-  onRecalled(db, rows.map((r) => r.id));
-  const bySession = new Map<string, Array<{ id: string; content: string; type: string; occurred: string | null; supersededBy: string | null }>>();
-  for (const r of rows) {
-    const key = r.session_id ?? `#${r.id}`;
-    if (!bySession.has(key)) bySession.set(key, []);
-    bySession.get(key)!.push({ id: r.id, content: maskSecrets(r.content), type: r.type, occurred: r.occurred_at, supersededBy: r.superseded_by ?? null });
+  // 两批都为空才算真的没有；以前这里 `!ent` 就 return 空，
+  // 于是"实体没建、但正文提过"和"库里真没有"在调用方眼里一模一样。
+  if (!rows.length && !mentionRows.length) {
+    return { entity: ent?.name ?? name, aliases, total: 0, sessions: [] };
   }
-  const sessions = [...bySession.entries()].map(([sessionId, memories]) => ({
-    sessionId,
-    occurred: memories[0]?.occurred ?? null,
-    memories: memories.map(({ id, content, type, supersededBy }) => ({ id, content, type, supersededBy })),
-  }));
+
+  // **只记锚定结果**：召回记账（命中计数 + 共现强化）的含义是"这条被用上了"。
+  // 弱证据那批还没经过调用方确认，把它们记进去等于用"顺口提了一句"去强化边 ——
+  // 既污染 hit_count，也会让共现强化把无关条目越推越近。而且它省掉一半写库开销。
+  onRecalled(db, rows.map((r) => r.id));
+
+  const group = (list: TopicRow[]) => {
+    const bySession = new Map<string, Array<{ id: string; content: string; type: string; occurred: string | null; supersededBy: string | null }>>();
+    for (const r of list) {
+      const key = r.session_id ?? `#${r.id}`;
+      if (!bySession.has(key)) bySession.set(key, []);
+      bySession.get(key)!.push({ id: r.id, content: maskSecrets(r.content), type: r.type, occurred: r.occurred_at, supersededBy: r.superseded_by ?? null });
+    }
+    return [...bySession.entries()].map(([sessionId, memories]) => ({
+      sessionId,
+      occurred: memories[0]?.occurred ?? null,
+      memories: memories.map(({ id, content, type, supersededBy }) => ({ id, content, type, supersededBy })),
+    }));
+  };
+
+  const sessions = group(rows);
+  const mentions = group(mentionRows);
+
   // 载荷提货单（只给引用与描述、**不给字节**；无载荷的记忆不出现 payloads 键）
-  const flat: Array<{ id: string; payloads?: unknown }> = sessions.flatMap((s) => s.memories);
+  const flat: Array<{ id: string; payloads?: unknown }> = [...sessions, ...mentions].flatMap((s) => s.memories);
   attachPayloads(db, flat);
-  return { entity: ent.name, aliases, total: rows.length, sessions };
+
+  const out: Record<string, unknown> = { entity: ent?.name ?? name, aliases, total: rows.length, sessions };
+  if (siblingIds.length) {
+    // 拆簇是写入侧的问题，但读的人有权知道"还有几个同名的簇被合并进来了"
+    out.mergedEntities = siblingIds.length;
+  }
+  if (mentions.length) {
+    /**
+     * 这段说明必须给到 AI：`mentions` 里的条目**没有**实体关联，只是正文出现过这个词。
+     * 不说清，它会把"顺口提了一句"当成"专门聊过"，然后用肯定语气讲述。
+     * 顺带把数据卫生的问题点出来 —— 缺实体的记忆对话题召回是长期损失，值得提醒补。
+     */
+    out.mentions = mentions;
+    out.mentionsNote =
+      `另有 ${mentionRows.length} 条**只在正文里提到过「${ent?.name ?? name}」、并没有建立实体关联**（已与上面的结果去重）。` +
+      `这批是弱证据：提到不等于在讲这件事，引用前先看内容对不对题。` +
+      `若其中确有该挂到该实体下的条目，说明写入时漏了实体标注 —— 用 get_memory 看清内容后再决定要不要以它为准。`;
+  }
+  return out;
 }
 
 /** 时间线回溯：「去年三月都聊了什么」（occurred_at 本地格式，字符串比较） */
@@ -125,8 +308,23 @@ export function getMemory(db: Database, id: string) {
     sessionId: m.session_id, sourceRef: m.source_ref,
     device: m.device_name ?? null, supersededBy: m.superseded_by ?? null,
     links: links.map((l) => ({ id: l.other_id, relation: l.relation, weight: Math.round(l.weight * 100) / 100, preview: maskSecrets(cut(l.content)) })),
-    chain: resolveChain(db, id).filter((l) => l.id !== id).map((l) => ({ ...l, content: maskSecrets(l.content) })),
   };
+  /**
+   * 延续链：**整条都返回**（含旁支）。
+   *
+   * 原先 10 条封顶同时造成两个问题：主线被截断（实测库里有 15 层的链），
+   * 以及 BFS 排在后面的旁支永远进不来 —— 一条 15 层的主线就把 9 个名额吃满，
+   * 所以「9 个链头有 2–3 条直接前驱，却一条都没显示」。
+   *
+   * 只有异常长链才裁（>50），且必须**说出来**：不声明的截断比截断更糟，
+   * 调用方会把"看到的最早那条"当成"这条记忆的起点"。
+   */
+  const chainRes = resolveChain(db, id);
+  out.chain = chainRes.links.filter((l) => l.id !== id).map((l) => ({ ...l, content: maskSecrets(l.content) }));
+  if (chainRes.truncated) {
+    out.chainTotal = chainRes.total;
+    out.chainNote = `这条延续链共 ${chainRes.total} 条（含链头），上面只列了最近 ${chainRes.links.length} 条`;
+  }
   // 载荷提货单（提货单不含字节；取本体走 get_asset）。无载荷时**不写这个键**。
   const ps = loadPayloadsFor(db, [id]).get(id);
   if (ps?.length) out.payloads = ps;
