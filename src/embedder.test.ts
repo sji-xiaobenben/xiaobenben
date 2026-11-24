@@ -14,7 +14,18 @@
  * 验「会不会等」和「等多久就放手」这两个判断。
  */
 import { describe, expect, test } from "bun:test";
-import { embedder } from "./embedder";
+import { Embedder } from "./embedder";
+
+/**
+ * **必须是新实例，不能用全局单例。**
+ *
+ * 全局 `embedder` 的状态会被同进程里别的测试文件改：谁跑过一次真实 `warmupEmbedder()`，
+ * 它的 `load()` 完成时就会把 `status` 改回 `ready`、把 `session` 填上。而我们这里
+ * 假装"还在加载"——真实加载一完成就把现场冲掉，`embed()` 于是真的算出向量并返回。
+ * 那**是产品的正确行为**（等到了就该给结果），但会让这条测试红。Windows CI 上
+ * ORT 首启解压约 1 秒，正好落在 800ms 的等待窗里，所以那边稳定复现。
+ */
+const embedder = new Embedder();
 
 type Probe = { status: string; loading: Promise<boolean> | null };
 const probe = embedder as unknown as Probe;

@@ -368,7 +368,14 @@ function wordpiece(word: string, vocab: Vocab, unk: number): number[] {
 
 type OrtModule = typeof import("onnxruntime-node");
 
-class Embedder {
+/**
+ * 导出类本身只为测试：`embedder.test.ts` 用 `new Embedder()` 摆一个**与全局单例无关**的
+ * 现场。用全局那个会让测试跟着别的文件跑过的真实加载走：真实 `load()` 完成时会把
+ * `status` 改回 `ready` 并填上 `session`，于是"假装还在加载"的现场被冲掉 ——
+ * 那时 `embed()` 真的算出向量，而这**是正确行为**，测试却判它失败。
+ * Windows CI 上这条因此稳定变红（ORT 首启解压约 1 秒，刚好落在 800ms 等待窗内）。
+ */
+export class Embedder {
   private session: import("onnxruntime-node").InferenceSession | null = null;
   private ort: OrtModule | null = null;
   private vocab: Vocab | null = null;
