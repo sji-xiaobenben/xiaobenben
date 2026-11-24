@@ -199,8 +199,9 @@ try {
     q2Body,
   );
 
-  // 语义通道入参分工（2026-10-19）：query 喂向量路（自然语言），terms 只喂词法三路。
-  // ⚠️ 这条**只守契约，不证明「原句比词群准」**：小库向量会把候选全召回，名次差不显现
+  // 语义通道入参分工（2026-10-19 定，2026-11-25 改）：query 喂向量路（自然语言），
+  // 同时从中派生专有词参与词法三路；terms 仍是词法的主力。
+  // ⚠️ 下面这条**只守契约，不证明「原句比词群准」**：小库向量会把候选全召回，名次差不显现
   //    （反向验证过：把实现改回 terms.join(" ") 这条仍 PASS ⇒ 行为断言无判别力，故不写成"效果证明"）。
   //    效果证据在真机 151 条库：词群偷懒场景原句 6/6 名次更前（22→2 / 24→1 / 17→4）。
   const rawTools = (((await request("tools/list")) as never as {
@@ -208,7 +209,7 @@ try {
   }).result?.tools ?? []);
   const smTool = rawTools.find((t) => t.name === "search_memory");
   check(
-    "search_memory 暴露 query 入参（向量路吃原句，terms 只喂词法）",
+    "search_memory 暴露 query 入参（向量路吃原句，词法也吃原句派生词）",
     !!smTool?.inputSchema?.properties?.query && (smTool?.description ?? "").includes("vector"),
     smTool?.inputSchema,
   );
@@ -229,9 +230,19 @@ try {
       await Bun.sleep(300);
     }
     const rankQ = hitsQ.findIndex((h) => h.content.includes("水库钓鱼")) + 1;
+    /**
+     * 断言从「纯向量命中（matchedTerms 只有 vector）」改成「归因是 `~query`」。
+     *
+     * 判据必须跟着契约变：query 现在也参与词法三路（见 queryTermsOf），所以一条
+     * 与 query 字面重合的记忆**必然**先被词法打中，再也不可能出现「只有 vector」。
+     * 继续要求 vector 等于钉住一个已经不存在的场景。
+     *
+     * 新断言反而更硬：`~query` 只在「靠原句派生的词命中、词群一个都没中」时出现，
+     * 也就是端到端证明了「专有名词只写在 query 里也能被词法捞到」—— 正是这次要修的失手。
+     */
     check(
-      "search_memory 带 query 可用（语义通道通了，纯向量命中）",
-      rankQ > 0 && (hitsQ[rankQ - 1]?.matchedTerms ?? []).join() === "vector",
+      "search_memory 带 query 可用（原句里的词也走词法，归因为 ~query）",
+      rankQ > 0 && (hitsQ[rankQ - 1]?.matchedTerms ?? []).includes("~query"),
       hitsQ,
     );
   } else {

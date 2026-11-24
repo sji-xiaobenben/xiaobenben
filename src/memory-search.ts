@@ -143,6 +143,15 @@ export function resolveChain(db: Database, id: string, limit = 50): ChainResolut
 }
 
 export interface SearchParams {
+  /**
+   * 本轮的自然语言原句（向量通道吃它）。
+   *
+   * 它也参与词法三路，但不是原样塞进去：从里面派生专有词（见 `queryTermsOf`）。
+   * 起因是一个真实失手——`query="MARSHAL 操盘司令 项目 技术栈"` 配
+   * `terms=[币圈,行情,信号,项目位置,技术栈]` 时目标条目进不了前 5，把 `MARSHAL` 挪进
+   * `terms` 立刻第 1 名。最独特的信号被放进了判别力最弱的通道，等于主动丢掉。
+   */
+  query?: string;
   /** AI 扩展后的词群（同义词/上位词/场景词/实体名），>=3 字走 FTS，1-2 字走倒排 */
   terms: string[];
   occurredFrom?: string;
@@ -179,6 +188,13 @@ export interface SearchHit {
 export interface SearchStats {
   /** 词群大小 */
   termsN: number;
+  /**
+   * 从原句派生的词数（打了 0.6 折参与词法三路）。
+   *
+   * 单独记一个数是为了事后能回答「这条查询的失手到底是派生没生效，还是派生生效了
+   * 但目标本来就排不上」—— 前者是切分规则的问题，后者是权重/数据的问题。
+   */
+  derivedN?: number;
   /** FTS trigram 通道命中条数 */
   ftsN: number;
   /** 倒排 `memory_terms` 通道命中条数（不含 n-gram 回退） */
@@ -376,11 +392,86 @@ export function linkedPreviewFor(
   return out;
 }
 
+/**
+ * 从原句里派生「值得让词法三路查一遍」的词。
+ *
+ * 为什么需要：query 原本只喂向量通道，词法三路（FTS / 倒排 / 实体）只吃 terms。
+ * 而向量通道判别力有限（BGE 各向异性 + int8 量化下，互不相关记忆的余弦相似度
+ * 实测 0.52~0.71），所以**最独特的信号（专有名词）被放进了最弱的通道**。
+ * 实测：`query="MARSHAL 操盘司令 项目 技术栈"` + `terms=[币圈,行情,信号,项目位置,技术栈]`
+ * 时目标条目完全不在前 5；把 `MARSHAL` 挪进 terms 立刻第 1 名。
+ *
+ * 刻意做**保守切分**，只按非词字符（空格、标点）切开：
+ *  - ASCII 词（≥2 字符）原样 + 小写各收一份 —— 库里存的可能是任一种写法；
+ *  - CJK 段 2~8 字整块收下（"操盘司令"、"技术栈"、"行情扫描"）。
+ *
+ * **不拆长 CJK 段**，这一点是刻意的：中文长句没有可靠切分方式，硬拆 2 字片
+ * 既噪音大又注定落空 —— FTS 通道只收 ≥3 字的词，倒排收的是写入时的扩展词，
+ * 不会存在「我上」「那个」这种碎片。于是纯叙述长句（无空格无标点的一整句）
+ * 派生为空，行为与改动前逐位一致；真正受益的正是「带空格/标点的问法」，
+ * 而那恰好是 AI 写 query 的常见形态。
+ *
+ * 上限 8 个：每个派生词都要多跑三条 SQL，长 query 不该把检索耗时拖成线性。
+ */
+const DERIVED_MAX = 8;
+const CJK_SEG_MAX = 8;
+
+function queryTermsOf(query: string | undefined, given: readonly string[]): string[] {
+  if (!query) return [];
+  const lowerGiven = new Set(given.map((t) => t.toLowerCase()));
+  const out: string[] = [];
+  const push = (v: string) => {
+    const lo = v.toLowerCase();
+    if (lowerGiven.has(lo) || out.includes(v)) return;
+    out.push(v);
+  };
+  // \p{L}/\p{N} 之外的一切都是分界：空格、中英文标点、emoji。
+  for (const raw of query.split(/[^\p{L}\p{N}_+#.\-]+/u)) {
+    const seg = raw.trim();
+    if (!seg) continue;
+    if (/^[\x21-\x7e]+$/.test(seg)) {
+      // ASCII 至少要 3 个字符。两字符的词（VS / TS / go / ts）几乎全是通用词，
+      // 派生它们只会把同类记忆一起抬上来、打乱同类内部的先后。真正的专有名词
+      // （MARSHAL / BGE / hono）都够长。
+      if (seg.length < 3) continue;
+      // 纯数字/日期/时间/端口不派生：这类东西在库里遍地都是，做锚点没有区分度
+      // （实测 `2026-11-09` 一类片段派生后把整批同日期记忆拉平）。要按时间找，
+      // 该走 recall_timeline 而不是让 FTS 去数日子。
+      if (/^[\d.:\-/]+$/.test(seg)) continue;
+      push(seg);
+      const lo = seg.toLowerCase();
+      if (lo !== seg) push(lo);
+    } else {
+      const n = [...seg].length;
+      if (n < 2 || n > CJK_SEG_MAX) continue;
+      push(seg);
+    }
+    if (out.length >= DERIVED_MAX) break;
+  }
+  return out.slice(0, DERIVED_MAX);
+}
+
+/**
+ * 派生词的权重折扣。
+ *
+ * terms 是 AI 明确指定的「检索落点」，原句里的词只是叙述用词 —— 同等稀有度下
+ * 前者更可信。0.6 这个数只表达「比词群弱、比拆词兜底(0.5)强」这一层秩序，
+ * 稀有度仍然全部交给 IDF，所以库变大变小都不用重新标定。
+ */
+const DERIVED_WEIGHT = 0.6;
+
 export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const t0 = performance.now();
   const limit = Math.min(params.limit ?? 5, 10);
   const budget = params.budget ?? 2000;
   const terms = params.terms.map((t) => t.trim()).filter(Boolean);
+  /**
+   * 三路查询的输入 = 词群 ∪ 原句派生词。**词群排在前面**：`derivedSet` 只装
+   * 「不是词群给的」那些，于是重名词（AI 两边都写了）按原权重计，不会被打折。
+   */
+  const derived = queryTermsOf(params.query, terms);
+  const derivedSet = new Set(derived);
+  const allTerms = derived.length ? [...terms, ...derived] : terms;
 
   // ── 路径 A：FTS trigram（>=3 字的词）──
   // 一次 JOIN 取回 UUID：FTS 的 rowid 与 memories 的 TEXT 主键是两套编号，必须换一次。
@@ -391,7 +482,7 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     `SELECT m.id AS id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
       WHERE memories_fts MATCH ? LIMIT 200`,
   );
-  for (const t of terms) {
+  for (const t of allTerms) {
     if ([...t].length < 3) continue;
     try {
       const rows = qFts.all(`"${t.replace(/"/g, '""')}"`) as Array<{ id: string }>;
@@ -409,7 +500,7 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   // ── 路径 B：memory_terms 倒排（全部词，含 1-2 字短词；高频词截断）──
   const termScores = new Map<string, { terms: Set<string> }>();
   const qTerm = db.prepare("SELECT memory_id AS id FROM memory_terms WHERE term = ? LIMIT 500");
-  for (const t of terms) {
+  for (const t of allTerms) {
     const rows = qTerm.all(t) as Array<{ id: string }>;
     for (const row of rows) {
       let e = termScores.get(row.id);
@@ -422,15 +513,15 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   }
 
   // ── 路径 C：实体精确命中（别名 LIKE 反向扫，语料小可接受）──
-  const placeholders = terms.map(() => "?").join(",");
+  const placeholders = allTerms.map(() => "?").join(",");
   const entityScores = new Map<string, Set<string>>();
-  if (terms.length) {
+  if (allTerms.length) {
     const rows = db.prepare(`
       SELECT me.memory_id AS id, e.name AS name
       FROM entities e
       LEFT JOIN memory_entity me ON me.entity_id = e.id
-      WHERE e.name IN (${placeholders}) OR (e.aliases IS NOT NULL AND ${terms.map(() => "e.aliases LIKE ?").join(" OR ")})
-    `).all(...terms, ...terms.map((t) => `%${t}%`)) as Array<{ id: string | null; name: string }>;
+      WHERE e.name IN (${placeholders}) OR (e.aliases IS NOT NULL AND ${allTerms.map(() => "e.aliases LIKE ?").join(" OR ")})
+    `).all(...allTerms, ...allTerms.map((t) => `%${t}%`)) as Array<{ id: string | null; name: string }>;
     for (const row of rows) {
       if (row.id == null) continue;
       if (!entityScores.has(row.id)) entityScores.set(row.id, new Set());
@@ -474,7 +565,7 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
   const total = (db.prepare("SELECT COUNT(*) AS c FROM memories WHERE deleted_at IS NULL AND status != 'forgotten'").get() as { c: number }).c || 1;
   // df 必须把回退用的 gram 一并算进来：gram 若查不到 df 就会落到 `?? 1`（=最稀有的词），
   // 半权之后仍可能压过真正的词群命中 —— 兜底路径不该赢过正路。
-  const dfTerms = ngGrams.length ? [...new Set([...terms, ...ngGrams])] : terms;
+  const dfTerms = ngGrams.length ? [...new Set([...allTerms, ...ngGrams])] : allTerms;
   const dfPh = dfTerms.map(() => "?").join(",");
   const dfRows = dfTerms.length
     ? db.prepare("SELECT term, COUNT(*) AS c FROM memory_terms WHERE term IN (" + dfPh + ") GROUP BY term").all(...dfTerms) as Array<{ term: string; c: number }>
@@ -523,30 +614,36 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
 
   const candidates = new Set<string>([...ftsScores.keys(), ...termScores.keys(), ...entityScores.keys()]);
   const scored: { id: string; score: number; matched: Set<string> }[] = [];
+  /**
+   * 原句派生词的折扣。`matchedTerms` 只报词群命中的那些 ——
+   * 它是给 AI 看的「我给的词里哪些对上了」，把原句里切出来的词片混进去，
+   * 既让回包变长，又会让它误以为是自己那组词生效的。
+   */
+  const wOf = (t: string) => (derivedSet.has(t) ? DERIVED_WEIGHT : 1);
   for (const id of candidates) {
     let score = 0;
     const matched = new Set<string>();
     const fts = ftsScores.get(id);
     if (fts) for (const t of fts.terms) {
       // 权重只表达**信号可靠度**，稀有度一律交给 df：FTS 是精确短语，2.0。
-      score += 2.0 * idfOf(df.get(t) ?? 1);
-      matched.add(t);
+      score += 2.0 * wOf(t) * idfOf(df.get(t) ?? 1);
+      if (!derivedSet.has(t)) matched.add(t);
     }
     const ts = termScores.get(id);
     if (ts) for (const t of ts.terms) {
       if (!matched.has(t)) {
         // 倒排是 term 精确等值，1.0；n-gram 拆出来的只是字面巧合，再打半折。
         const ng = t.startsWith("~");
-        score += (ng ? 0.5 : 1.0) * idfOf(df.get(ng ? t.slice(1) : t) ?? 1);
-        matched.add(t);
+        score += (ng ? 0.5 : 1.0) * wOf(t) * idfOf(df.get(ng ? t.slice(1) : t) ?? 1);
+        if (ng || !derivedSet.has(t)) matched.add(t);
       }
     }
     // 实体名精确等值比 trigram 更严格（结构化锚点而非字面共现），取其与 FTS 同档 2.0，
     // 但同样按该实体自己的 df 降权 —— 命中一个挂了 191 条的实体不该跟命中孤例一个分量。
     const es = entityScores.get(id);
     if (es) for (const n of es) {
-      score += 2.0 * idfOf(entityDf.get(n) ?? 1);
-      matched.add(n);
+      score += 2.0 * wOf(n) * idfOf(entityDf.get(n) ?? 1);
+      if (!derivedSet.has(n)) matched.add(n);
     }
     if (score > 0) scored.push({ id, score, matched });
   }
@@ -610,7 +707,12 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
       sessionId: m.session_id ?? null,
       sourceRef: m.source_ref,
       score: Math.round(s.score * 100) / 100,
-      matchedTerms: [...s.matched],
+      /**
+       * 只靠原句派生的词命中时 `matched` 是空的。空数组等于对 AI 说「不知道为什么
+       * 打中了这条」—— 它只能当噪声忽略，白白浪费一次召回。用 `~query` 说明来源：
+       * `~` 是「不是词群原样命中」的既有前缀惯例（n-gram 拆词用的是 `~gram`）。
+       */
+      matchedTerms: s.matched.size ? [...s.matched] : ["~query"],
       onThisDevice: true,
     });
   }
@@ -622,10 +724,28 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
     const links = resolveChain(db, h.id).links;
     const others = links.filter((l) => !chainShown.has(l.id));
     for (const l of others) chainShown.add(l.id);
-    if (others.length) {
-      h.chain = others.map((l) => ({ id: l.id, content: maskSecrets(l.content), occurredAt: l.occurredAt, createdAt: l.createdAt, superseded: !l.current }));
-      tokensUsed += others.reduce((t, l) => t + estTokens(l.content), 0);
+    if (!others.length) continue;
+    /**
+     * 附注**也要过预算闸**。
+     *
+     * 以前这里无条件 `tokensUsed += …`，于是 tokensUsed 只是「大概」——实测 60 次检索
+     * 有 14 次超过 2000，最坏 3734（比承诺多 87%）。而预算是对上层的**硬承诺**：
+     * 调用方按它分配上下文，超出去的部分要么被客户端截掉，要么挤掉别的东西。
+     *
+     * 裁的是附注的条数，不是命中本身 —— 命中的取舍在上面的主循环里已经做完，
+     * 这里再动它会让「有没有搜到」被预算二次影响，那是更坏的行为。
+     */
+    const kept: typeof others = [];
+    let used = 0;
+    for (const l of others) {
+      const tk = estTokens(l.content);
+      if (tokensUsed + used + tk > budget) break;
+      kept.push(l);
+      used += tk;
     }
+    if (!kept.length) continue;
+    h.chain = kept.map((l) => ({ id: l.id, content: maskSecrets(l.content), occurredAt: l.occurredAt, createdAt: l.createdAt, superseded: !l.current }));
+    tokensUsed += used;
   }
 
   // ── 1-hop 链接扩展（折叠为单行预览，~25 token）──
@@ -671,6 +791,7 @@ export function searchMemory(db: Database, params: SearchParams): SearchResult {
       : undefined,
     stats: {
       termsN: terms.length,
+      derivedN: derived.length,
       ftsN: ftsScores.size,
       invN,
       entN: entityScores.size,

@@ -380,12 +380,12 @@ VISIBILITY (cloud org mode only): every memory is PRIVATE to its owner by defaul
   server.tool(
     "search_memory",
     `Search past memories. Call this ONCE BEFORE EVERY REPLY — not only when the user refers to previous conversations ("what did I say about..."), but also when they are merely agreeing, following up, or saying "continue": the point of a memory is to surface while you are about to speak, not after you have been pointed at the past. Never skip it by judging the message too short or too trivial to be worth a lookup — that judgement is exactly what kills associative recall.
-TWO INPUTS, TWO JOBS — pass BOTH: \`query\` is THIS TURN's content in natural language — the user's own sentence first (verbatim, it leads), then the gist of your own previous reply appended after it (it feeds the semantic/vector channel: a term list cannot carry meaning, and half a sentence cripples paraphrase recall); \`terms\` is your expanded term cluster of synonyms/hypernyms/scenario/domain words (it feeds the three lexical channels: >=3-char terms hit full-text, 1-2-char terms hit the landing-pad index, entity names hit exact match) — e.g. "做饭的锅" → query="我上次做饭用的那个锅是哪一款" + terms=[电饭锅,锅,煮饭,厨房,家电]. Never feed one into the other's slot. Returns hits with matchedTerms (explainability), relatedTags (guide your next query), linkedPreview neighbors, and chain (storyline: head = current truth, superseded = history). Iterate with different terms rather than fabricating; if a second term cluster still misses, switch TOOL instead of repeating this one (recall_timeline for time refs, recall_topic for named entities, recall_episodes for a specific incident, recall_constraints for rules, get_related from any near-hit) — at most 3 tools, then say plainly you don't have it. Responses are budget-capped.
+TWO INPUTS, TWO JOBS — pass BOTH: \`query\` is THIS TURN's content in natural language — the user's own sentence first (verbatim, it leads), then the gist of your own previous reply appended after it (it feeds the semantic/vector channel: a term list cannot carry meaning, and half a sentence cripples paraphrase recall); \`terms\` is your expanded term cluster of synonyms/hypernyms/scenario/domain words (the main driver of the three lexical channels: >=3-char terms hit full-text, 1-2-char terms hit the landing-pad index, entity names hit exact match — proper nouns and short CJK phrases that appear only inside \`query\` reach those same channels now, so you no longer have to duplicate them into \`terms\`) — e.g. "做饭的锅" → query="我上次做饭用的那个锅是哪一款" + terms=[电饭锅,锅,煮饭,厨房,家电]. Never feed one into the other's slot. Returns hits with matchedTerms (explainability), relatedTags (guide your next query), linkedPreview neighbors, and chain (storyline: head = current truth, superseded = history). Iterate with different terms rather than fabricating; if a second term cluster still misses, switch TOOL instead of repeating this one (recall_timeline for time refs, recall_topic for named entities, recall_episodes for a specific incident, recall_constraints for rules, get_related from any near-hit) — at most 3 tools, then say plainly you don't have it. Responses are budget-capped.
 USING WHAT YOU GET: use a hit when it actually helps this reply; when it does not, answer normally and stay silent about it. NEVER cite a memory just to show that you have one, and never pivot the conversation toward an irrelevant hit you happened to match.
 FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mime, bytes, description, ref, state} but NEVER the bytes themselves. To actually look at a file, call get_asset with that id (and only when you really need it: reading the description above is usually enough). state: ok = unchanged, changed = the file on disk differs from what was recorded, missing = moved/deleted.`,
     {
       query: z.string().optional().describe("This turn's content in natural language: the user's own sentence verbatim first, then the gist of your previous reply. Drives the vector/semantic channel (this is what makes paraphrase and synonym recall work)."),
-      terms: z.array(z.string()).min(1).describe("Expanded term cluster (2-8 terms) — drives the three lexical channels only"),
+      terms: z.array(z.string()).min(1).describe("Expanded term cluster (2-8 terms) — the main driver of the three lexical channels"),
       occurredFrom: z.string().optional().describe("YYYY-MM-DD time-window start"),
       occurredTo: z.string().optional(),
       limit: z.number().int().min(1).max(10).optional().describe("Default 5, max 10"),
@@ -404,8 +404,14 @@ FILES: a hit carrying a payloads[] array HAS attached files — it lists {id, mi
         }
         const { searchHybrid } = await import("./memory-search");
         const { embedder } = await import("./embedder");
-        // 向量路喂**原句**（与写入侧 embed(content) 同分布）；词法三路仍吃 terms。
-        // 这就是四路唯一的错配点：入参只有 terms 时，向量被迫编码一串关键词，语义通道退化成第四路词法。
+        // 向量路喂**原句**（与写入侧 embed(content) 同分布）；词法三路以 terms 为主，
+        // 同时从原句里派生专有词（MARSHAL / 操盘司令 这类）一并参与。
+        //
+        // 修复的失手：原先 query **只**喂向量，于是最独特的信号（专有名词）被放进了
+        // 判别力最弱的通道 —— query="MARSHAL 操盘司令 项目 技术栈" 配
+        // terms=[币圈,行情,信号,项目位置,技术栈] 时，内容里明明写着 MARSHAL 的目标条目
+        // 连前 5 都进不去；把 MARSHAL 挪进 terms 立刻第 1 名。
+        // 派生规则在 queryTermsOf 里（保守切分，长 CJK 段不拆），权重是词群的 0.6。
         const semantic = a.query?.trim() || a.terms.join(" ");
         const r = (await searchHybrid(db(), () => embedder.embed(semantic), a)) as {
           hits?: Array<{ id: string; payloads?: unknown }>;
