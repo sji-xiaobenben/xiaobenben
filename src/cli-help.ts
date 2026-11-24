@@ -68,6 +68,8 @@ export function helpText(cmd: string, sub?: string): string {
       return h.verify;
     case "stats":
       return h.stats;
+    case "doctor":
+      return h.doctor;
     case "lang":
       return h.lang;
     case "register-protocol":

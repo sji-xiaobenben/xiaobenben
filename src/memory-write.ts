@@ -27,7 +27,15 @@ import { admitAttachments, type AttachmentInput } from "./payloads";
 
 export interface MemoryItem {
   content: string;
-  type: "fact" | "preference" | "decision" | "event" | "procedure";
+  /**
+   * 记忆类型。**可选** —— 与 MCP 工具的 zod schema（`z.enum([...]).optional()`）保持一致。
+   *
+   * 写成必填是不诚实的：真正决定运行时行为的是 schema，不是这个 interface。
+   * 省略时按 `fact` 落库（见 `writeMemory` 里的 `DEFAULT_TYPE`），
+   * 那本来就是列定义 `type TEXT DEFAULT 'fact'` 的意图 —— 只是显式绑一个 undefined
+   * 会把 DEFAULT 覆盖成 NULL，于是整批记忆"没有类型"，按类型筛选全漏。
+   */
+  type?: "fact" | "preference" | "decision" | "event" | "procedure";
   tags?: string[];
   entities?: string[];
   /** 双端扩展着陆垫：同义词/上位词/场景词（AI 蒸馏时生成，5-15 个） */
@@ -181,6 +189,16 @@ export function processSecretMarkers(db: Database, text: string): { text: string
 
 // ── 主管线 ──
 
+/**
+ * 省略 type 时的落库值。
+ *
+ * 为什么需要显式兜底而不是靠列 DEFAULT：`INSERT` 语句里**逐列列出了 type**，
+ * 传 `undefined` 过去会被绑成 `NULL` —— 显式的 NULL 压过 `DEFAULT 'fact'`。
+ * 实测用户库里有 24 条这样来的"无类型"记忆（全部集中在 2026-10-05，写入 schema
+ * 放开 type 之后），它们按类型筛选时会被整体漏掉，且**不会报任何错**。
+ */
+const DEFAULT_TYPE = "fact" as const;
+
 export async function writeMemory(
   store: PersonalStore,
   item: MemoryItem,
@@ -249,7 +267,7 @@ export async function writeMemory(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
   `).run(
     id, ORG_PERSONAL, opts.spaceId ?? SPACE_PERSONAL, opts.actor ?? "user",
-    content, hash, item.type,
+    content, hash, item.type ?? DEFAULT_TYPE,
     JSON.stringify(secTags),
     secEntities.length ? JSON.stringify(secEntities) : null,
     item.occurredAt ?? null, item.occurredPrecision ?? null,
@@ -294,7 +312,7 @@ export async function writeMemory(
     actor: opts.actor ?? "user",
     type: "memory.deliver",
     payloadHash: await (await import("@xbb/core")).payloadHash({
-      id, kind, type: item.type, hasTerms: secTerms.length, links: item.links?.length ?? 0,
+      id, kind, type: item.type ?? DEFAULT_TYPE, hasTerms: secTerms.length, links: item.links?.length ?? 0,
       vaultedCount: vaulted.length, needsAck: item.needsAck === true,
       attachments: admitted.stored.map((a) => ({ sha256: a.sha256, bytes: a.bytes })),
     }),

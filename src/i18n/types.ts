@@ -113,6 +113,71 @@ export interface Dict {
     };
   };
 
+  /**
+   * 数据卫生体检（`xbb doctor`）。
+   *
+   * 这里的每一条都是**用户会读的屏幕文本**，所以全部双语。三段分开是因为
+   * 它们的处置方式完全不同：`fixable` 一行命令就能补，`missing` 补不了只能解释影响，
+   * 混在一起用户会以为「都能自动修」。
+   */
+  doctor: {
+    /** 头两行：库位置 / 大小与条数 */
+    title: (path: string) => string;
+    meta: (sizeMb: string, alive: string, all: string) => string;
+    secChannel: string;
+    secIntegrity: string;
+    secFixable: string;
+    secMissing: string;
+    secSplit: string;
+    secNext: string;
+    labels: {
+      inv: string;
+      ent: string;
+      vec: string;
+      fts: string;
+      orphan: string;
+      dangling: string;
+      cycles: string;
+      dupHash: string;
+      tagTerms: string;
+      entityTerms: string;
+      entityRows: string;
+      blankTerms: string;
+      type: string;
+      entities: string;
+      occurredAt: string;
+    };
+    /** 「缺 2 条」—— 覆盖不足时的尾注 */
+    gap: (n: string) => string;
+    /** 「8 条」 */
+    count: (n: string) => string;
+    /** 「7 组」 */
+    groups: (n: string) => string;
+    ftsOk: string;
+    ftsBroken: string;
+    /** 只读连接上没验成 —— 必须与「验过、没问题」分开 */
+    ftsUnchecked: string;
+    /** 三类缺失各自的影响面，一句话 */
+    whyType: string;
+    whyEntities: string;
+    whyOccurred: string;
+    splitLine: (n: string) => string;
+    nextFix: string;
+    nextDry: string;
+    /** 没有可修项、但仍有不完整（补不了的）—— 别拿"没发现问题"糊过去 */
+    nextManual: string;
+    /** 全部正常时的那一句 */
+    clean: string;
+    fixedTitle: string;
+    /** `--dry-run` 时盖在明细上方的一句 —— 与真的修过必须一眼可辨 */
+    dryRunNote: string;
+    /** 修复明细的每一行：标签 + 数量 */
+    fixedLine: (label: string, n: string) => string;
+    fixedNone: string;
+    /** `--fix` 但库不可写 */
+    readonlyHint: string;
+  };
+
   missingDb: {
     notFound: (path: string) => string;
     noAutoCreate: string;

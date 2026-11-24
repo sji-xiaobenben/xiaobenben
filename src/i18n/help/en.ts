@@ -51,6 +51,7 @@ Collection & upkeep
   xbb ingest [on|off|--status|--dry-run|--source=…]   collect raw session transcripts from AI clients
   xbb verify                  audit: hash-chain integrity of your local ledger
   xbb stats                   database size and recall numbers (read-only, starts nothing)
+  xbb doctor [--fix]          data hygiene check: are the retrieval parts all there (--fix rebuilds indexes only)
   xbb version                 version banner + build fingerprint
 
 Interface
@@ -303,6 +304,32 @@ re-running it does not duplicate anything.
   --limit=5000       per-source cap for a single run (for the first paged backfill)
 
 The episode layer is a local cold archive and is never uploaded.`,
+
+  doctor: `Usage: xbb doctor [--fix] [--dry-run] [--json] [--strict]
+
+Data hygiene check. "You can read this memory" and "search can find this memory" are two
+different things: search consumes parts — content feeds full-text, terms feed the inverted index,
+entities feed the entity channel, embeddings feed the semantic channel. Miss one and that channel
+goes completely blind to it, with no error from SQLite at all — you just feel that it remembered
+but you can't find it.
+
+Three sections, three different remedies:
+  Retrieval parts  coverage per channel (denominator = what search can actually see)
+  Structure        indexes out of step with the table, orphan rows, chain cycles, duplicate content
+  Fixable          terms and edges that can be copied verbatim from tags / the entity table
+
+  xbb doctor --fix            fill in "Fixable" and rebuild an out-of-sync full-text index
+  xbb doctor --fix --dry-run  report what would change, without touching the database
+  xbb doctor --json           machine-readable (English field names)
+  xbb doctor --strict         exit 1 when structure problems exist (for CI and cron)
+
+--fix only rebuilds indexes and clears orphan rows: it never changes content, type, or entity names.
+Missing types and missing entities stay under "Not fixable" — guessing a type from content is worse
+than leaving it blank: blank only means you can't filter by it, a wrong guess means filtering
+returns the wrong memories.
+
+Works on a read-only connection too (the full-text check is then skipped and reported as unverified
+rather than claimed as in sync).`,
 
   stats: `Usage: xbb stats
 

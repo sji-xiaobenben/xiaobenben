@@ -65,6 +65,7 @@ export interface HelpDict {
   autostart: string;
   ingest: string;
   stats: string;
+  doctor: string;
   lang: string;
   verify: string;
   registerProtocol: string;

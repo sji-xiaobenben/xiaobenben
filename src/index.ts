@@ -793,6 +793,168 @@ if (cmd === "serve") {
   }
   console.log();
   console.log(d.stats.adminHint("http://127.0.0.1:17630/ui"));
+} else if (cmd === "doctor") {
+  // 数据卫生体检。默认**只看不修**；`--fix` 才写库，且只重建索引、清孤儿行。
+  // 与 `stats` 同一套开库纪律：缺库时绝不在这里补一个空库。
+  const { runDoctor, repairDb, integrityProblems, hasFixableWork } = await import("./doctor");
+  const { defaultDbPath } = await import("./store");
+  const { existsSync, statSync } = await import("node:fs");
+  const { Database } = await import("bun:sqlite");
+  const d = dict();
+  const D = d.doctor;
+  const flags = new Set(args.slice(1).filter((a) => a.startsWith("-")));
+  const asJson = flags.has("--json");
+  const wantFix = flags.has("--fix");
+  const dryRun = flags.has("--dry-run");
+  const strict = flags.has("--strict");
+
+  const p = defaultDbPath();
+  if (!existsSync(p)) {
+    console.error(d.missingDb.notFound(p));
+    console.error(d.missingDb.noAutoCreate);
+    console.error(d.missingDb.howToFind);
+    process.exit(2);
+  }
+
+  // 体检要跑 FTS 的 `integrity-check`（FTS5 的一致性命令，本身不落数据），
+  // 而它是一条 INSERT 语句 —— 只读连接会被拒。所以先试读写打开，失败再退只读：
+  // 权限不足也得能体检，只是少验一项，并在报告里**明说「未校验」**。
+  let db: InstanceType<typeof Database>;
+  let writable = true;
+  try {
+    db = new Database(p);
+  } catch {
+    db = new Database(p, { readonly: true });
+    writable = false;
+  }
+
+  try {
+    let rep = runDoctor(db);
+    const L = D.labels;
+
+    // `--json` 是给脚本/CI 读的**稳定接口**：字段名一律英文，不跟界面语言变
+    if (asJson) console.log(JSON.stringify(rep, null, 2));
+    if (!asJson) {
+      const st = statSync(p);
+      // 列宽**现算**：中文标签 4 列、英文 8~14 列，同一套空格不可能同时对齐
+      const w = columnWidth([
+        L.inv, L.ent, L.vec, L.fts,
+        L.orphan, L.dangling, L.cycles, L.dupHash,
+        L.tagTerms, L.entityTerms, L.entityRows, L.blankTerms,
+        L.type, L.entities, L.occurredAt,
+      ]);
+      const row = (label: string, value: string, tail = "") =>
+        console.log(`  ${padTo(label, w)}  ${value}${tail ? `  ${tail}` : ""}`);
+      const sec = (title: string) => {
+        console.log();
+        console.log(title);
+      };
+      // 0 一律显示裸 0：中文「0 条」会让整段看起来在数东西，而这一行想说的是"没有"
+      const nz = (n: number, many = D.count) => (n === 0 ? "0" : many(formatNumber(n)));
+      const cov = (label: string, c: { have: number; total: number }) =>
+        row(
+          label,
+          `${formatNumber(c.have)}/${formatNumber(c.total)}`,
+          c.have < c.total ? D.gap(formatNumber(c.total - c.have)) : "",
+        );
+
+      console.log(D.title(p));
+      console.log(`  ${D.meta((st.size / 1048576).toFixed(1), formatNumber(rep.alive), formatNumber(rep.all))}`);
+
+      sec(D.secChannel);
+      cov(L.inv, rep.channels.inv);
+      cov(L.ent, rep.channels.ent);
+      cov(L.vec, rep.channels.vec);
+      row(
+        L.fts,
+        rep.integrity.ftsChecked ? (rep.integrity.ftsSynced ? D.ftsOk : D.ftsBroken) : D.ftsUnchecked,
+      );
+
+      sec(D.secIntegrity);
+      row(L.orphan, nz(rep.integrity.orphanTerms + rep.integrity.orphanEntities + rep.integrity.orphanLinks));
+      row(L.dangling, nz(rep.integrity.danglingHead));
+      row(L.cycles, nz(rep.integrity.cycles));
+      row(L.dupHash, nz(rep.integrity.dupHash, D.groups));
+
+      sec(D.secFixable);
+      row(L.tagTerms, nz(rep.fixable.tagTerms));
+      row(L.entityTerms, nz(rep.fixable.entityTerms));
+      row(L.entityRows, nz(rep.fixable.entityRows));
+      row(L.blankTerms, nz(rep.fixable.blankTerms));
+
+      sec(D.secMissing);
+      row(L.type, nz(rep.missing.type), D.whyType);
+      row(L.entities, nz(rep.missing.entities), D.whyEntities);
+      row(L.occurredAt, nz(rep.missing.occurredAt), D.whyOccurred);
+
+      if (rep.caseDupEntities > 0) {
+        sec(D.secSplit);
+        console.log(`  ${D.splitLine(D.groups(formatNumber(rep.caseDupEntities)))}`);
+      }
+
+      sec(D.secNext);
+      if (hasFixableWork(rep)) {
+        console.log(`  ${D.nextFix}`);
+        console.log(`  ${D.nextDry}`);
+      } else if (
+        integrityProblems(rep) === 0 &&
+        rep.channels.inv.have === rep.channels.inv.total &&
+        rep.channels.ent.have === rep.channels.ent.total &&
+        rep.channels.vec.have === rep.channels.vec.total
+      ) {
+        // 只有**三条通道都满、结构也没问题**才配说这句话。
+        // 早先只判 `!hasFixableWork`，于是在"缺 212 条实体"下面打出一句"没发现问题"——
+        // 那是一句谎话，比不打印更糟。
+        console.log(`  ✓ ${D.clean}`);
+      } else {
+        console.log(`  ${D.nextManual}`);
+      }
+    }
+
+    let final = rep;
+    if (wantFix) {
+      if (!asJson) {
+        console.log();
+      }
+      if (!writable) {
+        // 只读盘/权限不足：**别假装修过**
+        console.error(D.readonlyHint);
+        process.exitCode = 1;
+      } else if (!hasFixableWork(rep)) {
+        console.log(D.fixedNone);
+      } else if (dryRun) {
+        // 不打「已修复」标题：`--dry-run` 什么都没写，标题必须与事实一致
+        console.log(D.dryRunNote);
+        const preview: Array<[string, number]> = [
+          [L.tagTerms, rep.fixable.tagTerms],
+          [L.entityTerms, rep.fixable.entityTerms],
+          [L.entityRows, rep.fixable.entityRows],
+          [L.blankTerms, rep.fixable.blankTerms],
+          [L.orphan, rep.integrity.orphanTerms + rep.integrity.orphanEntities + rep.integrity.orphanLinks],
+        ];
+        for (const [label, n] of preview) if (n > 0) console.log(`  ${D.fixedLine(label, formatNumber(n))}`);
+        if (rep.integrity.ftsChecked && !rep.integrity.ftsSynced) console.log(`  ${D.fixedLine(L.fts, "✓")}`);
+      } else {
+        const plan = repairDb(db, rep);
+        console.log(D.fixedTitle);
+        const done: Array<[string, number]> = [
+          [L.tagTerms, plan.tagTerms],
+          [L.entityTerms, plan.entityTerms],
+          [L.entityRows, plan.entityRows],
+          [L.blankTerms, plan.blankTerms],
+          [L.orphan, plan.orphans],
+        ];
+        for (const [label, n] of done) if (n > 0) console.log(`  ${D.fixedLine(label, formatNumber(n))}`);
+        if (plan.ftsRebuilt) console.log(`  ${D.fixedLine(L.fts, "✓")}`);
+        final = runDoctor(db);
+      }
+    }
+
+    // `--strict` 判的是**最终状态**：修过了就按修完的算，否则按体检结果算
+    if (strict && integrityProblems(final) > 0) process.exitCode = 1;
+  } finally {
+    db.close();
+  }
 } else if (cmd === "lang") {
   // 界面语言：查看 / 切换。**只写本机配置文件，不联网、不改库**。
   // 判定链见 i18n/index.ts —— XBB_LANG > config.json > 系统 locale > zh。
