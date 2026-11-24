@@ -190,6 +190,8 @@ describe("混合检索：向量侧的状态与来源", () => {
 });
 
 describe("封顶：表会长，但不会无界地长", () => {
+  // 这条要真灌 5100 行再裁剪，本地 ~1.6s，Windows runner 上实测 5.3s 撞默认 5s 上限。
+  // 不是卡死，是批量插入本来就慢 —— 给足超时，别让它靠运气过。
   test("超过上限后裁掉最旧的一批，最近的留着", () => {
     // 直接灌 5100 条：MAX_ROWS=5000 / KEEP_ROWS=4000 / TRIM_EVERY=64
     for (let i = 0; i < 5100; i++) recordSearchStats(db, st({ hitN: i % 3 }));
@@ -199,7 +201,7 @@ describe("封顶：表会长，但不会无界地长", () => {
     // 最早那批必须被删掉了 —— 否则「封顶」是假的
     const minId = (db.query("SELECT min(id) AS v FROM search_stats").get() as { v: number }).v;
     expect(minId).toBeGreaterThan(1000);
-  });
+  }, 30000);
 });
 
 describe("观测失败不能影响检索", () => {
