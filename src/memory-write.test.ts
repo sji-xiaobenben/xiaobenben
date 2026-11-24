@@ -119,3 +119,43 @@ describe("词项与实体：写入时就该齐", () => {
     void d.hasvec;
   });
 });
+
+describe("写入是原子的：要么整条进去，要么一条都不留", () => {
+  /**
+   * 一条记忆在库里是七处写入（正文/词项/实体/挂边/链接/链头/事件）。
+   * 原先各写各的自动提交，中途失败会留下"有正文、没词项"的半条记忆 ——
+   * 更糟的是**再写一次也修不好**：`content_hash` 去重会命中那条半成品，
+   * 直接返回 `deduped:true`，AI 以为成功了。用户库里那 16 条"倒排看不见"就是这么来的。
+   *
+   * 用一个只针对 memory_terms 的触发器把第 4 步弄失败，是最贴近真实的方式：
+   * 不是 mock，而是真的让第二条 INSERT 抛错。
+   */
+  test("词项写入失败 → 正文也不许留（不是半条）", async () => {
+    const d2 = mkdtempSync(join(tmpdir(), "xbb-atomic-"));
+    const s2 = PersonalStore.open(join(d2, "t.db"));
+    const db2 = s2.db;
+    try {
+      db2.exec("CREATE TRIGGER boom BEFORE INSERT ON memory_terms BEGIN SELECT RAISE(ABORT, 'boom'); END");
+      await expect(
+        writeMemory(s2, { content: "这条记忆的词项写入会失败", terms: ["检索"] }),
+      ).rejects.toThrow(/boom/);
+
+      // 反面：不包事务的实现这里是 1，而且 content_hash 已落库 ⇒ 重试永远拿到 deduped
+      expect((db2.query("SELECT COUNT(*) AS c FROM memories").get() as { c: number }).c).toBe(0);
+      expect((db2.query("SELECT COUNT(*) AS c FROM events").get() as { c: number }).c).toBe(0);
+
+      // 触发器拿掉后同一条内容能正常写入 —— 证明失败没有在别处留下"占位"
+      db2.exec("DROP TRIGGER boom");
+      const r = await writeMemory(s2, { content: "这条记忆的词项写入会失败", terms: ["检索"] });
+      expect(r.deduped).toBe(false);
+      expect((db2.query("SELECT COUNT(*) AS c FROM memory_terms WHERE memory_id = ?").get(r.id) as { c: number }).c).toBeGreaterThan(0);
+    } finally {
+      db2.close();
+      try {
+        rmSync(d2, { recursive: true, force: true });
+      } catch {
+        /* Windows 句柄延迟 */
+      }
+    }
+  });
+});

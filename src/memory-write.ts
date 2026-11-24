@@ -22,6 +22,8 @@ import { ORG_PERSONAL, SPACE_PERSONAL } from "./schema";
 import { uuidv7 } from "@xbb/core";
 import type { PersonalStore } from "./store";
 import { admitAttachments, type AttachmentInput } from "./payloads";
+import { withWriteTx } from "./db-write";
+import { walkToHead } from "./memory-search";
 
 // ── 类型（MemoryItem，id 引用改 string）──
 
@@ -257,56 +259,106 @@ export async function writeMemory(
     startsAt = w.startsAt; expiresAt = w.expiresAt;
   }
 
-  // 3. 插入（UUIDv7 应用层生成；org/space/actor/created_at 必填；FTS 由触发器自动同步）
+  // 3~8：七处写入放进同一个 `BEGIN IMMEDIATE` 事务。
+  //
+  // 一条记忆在库里其实是**七处**：正文、词项、实体、挂边、链接、链头、事件。原先各写各的
+  // （每条自动提交），中途任何一步失败都会留下"有正文、没词项"的半条记忆 —— 而且**再写一次
+  // 也修不好**：`content_hash` 去重会命中那条半成品，直接返回 `deduped:true`，AI 以为成功了。
+  // 用户库里那 16 条"倒排通道看不见"就是这么攒下来的：`xbb doctor` 查得出，但补不了
+  // （从正文猜词项是语义决策，机械补等于伪造）。
+  //
+  // 附件（3b）与事件（7）刻意**留在事务外**：两者都是 async（附件要算 sha256、事件要用
+  // WebCrypto 算哈希），而 SQLite 事务是同步的。把 await 塞进事务里，等待期间别的并发代码
+  // 会在同一条连接上执行语句、落进同一个事务，边界就乱了。
+  //
+  // 结果一律用**返回值**往外带：撞锁重试会重跑整个回调，前一次的写入已回滚，但闭包里的数组
+  // 不会自己清空 —— 往里 push 会让重试后的结果翻倍。
   const id = uuidv7();
-  db.prepare(`
-    INSERT INTO memories (id, org_id, space_id, actor, content, content_hash, type, tags, entities,
-                          occurred_at, occurred_precision, session_id, source_ref, source_chunk, device_id,
-                          kind, dscope, domain, starts_at, expires_at, status, needs_ack,
-                          created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-  `).run(
-    id, ORG_PERSONAL, opts.spaceId ?? SPACE_PERSONAL, opts.actor ?? "user",
-    content, hash, item.type ?? DEFAULT_TYPE,
-    JSON.stringify(secTags),
-    secEntities.length ? JSON.stringify(secEntities) : null,
-    item.occurredAt ?? null, item.occurredPrecision ?? null,
-    sessionId, item.sourceRef ?? null, item.sourceChunk ?? null,
-    (db.query("SELECT id FROM devices LIMIT 1").get() as { id: string }).id,
-    kind, item.dscope ?? null,
-    kind === "constraint" ? (item.domain?.trim() || null) : null,
-    startsAt, expiresAt,
-    item.needsAck ? 1 : 0,
-    now, now,
-  );
+  const committed = withWriteTx(db, () => {
+    // 3. 插入（UUIDv7 应用层生成；org/space/actor/created_at 必填；FTS 由触发器自动同步）
+    db.prepare(`
+      INSERT INTO memories (id, org_id, space_id, actor, content, content_hash, type, tags, entities,
+                            occurred_at, occurred_precision, session_id, source_ref, source_chunk, device_id,
+                            kind, dscope, domain, starts_at, expires_at, status, needs_ack,
+                            created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    `).run(
+      id, ORG_PERSONAL, opts.spaceId ?? SPACE_PERSONAL, opts.actor ?? "user",
+      content, hash, item.type ?? DEFAULT_TYPE,
+      JSON.stringify(secTags),
+      secEntities.length ? JSON.stringify(secEntities) : null,
+      item.occurredAt ?? null, item.occurredPrecision ?? null,
+      sessionId, item.sourceRef ?? null, item.sourceChunk ?? null,
+      (db.query("SELECT id FROM devices LIMIT 1").get() as { id: string }).id,
+      kind, item.dscope ?? null,
+      kind === "constraint" ? (item.domain?.trim() || null) : null,
+      startsAt, expiresAt,
+      item.needsAck ? 1 : 0,
+      now, now,
+    );
+
+    // 4. 扩展词入倒排索引（FTS 已由触发器处理，此处只做着陆垫）
+    const insTerm = db.prepare("INSERT OR IGNORE INTO memory_terms (term, memory_id, source) VALUES (?, ?, ?)");
+    for (const t of secTerms) insTerm.run(t.trim(), id, "expand");
+    for (const t of secTags) insTerm.run(t.trim(), id, "tag");
+    for (const t of secEntities) insTerm.run(t.trim(), id, "entity");
+
+    // 5. 实体锚点
+    const insEntity = db.prepare("INSERT OR IGNORE INTO entities (name) VALUES (?)");
+    const getEntity = db.prepare("SELECT id FROM entities WHERE name = ?");
+    const insME = db.prepare("INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?, ?)");
+    for (const name of secEntities) {
+      insEntity.run(name);
+      const eid = (getEntity.get(name) as { id: number }).id;
+      insME.run(id, eid);
+    }
+
+    // 6. 记忆网络链接
+    const insLink = db.prepare("INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)");
+    for (const l of item.links ?? []) insLink.run(id, l.toId, l.relation, nowIso);
+
+    // 8. 显式延续（supersede）：链形铁律"收拢合法、分叉封死"
+    const superseded: string[] = [];
+    const supersedeRejected: NonNullable<WriteResult["supersedeRejected"]> = [];
+    // 链头用 `walkToHead` 而不是重写一遍 10 跳循环：那套跳数上限一共出现过三处，
+    // 每处各写一份的结果就是"某处少改一处、链头算错一辈"，且不报错。
+    const qNext = db.prepare("SELECT superseded_by FROM memories WHERE id = ?");
+    for (const sid of item.supersedeIds ?? []) {
+      if (sid === id) { supersedeRejected.push({ id: sid, reason: "不能延续自己" }); continue; }
+      const row = db.prepare(
+        "SELECT id, superseded_by, system FROM memories WHERE id = ? AND deleted_at IS NULL",
+      ).get(sid) as { id: string; superseded_by: string | null; system: number } | undefined;
+      if (!row) { supersedeRejected.push({ id: sid, reason: "目标记忆不存在或已删除" }); continue; }
+      if (row.system === 1) { supersedeRejected.push({ id: sid, reason: "系统默认约束不可被延续" }); continue; }
+      if (row.superseded_by) {
+        const head = walkToHead(db, sid, qNext);
+        supersedeRejected.push({ id: sid, reason: `该记忆已被 ${head} 延续（新状态只能挂链头，保证现状唯一）`, currentHead: head });
+        continue;
+      }
+      /**
+       * `AND superseded_by IS NULL` 不是多余的保险，是**并发下的分叉闸**。
+       * 上面刚查过是空，但事务真正拿写锁之前，另一个进程可能已经把这条挂了链头。
+       * 不带条件就是无脑覆盖 ⇒ 一条旧状态被两条新状态同时指向，链就分叉了；
+       * 带条件则 `changes = 0`，如实告诉 AI「晚了，已经被别人接走」。
+       */
+      const ch = db.prepare("UPDATE memories SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL").run(id, sid);
+      if (ch.changes !== 1) {
+        supersedeRejected.push({ id: sid, reason: `该记忆刚被另一条记忆延续（并发写入）`, currentHead: walkToHead(db, sid, qNext) });
+        continue;
+      }
+      superseded.push(sid);
+    }
+    return { superseded, supersedeRejected };
+  });
+  const { superseded, supersedeRejected } = committed;
 
   // 3b. 载荷登记。**只登记引用，不搬字节**；sha256 内容寻址 ⇒ 同字节全库一份。
   // 永不抛：附件进不去，记忆照进（降级铁律）；失败项进 dropped 由回执告知宿主。
   const admitted = await admitAttachments(db, id, item.attachments, { actor: opts.actor });
 
-  // 4. 扩展词入倒排索引（FTS 已由触发器处理，此处只做着陆垫）
-  const insTerm = db.prepare("INSERT OR IGNORE INTO memory_terms (term, memory_id, source) VALUES (?, ?, ?)");
-  for (const t of secTerms) insTerm.run(t.trim(), id, "expand");
-  for (const t of secTags) insTerm.run(t.trim(), id, "tag");
-  for (const t of secEntities) insTerm.run(t.trim(), id, "entity");
-
-  // 5. 实体锚点
-  const insEntity = db.prepare("INSERT OR IGNORE INTO entities (name) VALUES (?)");
-  const getEntity = db.prepare("SELECT id FROM entities WHERE name = ?");
-  const insME = db.prepare("INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?, ?)");
-  for (const name of secEntities) {
-    insEntity.run(name);
-    const eid = (getEntity.get(name) as { id: number }).id;
-    insME.run(id, eid);
-  }
-
-  // 6. 记忆网络链接
-  const insLink = db.prepare("INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)");
-  for (const l of item.links ?? []) insLink.run(id, l.toId, l.relation, nowIso);
-
   // 7. 哈希链：写入落事件（payload 零明文凭据——只有 id/元数据计数）
   //    载荷只记**成功项**的 sha256/bytes：那是凭证（证明写入时确实带了这份字节）。
-  // dropped 项**不进事件** —— 无字节无 hash，不构成可验真的凭证；其处置见下文（交给宿主描述进 content）。
+  //    dropped 项**不进事件** —— 无字节无 hash，不构成可验真的凭证；其处置见下文（交给宿主描述进 content）。
   await store.appendEvent({
     orgId: ORG_PERSONAL,
     actor: opts.actor ?? "user",
@@ -318,30 +370,7 @@ export async function writeMemory(
     }),
   });
 
-  // 8. 显式延续（supersede）：链形铁律"收拢合法、分叉封死"
   const result: WriteResult = { id, deduped: false, now, nowLocal };
-  const superseded: string[] = [];
-  const supersedeRejected: NonNullable<WriteResult["supersedeRejected"]> = [];
-  for (const sid of item.supersedeIds ?? []) {
-    if (sid === id) { supersedeRejected.push({ id: sid, reason: "不能延续自己" }); continue; }
-    const row = db.prepare(
-      "SELECT id, superseded_by, system FROM memories WHERE id = ? AND deleted_at IS NULL",
-    ).get(sid) as { id: string; superseded_by: string | null; system: number } | undefined;
-    if (!row) { supersedeRejected.push({ id: sid, reason: "目标记忆不存在或已删除" }); continue; }
-    if (row.system === 1) { supersedeRejected.push({ id: sid, reason: "系统默认约束不可被延续" }); continue; }
-    if (row.superseded_by) {
-      let head = row.superseded_by, hops = 0;
-      while (hops++ < 10) {
-        const r2 = db.prepare("SELECT id, superseded_by FROM memories WHERE id = ?").get(head) as { id: string; superseded_by: string | null } | undefined;
-        if (!r2?.superseded_by) break;
-        head = r2.superseded_by;
-      }
-      supersedeRejected.push({ id: sid, reason: `该记忆已被 ${head} 延续（新状态只能挂链头，保证现状唯一）`, currentHead: head });
-      continue;
-    }
-    db.prepare("UPDATE memories SET superseded_by = ? WHERE id = ?").run(id, sid);
-    superseded.push(sid);
-  }
   if (superseded.length) {
     result.superseded = superseded;
     await store.appendEvent({

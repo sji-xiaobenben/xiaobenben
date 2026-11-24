@@ -430,22 +430,44 @@ export class PersonalStore {
   // ---------- 凭证层（events 哈希链） ----------
 
   async appendEvent(input: EventInput): Promise<EventRecord> {
-    const last = this.db
-      .query("SELECT org_seq, hash FROM events WHERE org_id = ? ORDER BY org_seq DESC LIMIT 1")
-      .get(input.orgId) as { org_seq: number; hash: string } | undefined;
-    const seq = last ? last.org_seq + 1 : 1;
-    const prevHash = last ? last.hash : GENESIS;
-    const ph = input.payloadHash;
-    const hash = await eventHash({ orgId: input.orgId, seq, prevHash, payloadHash: ph });
-    const id = uuidv7();
-    const at = new Date().toISOString();
-    this.db
-      .query(
-        `INSERT INTO events (id, org_id, org_seq, actor, type, payload_hash, prev_hash, hash, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, input.orgId, seq, input.actor, input.type, ph, prevHash, hash, at);
-    return { ...input, payloadHash: ph, seq, prevHash, hash, at, };
+    /**
+     * `org_seq` 是「读最大序号 + 1 再插入」，读和写之间没有锁 —— 两个进程同时追加时
+     * 会算出同一个 seq，一个成功、另一个撞 `events_org_seq_uq`。
+     *
+     * 不包事务（`eventHash` 是 async，用 WebCrypto 算哈希，塞不进同步事务），改成
+     * **乐观插入 + 冲突重算**：撞了说明水位被人推前了，重新读一遍再算即可。
+     * 这比"先拿写锁再算"少一次锁竞争 —— 追加事件本来就是高频、短小的操作。
+     *
+     * 重试次数给到 8：哈希链是串行追加，理论上每次只有一个赢家，8 次足够覆盖
+     * "多个进程恰好同时开始写入"的抖动量。真到用尽，宁可报错也不能静默丢事件。
+     */
+    const MAX_SEQ_ATTEMPTS = 8;
+    for (let attempt = 0; ; attempt++) {
+      const last = this.db
+        .query("SELECT org_seq, hash FROM events WHERE org_id = ? ORDER BY org_seq DESC LIMIT 1")
+        .get(input.orgId) as { org_seq: number; hash: string } | undefined;
+      const seq = last ? last.org_seq + 1 : 1;
+      const prevHash = last ? last.hash : GENESIS;
+      const ph = input.payloadHash;
+      const hash = await eventHash({ orgId: input.orgId, seq, prevHash, payloadHash: ph });
+      const id = uuidv7();
+      const at = new Date().toISOString();
+      try {
+        this.db
+          .query(
+            `INSERT INTO events (id, org_id, org_seq, actor, type, payload_hash, prev_hash, hash, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(id, input.orgId, seq, input.actor, input.type, ph, prevHash, hash, at);
+        return { ...input, payloadHash: ph, seq, prevHash, hash, at, };
+      } catch (e) {
+        // 只对 **org_seq 那一个** 唯一约束重试。events.id 也是主键（uuidv7 撞了就是真 bug），
+        // 把它一起吞掉重试，会变成"悄悄多写几个事件"。
+        const msg = e instanceof Error ? e.message : String(e);
+        const seqCollision = /UNIQUE constraint failed:[^\n]*events\.org_seq/i.test(msg);
+        if (!seqCollision || attempt >= MAX_SEQ_ATTEMPTS - 1) throw e;
+      }
+    }
   }
 
   async verifyChain(orgId: string): Promise<boolean> {

@@ -249,6 +249,17 @@ export const en: Dict = {
         "               npx -y xiaobenben stop    when you connected through npx and xbb is not on PATH",
         "            Start your AI clients again once the upgrade finishes. No data is lost; the upgrade is idempotent.",
       ].join("\n"),
+    writeBusy: (detail) =>
+      [
+        "This write did not reach the memory database: another xiaobenben process is holding the write lock and three retries were not enough.",
+        `  Underlying cause: ${detail}`,
+        "  Nothing was lost — the whole write was rolled back (writes are atomic, so no half-saved memory).",
+        "  Retrying once usually works. If it keeps happening, some process is stuck; close the AI client",
+        "  sessions that are using xiaobenben, or from a terminal:",
+        "    xbb stop                  when the desktop build is installed (xbb is on PATH)",
+        "    npx -y xiaobenben stop    when you connected through npx and xbb is not on PATH",
+        "  Then run the same step again.",
+      ].join("\n"),
   },
 
   cmd: {

@@ -31,6 +31,7 @@
  * 也不会碰正文、类型、实体名这些**语义内容**。
  */
 import type { Database } from "bun:sqlite";
+import { withWriteTx } from "./db-write";
 
 /**
  * 存活口径 —— 与 `memory-search.ts` 的 IDF 分母逐字一致。
@@ -428,7 +429,19 @@ export function repairDb(db: Database, report: DoctorReport): RepairPlan {
     ftsRebuilt: false,
   };
 
-  const tx = db.transaction(() => {
+  // `BEGIN IMMEDIATE`：修复要连做几轮扫描+插入，deferred 事务在第一条写之前已经读了一堆，
+  // 手里握着读快照；若期间别的进程提交过写，升级写锁会**立刻**失败（busy_timeout 不生效）。
+  withWriteTx(db, () => {
+    // 撞锁重试会重跑整个回调 → 计数必须先归零，否则第二次跑出来的数字是两次之和，
+    // 而实际写进库的只有第二次的量。前几项是赋值（天然覆盖），这三项是累加，必须显式清。
+    //
+    // ⚠️ 正常路径几乎走不到这里：`BEGIN IMMEDIATE` 拿不到锁时回调根本没执行，计数也不会动。
+    // 只有"锁已经拿到、回调内部某条语句又撞了 BUSY"才会重跑。留着是因为那已不是不可能
+    // （WAL checkpoint 与写锁会互相踩），而代价只是三行赋值。
+    plan.entityRows = 0;
+    plan.tagTerms = 0;
+    plan.entityTerms = 0;
+
     // 1. 空白词项：它们会进倒排表但永远匹配不上任何输入，纯污染
     plan.blankTerms = db.prepare("DELETE FROM memory_terms WHERE trim(term) = ''").run().changes;
 
@@ -476,6 +489,5 @@ export function repairDb(db: Database, report: DoctorReport): RepairPlan {
     }
   });
 
-  tx();
   return plan;
 }

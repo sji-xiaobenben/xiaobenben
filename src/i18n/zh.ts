@@ -236,6 +236,16 @@ export const zh: Dict = {
         "              npx -y xiaobenben stop    走 npx 接入、PATH 里没有 xbb 时用",
         "            升级完成后再启动 AI 客户端即可。库里的数据不会丢，升级是幂等的。",
       ].join("\n"),
+    writeBusy: (detail) =>
+      [
+        "这次没能写进记忆库：另一个小本本进程正占着写锁，等了三次也没排上。",
+        `  底层原因：${detail}`,
+        "  数据没丢，这次的内容整条都没写进去（写入是原子的，不会只存半条）。",
+        "  多数情况重试一次就好；反复出现说明有个进程卡住了，把正在用小本本的",
+        "  AI 客户端会话关掉再试，或直接在命令行执行：",
+        "    xbb stop                   装过桌面版（PATH 里有 xbb）时用",
+        "    npx -y xiaobenben stop     走 npx 接入、PATH 里没有 xbb 时用",
+      ].join("\n"),
   },
 
   cmd: {

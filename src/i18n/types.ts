@@ -263,6 +263,14 @@ export interface Dict {
     missing: (f: DbGateMissingFields) => string;
     corrupt: (file: string, detail: string) => string;
     busy: (detail: string) => string;
+    /**
+     * 一次普通写入撞锁、短退避重试也用尽。
+     *
+     * 与 `busy` 分开是必须的：`busy` 讲的是「结构升级等着大家停一下」，
+     * 用户看到它会去关所有客户端；这里只是一次写没排上队，重复那句会让用户
+     * 以为升级又失败了，去做一堆没必要的事。
+     */
+    writeBusy: (detail: string) => string;
   };
 
   /**

@@ -22,6 +22,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { PHRASE_MAX_TERMS, asOr, asPhrase, bigramTerms, bigramify } from "./bigram";
+import { withWriteTx } from "./db-write";
 
 /** 分块粒度（300-500 token；中文字符≈token，取 400 字符软上限，段落边界优先切断） */
 const CHUNK_SIZE = 400;
@@ -109,17 +110,25 @@ export function appendEpisode(db: Database, e: EpisodeInput): { id: number | nul
 
 /** 批量入档（单事务）。采集一次可能是上万条，逐条自动提交会慢一个数量级 */
 export function appendEpisodes(db: Database, rows: EpisodeInput[]): { inserted: number; skipped: number; ids: number[] } {
-  const ids: number[] = [];
-  let skipped = 0;
-  const tx = db.transaction((items: EpisodeInput[]) => {
-    for (const r of items) {
+  if (!rows.length) return { inserted: 0, skipped: 0, ids: [] };
+  /**
+   * 必须 `BEGIN IMMEDIATE`（见 db-write 的注释）：deferred 事务先拿读锁、
+   * 第一条 INSERT 时才升级写锁，若这期间采集子进程提交过写，升级会**立刻**失败，
+   * `busy_timeout` 根本不生效 —— 而采集正是"用户同时在用 AI 客户端"时跑的。
+   *
+   * 结果用返回值往外带，不往闭包里 push：撞锁重试会重跑整个回调，
+   * 闭包变量会重复累积（前一次的写入已回滚，但数组里的 id 不会自己消失）。
+   */
+  return withWriteTx(db, () => {
+    const ids: number[] = [];
+    let skipped = 0;
+    for (const r of rows) {
       const r1 = appendEpisode(db, r);
       if (r1.inserted && r1.id !== null) ids.push(r1.id);
       else skipped++;
     }
+    return { inserted: ids.length, skipped, ids };
   });
-  if (rows.length) tx(rows);
-  return { inserted: ids.length, skipped, ids };
 }
 
 /** 原话入档：append-only 行 + FTS 分块索引。返回 { ids, firstChunk } 供 write_memory 的 sourceChunk 指回 */
@@ -139,11 +148,12 @@ export function logEpisodes(
   /** 本库里近期出现过的话题（供 AI 复用，避免"附件描述/文件记忆描述/description"各写一套） */
   knownTopics: string[];
 } {
-  const ids: number[] = [];
-  let firstChunk: number | null = null;
-  let chunks = 0;
   const tp = topic?.trim() || null;
-  const tx = db.transaction(() => {
+  // 同样走 `BEGIN IMMEDIATE`；结果用返回值带出，重试不会重复累积（见 appendEpisodes）
+  const written = withWriteTx(db, () => {
+    const ids: number[] = [];
+    let firstChunk: number | null = null;
+    let chunks = 0;
     for (const e of entries) {
       // MCP 上报路径**不做内容去重**：用户可能真的连说两句"好"，一内容一哈希会误删。
       // 客户端采集走 external_id 去重（见 ingestDedupeKey），两条路径的语义因此不冲突。
@@ -152,8 +162,9 @@ export function logEpisodes(
       if (r.inserted && r.firstChunk !== null && firstChunk === null) firstChunk = r.firstChunk;
       if (r.inserted) chunks += r.chunks;
     }
+    return { ids, firstChunk, chunks };
   });
-  tx();
+  const { ids, firstChunk, chunks } = written;
 
   const sessionTurns = (db.prepare("SELECT count(*) c FROM episodes WHERE session_id = ?").get(sessionId) as { c: number }).c;
   const last = db.prepare("SELECT role, substr(content,1,60) s FROM episodes WHERE session_id = ? ORDER BY id DESC LIMIT 1").get(sessionId) as
